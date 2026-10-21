@@ -1,0 +1,31 @@
+[package]
+name = "willow-items-verify-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# The browser verifier's transaction and receipt proofs (web/verify):
+# `logset_blockproof`'s client side, compiled to wasm32 for a Web Worker. Apart
+# from the log verifier (query-wasm), so a transaction check loads no SP1
+# verifier and the log verifier's bytes do not change with it. Its own
+# workspace and lockfile.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+logset-blockproof = { path = "../blockproof" }
+wasm-bindgen = "=0.2.103"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+anyhow = "1"
+# k256 pulls getrandom 0.2 (through rand_core); on wasm32-unknown-unknown it needs the JS backend.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

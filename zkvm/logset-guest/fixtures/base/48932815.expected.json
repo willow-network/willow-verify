@@ -1,0 +1,22 @@
+{
+  "name": "base-48932815",
+  "chain_id": 8453,
+  "block": 48932815,
+  "receipts": 115,
+  "receipt_types": {
+    "0x00": 7,
+    "0x02": 107,
+    "0x7e": 1
+  },
+  "deposit_tails": [
+    [
+      48932818,
+      1
+    ]
+  ],
+  "receipts_root": "0xe4d359ee3d786cead168e809e945246cca6a5a5c9a7ac62c2edf171141882f72",
+  "start_parent_hash": "0xeebcbb85839d1c87c60b6f14de7d0547dbcec53b6dd64371b1bd669a0ad6c103",
+  "end_block_hash": "0xca210e851ceeb6381967294770337bfb7f52a20345bb4382c66d2d32de90b0e6",
+  "log_count": 378,
+  "log_set_root": "0xcdfd19041d98792192bb59e3dff1b3dd2a157c4ceff617a598301ccdc6174033"
+}

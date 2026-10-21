@@ -1,0 +1,27 @@
+# A block's transactions and receipts as nodes report them, rendered from their
+# consensus bytes, and Merkle proofs of them against the block hash: the log
+# store renders and proves with it, and the verifiers (CLI and browser) check
+# with it. Host and wasm32; its OWN workspace (like blockcheck), so nothing
+# here enters a guest ELF's dependency graph. No dev-dependencies, so a
+# workspace that depends on it by path can run its tests
+# (`cargo test -p logset-blockproof`).
+[workspace]
+resolver = "2"
+
+[package]
+name = "logset-blockproof"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+logset-blockcheck = { path = "../blockcheck" }
+alloy = { version = ">=1.1, <1.6", default-features = false, features = ["std", "consensus", "eips", "rlp", "k256"] }
+alloy-rlp = "0.3"
+alloy-primitives = "1"
+alloy-trie = "0.9"
+anyhow = "1"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

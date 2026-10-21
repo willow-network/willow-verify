@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<meta name="referrer" content="no-referrer">
+<title>Willow Proof Verifier</title>
+<meta name="description" content="Verify in your browser that logs, transactions and receipts from Willow's RPC are complete and correct, on all seven chains it serves.">
+<link rel="icon" href="__ICON__" type="image/svg+xml">
+<link rel="preload" href="__FONT_SANS__" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="__FONT_SERIF__" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="__STYLE__">
+<script type="module" src="__APP__"></script>
+</head>
+<body>
+<header class="site-head">
+  <div class="site-head-inner">
+    <div class="brand-row"><a class="brand" href="https://willow.tech" target="_blank" rel="noopener noreferrer" aria-label="Willow"><svg width="26" height="26" viewBox="0 0 100 100" fill="currentColor" fill-rule="evenodd" aria-hidden="true" focusable="false"><path d="M 0 38.27 C 0 28.12 4.032 18.386 11.209 11.209 C 18.386 4.032 28.12 0 38.27 0 L 100 0 L 100 61.73 C 100 71.88 95.968 81.614 88.791 88.791 C 81.614 95.968 71.88 100 61.73 100 L 0 100 Z M 32.75 32.75 L 67.25 32.75 L 67.25 67.25 L 32.75 67.25 Z"/></svg><svg class="wordmark" width="47.31" height="13" viewBox="0 0 181.948 50" aria-hidden="true" focusable="false"><path d="M 11.361 49.093 L 0 16.458 L 5.616 16.458 L 13.715 41.382 L 13.844 41.382 L 21.944 16.458 L 26.76 16.458 L 35.054 41.382 L 35.183 41.382 L 43.283 16.458 L 48.704 16.458 L 37.473 49.093 L 32.441 49.093 L 24.428 24.168 L 24.298 24.168 L 16.328 49.093 Z M 54.457 49.093 L 54.457 16.458 L 59.533 16.458 L 59.533 49.093 Z M 53.14 3.866 C 53.14 2.775 53.507 1.857 54.241 1.123 C 54.987 0.378 55.905 0 56.984 0 C 58.075 0 58.993 0.378 59.727 1.123 C 60.473 1.857 60.851 2.775 60.851 3.866 C 60.851 4.946 60.473 5.864 59.727 6.609 C 58.993 7.343 58.075 7.711 56.984 7.711 C 55.905 7.711 54.987 7.343 54.241 6.609 C 53.507 5.864 53.14 4.946 53.14 3.866 Z M 68.949 49.093 L 68.949 0 L 74.025 0 L 74.025 49.093 Z M 83.441 49.093 L 83.441 0 L 88.516 0 L 88.516 49.093 Z M 130.027 32.764 C 130.027 34.957 129.665 37.073 128.947 39.114 C 128.24 41.161 127.165 43.013 125.729 44.665 C 124.287 46.307 122.522 47.613 120.438 48.574 C 118.348 49.519 115.934 50 113.202 50 C 110.232 50 107.684 49.519 105.556 48.574 C 103.424 47.613 101.679 46.307 100.33 44.665 C 98.99 43.013 97.986 41.161 97.327 39.114 C 96.679 37.073 96.356 34.957 96.356 32.764 C 96.356 30.594 96.712 28.483 97.435 26.436 C 98.154 24.395 99.228 22.549 100.654 20.907 C 102.09 19.255 103.855 17.948 105.945 16.998 C 108.029 16.037 110.448 15.551 113.202 15.551 C 116.15 15.551 118.693 16.037 120.826 16.998 C 122.954 17.948 124.698 19.255 126.053 20.907 C 127.403 22.549 128.407 24.395 129.055 26.436 C 129.703 28.483 130.027 30.594 130.027 32.764 Z M 101.841 32.764 C 101.841 35.216 102.295 37.397 103.202 39.309 C 104.12 41.226 105.432 42.732 107.133 43.823 C 108.828 44.903 110.853 45.443 113.202 45.443 C 115.546 45.443 117.57 44.903 119.271 43.823 C 120.967 42.732 122.273 41.226 123.18 39.309 C 124.098 37.397 124.563 35.216 124.563 32.764 C 124.563 30.291 124.098 28.11 123.18 26.22 C 122.273 24.32 120.967 22.829 119.271 21.749 C 117.57 20.659 115.546 20.108 113.202 20.108 C 110.853 20.108 108.828 20.659 107.133 21.749 C 105.432 22.829 104.12 24.32 103.202 26.22 C 102.295 28.11 101.841 30.291 101.841 32.764 Z M 144.604 49.093 L 133.244 16.458 L 138.859 16.458 L 146.959 41.382 L 147.088 41.382 L 155.188 16.458 L 160.004 16.458 L 168.298 41.382 L 168.427 41.382 L 176.527 16.458 L 181.948 16.458 L 170.717 49.093 L 165.684 49.093 L 157.671 24.168 L 157.542 24.168 L 149.572 49.093 Z"/></svg></a></div>
+  </div>
+</header>
+<main>
+  <section id="linkIntro" class="link-intro" hidden></section>
+  <section id="receipt" class="receipt" hidden aria-live="polite"></section>
+
+  <header class="dev-head">
+    <h1>Proof <em>verifier</em></h1>
+    <p class="lede">Your browser verifies Willow's proofs itself, so it doesn't take the server's word for anything.</p>
+  </header>
+
+  <form id="form" class="card" novalidate>
+    <fieldset class="field kinds">
+      <legend class="sr-only">What to verify</legend>
+      <div class="segmented">
+        <label><input type="radio" name="kind" value="logs" checked> Logs</label>
+        <label><input type="radio" name="kind" value="receipt"> Transaction</label>
+        <label><input type="radio" name="kind" value="blockReceipts"> Block</label>
+      </div>
+    </fieldset>
+
+    <div class="field">
+      <label for="chain">Chain</label>
+      <select id="chain"></select>
+    </div>
+
+    <div class="field" id="logsField">
+      <div class="label-row">
+        <label for="filter">Filter</label>
+        <button type="button" id="example" class="link" title="Uniswap v4 swaps in 10 proven blocks">Use an example</button>
+      </div>
+      <textarea id="filter" rows="9" wrap="off" spellcheck="false" autocomplete="off"></textarea>
+    </div>
+
+    <div class="field" id="itemField" hidden>
+      <div class="label-row">
+        <label for="item" id="itemLabel">Transaction</label>
+        <button type="button" id="itemExample" class="link" title="A transaction from a recent block">Use an example</button>
+      </div>
+      <input id="item" type="text" autocomplete="off" spellcheck="false">
+    </div>
+
+    <div class="actions">
+      <button type="submit" id="run" class="primary">Verify</button>
+      <span id="formError" class="form-error" role="alert"></span>
+    </div>
+
+    <details class="advanced">
+      <summary>Advanced</summary>
+      <div class="field">
+        <label for="endpoint">Willow RPC endpoint</label>
+        <input id="endpoint" type="url" autocomplete="off" spellcheck="false" placeholder="https://api.willow.tech/v1/rpc/1/public">
+        <p class="hint">Ending in <code>public</code>, no key is needed: the page verifies blocks Willow has already proven. Ending in your API key, Willow also proves new blocks when you ask. The chain's ID is the part after <code>/rpc/</code>; choosing a chain above changes it.</p>
+        <label class="check"><input id="remember" type="checkbox"> Remember the endpoints on this device</label>
+      </div>
+      <div class="field">
+        <label for="node" id="nodeLabel">Your Ethereum node</label>
+        <input id="node" type="url" autocomplete="off" spellcheck="false">
+        <p class="hint" id="nodeHint"></p>
+      </div>
+      <div class="field">
+        <label for="compare">Also compare another provider (optional)</label>
+        <input id="compare" type="url" autocomplete="off" spellcheck="false" placeholder="https://your-provider.example/rpc">
+        <p class="hint" id="compareHint">Its answer for the same request is compared with the proven one too. The provider must allow browser requests.</p>
+      </div>
+      <div id="keysFields">
+        <div class="field">
+          <label for="leafKeys">Block program keys</label>
+          <textarea id="leafKeys" rows="2" spellcheck="false" autocomplete="off" placeholder="Leave empty to use the published key"></textarea>
+        </div>
+        <div class="field">
+          <label for="segmentKeys">Segment program keys</label>
+          <textarea id="segmentKeys" rows="2" spellcheck="false" autocomplete="off" placeholder="Leave empty to use the published key"></textarea>
+          <p class="hint">A log proof only counts if it was made by a program with one of these keys. One pair serves all seven chains. Replace them only if Willow tells you a new program is in use. Published keys: <span id="pinned" class="mono"></span></p>
+        </div>
+      </div>
+    </details>
+  </form>
+
+  <section id="progress" class="card" hidden aria-live="polite">
+    <h2>Progress</h2>
+    <ol id="steps" class="steps"></ol>
+  </section>
+
+  <section id="linkProof" class="card" hidden>
+    <h2>Proof</h2>
+    <div id="linkProofActions" class="r-extra"></div>
+  </section>
+
+  <section id="result" hidden>
+    <div id="verdict" class="verdict" role="status">
+      <p id="verdictTitle" class="verdict-title"></p>
+      <p id="verdictText" class="verdict-text"></p>
+      <ul id="verdictChecks" class="r-checks" hidden></ul>
+      <div id="waitProgress" class="wait-progress" aria-live="off" hidden>
+        <progress id="waitBar" max="1"></progress>
+        <p id="waitText" class="wait-text"></p>
+      </div>
+      <div id="verdictActions" class="verdict-actions"></div>
+    </div>
+
+    <div id="details" class="card" hidden>
+      <h2>Details</h2>
+      <dl id="facts" class="facts"></dl>
+      <div id="coverage">
+      <h3>What this verifies</h3>
+      <p>Proven and compared, for every log the filter matches in these blocks: <strong>address, topics, data, block number, transaction index and log index</strong>. None can be missing, added or changed without verification failing.</p>
+      <p class="muted">Not compared: <code>blockHash</code>, <code>transactionHash</code>, <code>blockTimestamp</code>, and the <code>removed</code> flag (an entry marked removed counts as not proven). Values worked out from these logs, such as balances or totals, are not part of this verification.</p>
+      </div>
+      <div id="itemCoverage" hidden>
+      <h3>What this verifies</h3>
+      <p>Proven: every field listed under Proven fields. Each one is in the transaction's or receipt's bytes, in the block header, or worked out from them, and the header hashes to the block hash the node confirmed. None can be changed without verification failing.</p>
+      <p id="itemUncovered" class="muted"></p>
+      </div>
+    </div>
+
+    <div id="diff" class="card" hidden>
+      <h2>Differences</h2>
+      <p id="diffText"></p>
+      <pre id="diffBody" class="pre"></pre>
+    </div>
+
+    <div id="logsCard" class="card" hidden>
+      <div class="label-row">
+        <h2 id="logsTitle">Proven logs</h2>
+        <button type="button" id="download" class="link">Download as JSON</button>
+      </div>
+      <div class="table-wrap">
+        <table id="logs">
+          <thead><tr><th>Block</th><th>Tx</th><th>Log</th><th>Address</th><th>First topic</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="logsMore" class="muted"></p>
+    </div>
+
+    <div id="itemCard" class="card" hidden>
+      <div class="label-row">
+        <h2 id="itemTitle">Proven fields</h2>
+        <button type="button" id="itemDownload" class="link">Download as JSON</button>
+      </div>
+      <div class="table-wrap">
+        <table id="itemTable">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="itemMore" class="muted"></p>
+    </div>
+  </section>
+
+
+  <details class="about">
+    <summary>How this works</summary>
+    <p><strong>Transactions.</strong> A block's header commits to every transaction and receipt in it. Willow sends them with Merkle proofs, and your browser verifies they are in the block, in milliseconds.</p>
+    <p><strong>Logs.</strong> Willow proves each block's logs with SP1 proofs. Your browser verifies them and works out from your filter which logs must be there, so none can be left out.</p>
+    <p><strong>Blocks.</strong> Your browser then verifies the block against Ethereum. On Ethereum it follows the validators' signatures from a starting point built into this page. On the other six chains it reads the chain's claim on Ethereum, which settles once its challenge period ends, after 5 to 7 days. Newer blocks are verified by the sequencer's signature. If Willow can't send that data, the page asks public nodes and shows the result in gold.</p>
+    <p><strong>What you rely on.</strong> No node, Willow included. This page's code is served by Willow, with the program keys and the starting point. Its source is <a href="https://github.com/willow-network/willow-verify" target="_blank" rel="noopener noreferrer">on GitHub</a>, with a script that rebuilds this page and verifies that each file in <a href="SHA256SUMS.txt">SHA256SUMS.txt</a> is the one Willow serves. To run the same verification on your own machine, ask Willow for the command-line verifier.</p>
+    <p><strong>Links.</strong> <code>?chain=base&amp;tx=0x…</code> opens a transaction, and <code>?chain=base&amp;from=…&amp;to=…&amp;address=…&amp;topic0=…</code> every matching log in a block range. Copy link makes one.</p>
+  </details>
+</main>
+</body>
+</html>

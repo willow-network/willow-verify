@@ -1,0 +1,15 @@
+# Per-chain profiles and the fast-chain segment / publish planner. Host-only, no
+# dependencies, its OWN workspace (like genblob): nothing here may enter the
+# graph that determines a guest ELF. genblob and the pipeline services depend on
+# it by path, so the chain table has one source.
+[workspace]
+resolver = "2"
+
+[package]
+name = "logset-chains"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]

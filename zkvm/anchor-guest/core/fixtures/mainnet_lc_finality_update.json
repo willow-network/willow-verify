@@ -1,0 +1,26 @@
+{
+  "attested_slot": "14435284",
+  "attested_proposer_index": "1537602",
+  "attested_parent_root": "0xdb7b8beac1c39b0e8fef644484c7f004214dd3cf2dea8ee3520559287a278989",
+  "attested_state_root": "0x22de4474f3b3149e5b04815755e809f38851bbdc0141fbdf0287f0d9e48f5b97",
+  "attested_body_root": "0x2257288f4e468fdc2c850f251adb1a579459e6f76d11e0aa8669c50e3e7ec0a4",
+  "signature_slot": "14435285",
+  "sync_committee_bits": "0xffffffffffffffffffffffffffdfffffbffffffffffffffffffffffffffffffffffffffffffffffffffffff7ffffffffffdfffffffffffffffffffffffffffff",
+  "sync_committee_signature": "0x85a9ea58e24c7b37b061112e301e8fcfd028539585192355c11a94c5166f93b984c3d00516f8633e8c374d983a676c31026b76be9ccb58cc1401ab4047790ad5d148d9e6b1750ee2d43c7a149148c77a8d9f4fd8f847972826ddfec835262261",
+  "finalized_slot": "14435200",
+  "finalized_proposer_index": "815983",
+  "finalized_parent_root": "0xfd36507d0ed401be9ce2a2c67a3976edd19b3758e3fd5ee452d39b60e2501a5f",
+  "finalized_state_root": "0x2af92e039c6028b1f7ffe00946b2d5e42380391fe6fe1a94fe23abbd1645a9d9",
+  "finalized_body_root": "0x524a129fa217aede28481df06cdf124d8f1ffee935037b03111f7c65e37d9f26",
+  "finality_branch": [
+    "0x1ce2060000000000000000000000000000000000000000000000000000000000",
+    "0x3076a6474831cc2ce5750e4b96e85d1d5a5da057d7fc9ddcb0ed629f94ab7b87",
+    "0x58931071047eef7ff4ec7e9cdfac24e442dfa6e25c4097f10bebac1c46d5dd4d",
+    "0x7438b50666207cd3536995d4ea11d13901b8e83e723ec83e10fe64af89f2610f",
+    "0x3c25d5e7236a1608039f7c2eda5f07175a4c81aab71d49bf2c3ae76060b8711a",
+    "0xd168ffe1eaa5703b909bac4bbba18dbe20a46e85b4aa25adbb1c15f16d7f7f48",
+    "0xa7c4164d18317ebffce8fb8f2179b1465d3fbf0d4e937edcb025bc03a61777ea"
+  ],
+  "genesis_validators_root": "0x4b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe95",
+  "fork_version": "0x06000000"
+}

@@ -1,0 +1,31 @@
+# One block's data checked against its block hash, with the encoders the SP1
+# feeder (genblob) builds witness blobs with. The log store verifies every block
+# with the same code before it serves a log from it. Host-only, its OWN workspace
+# (like genblob and chains): nothing here may enter the graph that determines a
+# guest ELF. No dev-dependencies, so a workspace that depends on it by path can
+# run its tests (`cargo test -p logset-blockcheck`).
+[workspace]
+resolver = "2"
+
+[package]
+name = "logset-blockcheck"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+# The trie the GUEST rebuilds (`no_std + alloc`), as a second receipts-root
+# implementation alongside alloy-trie.
+willow-receipts-trie = { path = "../../../crates/receipts-trie" }
+logset-chains = { path = "../chains" }
+# No default features: those are providers, contracts and signers (and a TLS
+# stack), which a verifier in a browser or on the command line has no use for.
+alloy = { version = ">=1.1, <1.6", default-features = false, features = ["std", "consensus", "eips", "rlp", "rpc-types-eth"] }
+alloy-rlp = "0.3"
+alloy-primitives = "1"
+alloy-trie = "0.9"
+anyhow = "1"
+hex = "0.4"
+serde = "1"
+serde_json = "1"

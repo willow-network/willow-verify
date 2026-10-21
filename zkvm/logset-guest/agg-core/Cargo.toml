@@ -1,0 +1,19 @@
+[package]
+name = "logset-agg-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# The segment aggregator's whole argument, native Rust. Compiled into the SP1
+# aggregator guest (`agg-program`) and called directly by the native tests and
+# by `logset-agg-execrun`, so the tested logic IS the guest logic.
+[dependencies]
+logset-core = { path = "../core" }
+
+[features]
+# The segment-scope index aggregator, src/index_agg.rs (the log verifier uses it).
+index = ["logset-core/index"]
+
+[dev-dependencies]
+sha2 = "0.10"
+logset-core = { path = "../core", features = ["synth"] }

@@ -1,0 +1,29 @@
+[package]
+name = "anchor-verify"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Block confirmation against Ethereum's validators (web/verify/TRUSTLESS-ANCHOR.md): the light
+# client from a pinned checkpoint, then a block's hash through EIP-2935 or the beacon state.
+# Built on the SP1 anchor guests' cores. Host and wasm32, no wasm-bindgen: anchor-wasm is the
+# page's face of it, willow-eth-anchor checks what it serves with it. Its own workspace.
+[workspace]
+
+[dependencies]
+# Without its `bls` feature: its curve crate is the SP1 fork, which does not build for wasm32.
+anchor-core = { path = "../../anchor-guest/core", default-features = false }
+window-anchor-core = { path = "../../window-anchor-guest/core" }
+beacon-cl-core = { path = "../../beacon-cl-guest/core" }
+alloy-primitives = { version = "1", features = ["k256"] }
+base64 = "0.22"
+alloy-rlp = "0.3"
+alloy-trie = "0.9"
+bls12_381 = { version = "0.8.0", features = ["experimental"] }
+# bls12_381 0.8's hash-to-curve speaks digest 0.9.
+sha2 = "0.9"
+serde_json = "1"
+hex = "0.4"
+# Verified calls on Ethereum (call.rs): the EVM over proven state, pure Rust (k256 for ecrecover).
+revm = { version = "29.0.1", default-features = false, features = ["std", "optional_balance_check", "optional_block_gas_limit", "optional_eip3607", "optional_no_base_fee"] }

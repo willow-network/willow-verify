@@ -1,0 +1,19 @@
+[package]
+name = "willow-receipts-trie"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust Ethereum receipts-trie reconstruction + native keccak/RLP helpers"
+license = "MIT"
+
+[features]
+# no_std + alloc when disabled — the SP1 window guest links this crate for the
+# sharded-block digest-trie join; std stays the default for every host user.
+default = ["std"]
+std = []
+
+[dependencies]
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+
+[dev-dependencies]
+alloy = { version = ">=1.1, <1.6", features = ["consensus", "eips", "rlp"] }
+alloy-trie = "0.9"

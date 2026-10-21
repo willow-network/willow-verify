@@ -1,0 +1,26 @@
+[package]
+name = "beacon-cl-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# The consensus-layer (CL) half of the stage-2 exact-set proof: an in-guest SSZ
+# balance + credential-membership scan over `state.validators`/`state.balances`,
+# anchored to a light-client-verified `beacon_state_root`. Shared verbatim between
+# the SP1 guest (target_os = "zkvm", precompile SHA-256 via the workspace patch)
+# and the native adversarial tests (host, software SHA-256). One codebase, one
+# assertion path (`Result<_, Error>`), so a rejection is a real `Err` from the
+# exact code the zkVM executes. No `assert_non_zero` anywhere.
+#
+# This RE-DERIVES in Rust every adversarial soundness property the (superseded)
+# Binius64 circuit crate carried. Moving the scan into the SP1 guest
+# retired the leaf architecture, not the theorems.
+
+[dependencies]
+sha2 = "0.11"
+
+# NOTE: no dev-dep on the earlier Binius64 crate. That crate pins `sha2 = "0.10"`,
+# which the workspace's `[patch.crates-io] sha2 = sha2-sp1` (0.11) cannot satisfy.
+# The differential is instead against an independent Python `hashlib` oracle
+# (`ssz_oracle.py`, not in this repository) whose known
+# answers are embedded as KATs in `tests` — a stronger, self-contained check.
