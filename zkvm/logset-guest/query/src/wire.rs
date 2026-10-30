@@ -6,9 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-/// Everything a client needs to check one `eth_getLogs` answer except the SP1
-/// proofs, which it fetches by id (`willow_getProof`) and can cache: one
-/// segment proof serves every filter over that segment.
+/// Everything a client needs to check one `eth_getLogs` answer except the zkVM
+/// proofs (SP1 or OpenVM, told apart by their bytes), which it fetches by id
+/// (`willow_getProof`) and can cache: one segment proof serves every filter over
+/// that segment.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogsProof {

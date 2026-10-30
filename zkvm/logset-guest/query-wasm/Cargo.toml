@@ -6,7 +6,9 @@ license = "MIT"
 
 # The browser verifier (web/verify): `logset_query::verify` with `Sp1Check`,
 # compiled to wasm32 for a Web Worker. Its own workspace and lockfile, so the
-# wasm-only crates never touch the guest's dependency graph.
+# wasm-only crates never touch the guest's dependency graph. OpenVM proofs go
+# to the page's second log module (zkvm/logset-guest-openvm/verify-wasm) through
+# a callback: SP1's and OpenVM's verifiers cannot share one dependency graph.
 [workspace]
 
 [lib]
@@ -15,13 +17,20 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 logset-query = { path = "../query" }
 willow-logs-verify = { path = "../query-verify", default-features = false }
-wasm-bindgen = "=0.2.103"
-js-sys = "=0.3.80"
+# One wasm-bindgen for all four modules (build.sh checks the CLI): OpenVM's
+# verifier needs >= 0.2.129.
+wasm-bindgen = "=0.2.129"
+js-sys = "=0.3.106"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
 # Some SP1 dependency pulls getrandom; on wasm32-unknown-unknown it needs the JS backend.
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[features]
+# The page's test build only (web/verify/build.sh with CHECKPOINT=test): `Verifier.setTestCutover`,
+# a test cutover in place of the pinned one. build.sh refuses any other build that has it.
+test-cutover = []
 
 [dev-dependencies]
 logset-query = { path = "../query", features = ["fixtures"] }

@@ -55,6 +55,9 @@ pub struct VerifiedBody {
     pub tx_values: Vec<Vec<u8>>,
     /// The withdrawals, when the header commits to a withdrawals list.
     pub withdrawals: Option<Vec<Withdrawal>>,
+    /// The uncles' hashes, in block order: each of a header that, with the
+    /// others, rebuilds ommersHash (Ethereum before the merge).
+    pub uncles: Vec<[u8; 32]>,
     /// Length of the block's RLP `[header, transactions, uncles, withdrawals?]`:
     /// the `size` nodes report.
     pub size: u64,
@@ -66,14 +69,26 @@ pub struct VerifiedBody {
 /// - `transactions` (full objects) encode, with `chain_id`'s transaction types,
 ///   to values that rebuild transactionsRoot under two tries; each hash is the
 ///   keccak of its value and must be the one the node reports.
-/// - `uncles` must be empty and ommersHash the empty list's: no chain served
-///   here has uncles, and their hashes would not be checkable without their
-///   headers.
+/// - `uncles` must be empty and ommersHash the empty list's: their hashes
+///   aren't checkable without their headers ([`verify_body_with_uncles`]).
 /// - `withdrawals` must rebuild withdrawalsRoot. OP-stack blocks carry none
 ///   (Canyon), and from Isthmus on their withdrawalsRoot commits to the
 ///   L2ToL1MessagePasser storage instead, so there the list must be empty.
 /// - `size` is computed from the verified parts, never taken from the node.
 pub fn verify_body(chain_id: u64, h: &VerifiedHeader, block: &Value) -> Result<VerifiedBody> {
+    verify_body_with_uncles(chain_id, h, block, &[])
+}
+
+/// [`verify_body`] for a block with uncles (Ethereum before the merge):
+/// `uncles` are their headers (`eth_getUncleByBlockHashAndIndex`), in order.
+/// Each must hash to the hash the block lists at its place, and their RLP
+/// list must hash to the header's ommersHash.
+pub fn verify_body_with_uncles(
+    chain_id: u64,
+    h: &VerifiedHeader,
+    block: &Value,
+    uncles: &[Value],
+) -> Result<VerifiedBody> {
     if let Some(hash) = block.get("hash").filter(|v| !v.is_null()) {
         ensure!(
             hex32(hash) == Some(h.info.hash),
@@ -106,14 +121,38 @@ pub fn verify_body(chain_id: u64, h: &VerifiedHeader, block: &Value) -> Result<V
         }
     }
 
-    let uncles = block.get("uncles").filter(|v| !v.is_null());
+    let uncle_hashes: Vec<[u8; 32]> = match block.get("uncles").filter(|v| !v.is_null()) {
+        None => vec![],
+        Some(u) => u
+            .as_array()
+            .context("uncles is not a list")?
+            .iter()
+            .map(|x| hex32(x).context("an uncle hash is not 32 bytes"))
+            .collect::<Result<_>>()?,
+    };
     ensure!(
-        uncles.is_none_or(|u| u.as_array().is_some_and(Vec::is_empty)),
-        "the block lists uncles: not served"
+        uncle_hashes.len() == uncles.len(),
+        "the block lists {} uncles, and {} uncle headers came with it",
+        uncle_hashes.len(),
+        uncles.len()
     );
+    let mut uncle_rlps = Vec::with_capacity(uncles.len());
+    for (i, (want, u)) in uncle_hashes.iter().zip(uncles).enumerate() {
+        let v = verify_header(u).with_context(|| format!("uncle {i}"))?;
+        ensure!(
+            v.info.hash == *want,
+            "uncle {i} is 0x{}, but the block lists 0x{}",
+            hex::encode(v.info.hash),
+            hex::encode(want)
+        );
+        uncle_rlps.push(v.rlp);
+    }
+    let ommers = alloy_primitives::keccak256(rlp_list(&uncle_rlps));
     ensure!(
-        h.header.ommers_hash == alloy::consensus::EMPTY_OMMER_ROOT_HASH,
-        "the header commits to uncles: not served"
+        ommers == h.header.ommers_hash,
+        "the uncles rebuild ommersHash 0x{}, not the header's 0x{}",
+        hex::encode(ommers),
+        hex::encode(h.header.ommers_hash)
     );
 
     let listed = block.get("withdrawals").filter(|v| !v.is_null());
@@ -148,18 +187,229 @@ pub fn verify_body(chain_id: u64, h: &VerifiedHeader, block: &Value) -> Result<V
         }
     };
 
-    let size = block_size(&h.rlp, &txs.values, withdrawals.as_deref());
+    let size = block_size(&h.rlp, &txs.values, &uncle_rlps, withdrawals.as_deref());
     Ok(VerifiedBody {
         tx_hashes: txs.hashes,
         tx_values: txs.values,
         withdrawals,
+        uncles: uncle_hashes,
         size: size as u64,
     })
 }
 
-/// `len(rlp([header, transactions, [], withdrawals?]))`, typed transactions as
-/// strings (geth's `Block.Size`).
-fn block_size(header_rlp: &[u8], txs: &[Vec<u8>], withdrawals: Option<&[Withdrawal]>) -> usize {
+/// A header from its RLP alone (an archive's): two decoders must read it the
+/// same way, and its hash is the RLP's keccak.
+pub fn header_from_rlp(rlp: &[u8]) -> Result<VerifiedHeader> {
+    let (_, total, is_list) = crate::receipts::rlp_item(rlp)?;
+    ensure!(
+        is_list && total == rlp.len(),
+        "the header is not one RLP list"
+    );
+    let info = header::decode_alloy(rlp)?;
+    ensure!(
+        info == header::decode_positional(rlp)?,
+        "the two header decoders disagree on block {}",
+        info.number
+    );
+    let header = {
+        use alloy_rlp::Decodable;
+        alloy::consensus::Header::decode(&mut &rlp[..]).context("header RLP decode")?
+    };
+    Ok(VerifiedHeader {
+        info,
+        timestamp: header.timestamp,
+        rlp: rlp.to_vec(),
+        header,
+    })
+}
+
+/// The items of an RLP list, each with its own RLP header.
+fn list_items(rlp: &[u8]) -> Result<Vec<&[u8]>> {
+    let (payload, total, is_list) = crate::receipts::rlp_item(rlp)?;
+    ensure!(is_list && total == rlp.len(), "not one RLP list");
+    let mut out = Vec::new();
+    let mut rest = payload;
+    while !rest.is_empty() {
+        let (_, n, _) = crate::receipts::rlp_item(rest)?;
+        out.push(&rest[..n]);
+        rest = &rest[n..];
+    }
+    Ok(out)
+}
+
+/// A block body from its RLP alone (an archive's): `[transactions, uncles,
+/// withdrawals?]`, checked against `h` as [`verify_body_with_uncles`] checks
+/// a node's: the transactions rebuild transactionsRoot, the uncles (whole
+/// headers here) rebuild ommersHash, the withdrawals withdrawalsRoot.
+pub fn verify_body_rlp(h: &VerifiedHeader, body: &[u8]) -> Result<VerifiedBody> {
+    let items = list_items(body).context("block body")?;
+    ensure!(
+        (2..=3).contains(&items.len()),
+        "a block body of {} items",
+        items.len()
+    );
+    // A typed transaction is an RLP string of its EIP-2718 bytes; a legacy one, its RLP list.
+    let mut tx_values = Vec::new();
+    for t in list_items(items[0]).context("transactions")? {
+        let (payload, _, is_list) = crate::receipts::rlp_item(t)?;
+        tx_values.push(if is_list {
+            t.to_vec()
+        } else {
+            payload.to_vec()
+        });
+    }
+    let root = crate::trie::ordered_root(&tx_values)?;
+    ensure!(
+        root == h.header.transactions_root.0,
+        "rebuilt transactions root 0x{} != header transactionsRoot 0x{}",
+        hex::encode(root),
+        hex::encode(h.header.transactions_root)
+    );
+    let uncle_rlps: Vec<Vec<u8>> = list_items(items[1])
+        .context("uncles")?
+        .into_iter()
+        .map(<[u8]>::to_vec)
+        .collect();
+    let mut uncles = Vec::with_capacity(uncle_rlps.len());
+    for (i, u) in uncle_rlps.iter().enumerate() {
+        uncles.push(
+            header_from_rlp(u)
+                .with_context(|| format!("uncle {i}"))?
+                .info
+                .hash,
+        );
+    }
+    let ommers = alloy_primitives::keccak256(items[1]);
+    ensure!(
+        ommers == h.header.ommers_hash,
+        "the uncles rebuild ommersHash 0x{}, not the header's 0x{}",
+        hex::encode(ommers),
+        hex::encode(h.header.ommers_hash)
+    );
+    let withdrawals = match (h.header.withdrawals_root, items.get(2)) {
+        (None, None) => None,
+        (Some(want), Some(w)) => {
+            let raw = list_items(w).context("withdrawals")?;
+            let values: Vec<Vec<u8>> = raw.iter().map(|x| x.to_vec()).collect();
+            let root = crate::trie::ordered_root(&values)?;
+            ensure!(
+                root == want.0,
+                "rebuilt withdrawals root 0x{} != header withdrawalsRoot 0x{}",
+                hex::encode(root),
+                hex::encode(want)
+            );
+            let mut list = Vec::with_capacity(raw.len());
+            for x in raw {
+                use alloy_rlp::Decodable;
+                list.push(Withdrawal::decode(&mut &x[..]).context("a withdrawal")?);
+            }
+            Some(list)
+        }
+        (None, Some(_)) => {
+            anyhow::bail!("withdrawals listed but the header has no withdrawalsRoot")
+        }
+        (Some(_), None) => anyhow::bail!("the header commits to withdrawals the body lacks"),
+    };
+    let size = block_size(&h.rlp, &tx_values, &uncle_rlps, withdrawals.as_deref());
+    Ok(VerifiedBody {
+        tx_hashes: tx_values
+            .iter()
+            .map(|v| alloy_primitives::keccak256(v).0)
+            .collect(),
+        tx_values,
+        withdrawals,
+        uncles,
+        size: size as u64,
+    })
+}
+
+/// Receipts trie values from an archive's slim receipts,
+/// `rlp([[tx-type, post-state-or-status, cumulative-gas, logs], ...])`: each
+/// rebuilt as `type ‖ rlp([status, cumulative-gas, bloom, logs])` (no type
+/// byte for legacy), its bloom computed from its logs. Also the block's bloom
+/// and the last cumulative gas.
+pub fn receipts_from_slim(slim: &[u8]) -> Result<(Vec<Vec<u8>>, [u8; 256], u64)> {
+    use alloy_rlp::Encodable;
+    let mut values = Vec::new();
+    let mut block_bloom = alloy_primitives::Bloom::ZERO;
+    let mut gas = 0u64;
+    for (i, r) in list_items(slim)
+        .context("slim receipts")?
+        .into_iter()
+        .enumerate()
+    {
+        let f = list_items(r).with_context(|| format!("slim receipt {i}"))?;
+        ensure!(f.len() == 4, "slim receipt {i} has {} fields", f.len());
+        let (ty, _, ty_list) = crate::receipts::rlp_item(f[0])?;
+        ensure!(!ty_list && ty.len() <= 1, "slim receipt {i}: bad type");
+        let ty = ty.first().copied().unwrap_or(0);
+        let (g, _, g_list) = crate::receipts::rlp_item(f[2])?;
+        ensure!(
+            !g_list && g.len() <= 8,
+            "slim receipt {i}: bad cumulative gas"
+        );
+        gas = g.iter().fold(0u64, |a, b| (a << 8) | *b as u64);
+        let mut bloom = alloy_primitives::Bloom::ZERO;
+        for (j, l) in list_items(f[3])
+            .with_context(|| format!("receipt {i} logs"))?
+            .into_iter()
+            .enumerate()
+        {
+            let lf = list_items(l).with_context(|| format!("receipt {i} log {j}"))?;
+            ensure!(lf.len() == 3, "receipt {i} log {j} has {} fields", lf.len());
+            let (address, _, _) = crate::receipts::rlp_item(lf[0])?;
+            ensure!(address.len() == 20, "receipt {i} log {j}: bad address");
+            bloom.accrue(alloy_primitives::BloomInput::Raw(address));
+            for t in list_items(lf[1])? {
+                let (topic, _, _) = crate::receipts::rlp_item(t)?;
+                ensure!(topic.len() == 32, "receipt {i} log {j}: bad topic");
+                bloom.accrue(alloy_primitives::BloomInput::Raw(topic));
+            }
+        }
+        block_bloom |= bloom;
+        let mut payload = Vec::new();
+        payload.extend_from_slice(f[1]);
+        payload.extend_from_slice(f[2]);
+        bloom.0.as_slice().encode(&mut payload);
+        payload.extend_from_slice(f[3]);
+        let mut v = Vec::with_capacity(payload.len() + 5);
+        if ty != 0 {
+            v.push(ty);
+        }
+        alloy_rlp::Header {
+            list: true,
+            payload_length: payload.len(),
+        }
+        .encode(&mut v);
+        v.extend_from_slice(&payload);
+        values.push(v);
+    }
+    Ok((values, block_bloom.0 .0, gas))
+}
+
+/// `rlp([items...])` of already-encoded items.
+fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
+    let payload: usize = items.iter().map(Vec::len).sum();
+    let mut out = Vec::with_capacity(payload + 9);
+    alloy_rlp::Header {
+        list: true,
+        payload_length: payload,
+    }
+    .encode(&mut out);
+    for i in items {
+        out.extend_from_slice(i);
+    }
+    out
+}
+
+/// `len(rlp([header, transactions, uncles, withdrawals?]))`, typed transactions
+/// as strings (geth's `Block.Size`).
+fn block_size(
+    header_rlp: &[u8],
+    txs: &[Vec<u8>],
+    uncles: &[Vec<u8>],
+    withdrawals: Option<&[Withdrawal]>,
+) -> usize {
     use alloy_rlp::Encodable;
     let list = |payload: usize| {
         alloy_rlp::Header {
@@ -176,7 +426,8 @@ fn block_size(header_rlp: &[u8], txs: &[Vec<u8>], withdrawals: Option<&[Withdraw
             _ => v.as_slice().length(),
         })
         .sum();
-    let mut payload = header_rlp.len() + list(txs) + list(0);
+    let uncles: usize = uncles.iter().map(Vec::len).sum();
+    let mut payload = header_rlp.len() + list(txs) + list(uncles);
     if let Some(w) = withdrawals {
         payload += list(w.iter().map(Encodable::length).sum());
     }
@@ -380,6 +631,89 @@ mod tests {
             assert!(verify_body(10, &h, &full).is_err());
             assert!(verify_body(chain, &h, &block).is_err());
         }
+    }
+
+    fn uncle_block(n: u64) -> (Value, Vec<Value>) {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/uncles");
+        let read = |f: String| -> Value {
+            serde_json::from_slice(&std::fs::read(format!("{dir}/{f}")).unwrap()).unwrap()
+        };
+        let uncles = read(format!("eth-{n}.uncles.json"));
+        (
+            read(format!("eth-{n}.full.json")),
+            uncles.as_array().unwrap().clone(),
+        )
+    }
+
+    /// Ethereum blocks with uncles (1,500,000: one, and five transactions;
+    /// 1,500,003: two, none): their uncle headers rebuild ommersHash, `size`
+    /// is the node's, and the uncles are listed. Without them, with one
+    /// missing, swapped, another header, or one field changed, the body is refused.
+    #[test]
+    fn uncles_rebuild_the_ommers_hash() {
+        for n in [1_500_000u64, 1_500_003] {
+            let (block, uncles) = uncle_block(n);
+            let h = verify_header(&block).unwrap();
+            let body = verify_body_with_uncles(1, &h, &block, &uncles).unwrap();
+            assert_eq!(Some(body.size), quantity(&block["size"]), "{n}");
+            let listed: Vec<[u8; 32]> = block["uncles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|u| hex32(u).unwrap())
+                .collect();
+            assert_eq!(body.uncles, listed, "{n}");
+            assert!(verify_body(1, &h, &block).is_err(), "{n}: no uncle headers");
+            assert!(
+                verify_body_with_uncles(1, &h, &block, &uncles[1..]).is_err(),
+                "{n}: one missing"
+            );
+            let mut changed = uncles.clone();
+            changed[0]["gasUsed"] = serde_json::json!("0x1");
+            assert!(
+                verify_body_with_uncles(1, &h, &block, &changed).is_err(),
+                "{n}: a field changed"
+            );
+            let (other, other_uncles) =
+                uncle_block(if n == 1_500_000 { 1_500_003 } else { 1_500_000 });
+            let _ = other;
+            let mut swapped = uncles.clone();
+            swapped[0] = other_uncles[0].clone();
+            assert!(
+                verify_body_with_uncles(1, &h, &block, &swapped).is_err(),
+                "{n}: another uncle"
+            );
+        }
+        let (block, mut uncles) = uncle_block(1_500_003);
+        let h = verify_header(&block).unwrap();
+        uncles.reverse();
+        assert!(
+            verify_body_with_uncles(1, &h, &block, &uncles).is_err(),
+            "out of order"
+        );
+    }
+
+    /// Before Byzantium a receipt carries its post-state root, not a status:
+    /// block 1,500,000's receipts as a geth-style node reports them (`root`)
+    /// rebuild its receipts root; reported with a `status` instead, as some
+    /// providers do, they don't.
+    #[test]
+    fn pre_byzantium_receipts_rebuild_with_their_state_roots() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures/uncles");
+        let receipts: Value = serde_json::from_slice(
+            &std::fs::read(format!("{dir}/eth-1500000.receipts.json")).unwrap(),
+        )
+        .unwrap();
+        let (block, _) = uncle_block(1_500_000);
+        let h = verify_header(&block).unwrap();
+        assert!(verify_receipts(1, &h.info, &receipts).is_ok());
+        let mut with_status = receipts.clone();
+        for r in with_status.as_array_mut().unwrap() {
+            let o = r.as_object_mut().unwrap();
+            o.remove("root");
+            o.insert("status".into(), serde_json::json!("0x1"));
+        }
+        assert!(verify_receipts(1, &h.info, &with_status).is_err());
     }
 
     /// Every way a node can lie about a block's body is refused.

@@ -1,8 +1,8 @@
 // The page: fetches an answer and its proofs, hands them to the verifier in a Web Worker, then
 // compares the plain answers and confirms the block hash against Ethereum's validators (or on a
-// node). Every pass/fail decision is made in the wasm. Two flows: log proofs (SP1) and transaction /
-// receipt proofs (Merkle-Patricia proofs against the block hash); both end at a block that the
-// light client confirms (TRUSTLESS-ANCHOR.md).
+// node). Every pass/fail decision is made in the wasm. Two flows: log proofs (SP1, and OpenVM from
+// each chain's switch to it) and transaction / receipt proofs (Merkle-Patricia proofs against the
+// block hash); both end at a block that the light client confirms (TRUSTLESS-ANCHOR.md).
 
 // Served at https://api.willow.tech/verify/, so the same origin is Willow's API.
 const ORIGIN = /^https?:$/.test(location.protocol) ? location.origin : 'https://api.willow.tech';
@@ -36,10 +36,20 @@ const EXAMPLE_BLOCKS = 10;
 const STORE_KEY = 'willow-verify:endpoints';
 const DOWNLOADS_AT_ONCE = 4;
 const SHOW_LOGS = 100;
-// Above this many proofs to download, ask first. A compressed SP1 proof is about
-// 1.27 MB, sent as hex: about 2.5 MB on the wire.
+// Above this many proofs to download, ask first. A proof's size on the wire, as hex: a compressed
+// SP1 proof is about 1.27 MB (2.5 MB as hex), an OpenVM proof about 0.23 MB (0.5 MB as hex). A proof
+// id does not say which system made it, so before the download a proof counts as OpenVM only when
+// it ends at or after the chain's published first OpenVM block, and as SP1, the larger, otherwise.
 const LARGE_DOWNLOAD = 20;
-const PROOF_WIRE_MB = 2.5;
+const PROOF_WIRE_MB = { sp1: 2.5, openvm: 0.5 };
+/// The wire size of the proof with store id `id` (`l1/<s>-<e>`, `leaf/<n>-<hash>` or
+/// `leaf/<s>-<e>-<hash>`), given the chain's published first OpenVM block (null: not published).
+function proofWireMb(id, openvmFrom) {
+  const m = /^(?:l1|leaf)\/(\d+)(?:-(\d+))?(?:-[0-9a-f]{64})?$/.exec(id);
+  const last = m ? Number(m[2] && m[2].length < 20 ? m[2] : m[1]) : null;
+  return openvmFrom != null && last != null && last >= openvmFrom ? PROOF_WIRE_MB.openvm : PROOF_WIRE_MB.sp1;
+}
+const wireMb = (ids, openvmFrom) => ids.reduce((t, id) => t + proofWireMb(id, openvmFrom), 0);
 // A leaf not yet in a final segment comes whole in the willow_getLogsProof answer: every log of
 // each of its blocks (one block on Ethereum), up to 16 MB of records per answer (about 32 MB as
 // hex). Above this much of it (about 20 Ethereum blocks, or one leaf on most fast chains), ask first.
@@ -387,7 +397,7 @@ function provenPart(from, to, head) {
   return null;
 }
 
-/// The example's blocks: the 10 newest of Willow's newest final segment (one SP1 proof covers
+/// The example's blocks: the 10 newest of Willow's newest final segment (one proof covers
 /// them), else of its newest proven range; null when the status shows nothing proven.
 function exampleRange(head) {
   if (!head) return null;
@@ -402,7 +412,7 @@ function exampleRange(head) {
 
 /// The blocks of [from, to] the proof status shows proven but not in a final segment: the
 /// willow_getLogsProof answer carries each of their leaves whole (every log of the leaf's blocks; a
-/// leaf is one block on Ethereum), and each leaf needs its own SP1 proof. A block past the newest
+/// leaf is one block on Ethereum), and each leaf needs its own proof. A block past the newest
 /// segment's end, or whose segment window is not all proven, is in no segment. null when there are
 /// none, or the status is unknown.
 function tailEstimate(from, to, head, ch) {
@@ -431,7 +441,8 @@ function tailEstimate(from, to, head, ch) {
   const segments = inSegments ? Math.ceil(inSegments / W) + 1 : 0;
   const answerMb = Math.min(leaves * S * ch.blockMb, TAIL_ANSWER_MAX_MB);
   const proofs = leaves + segments;
-  return { first, blocks, leaves, leaf: S, window: W, segmentEnd: head.segmentEnd, proofs, answerMb, totalMb: answerMb + proofs * PROOF_WIRE_MB };
+  // Before the answer the proofs' blocks are not known exactly: the larger, SP1's, size.
+  return { first, blocks, leaves, leaf: S, window: W, segmentEnd: head.segmentEnd, proofs, answerMb, totalMb: answerMb + proofs * PROOF_WIRE_MB.sp1 };
 }
 
 /// Blocks per leaf and per final segment: the proof status's, else Ethereum's.
@@ -573,7 +584,7 @@ function startWorker(chainId, segmentKeys, leafKeys) {
   wk.keys = want;
   wk.ready = ask({ type: 'init', chainId, segmentKeys, leafKeys }).then(
     (m) => {
-      $('pinned').textContent = `blocks ${m.keys.pinned.leaf}, segments ${m.keys.pinned.segment}`;
+      $('pinned').textContent = pinnedText(m.keys);
       return m.keys;
     },
     (e) => {
@@ -612,10 +623,28 @@ async function showPinned() {
 
 const bare = (k) => String(k).trim().toLowerCase().replace(/^0x/, '');
 
-/// True when the keys in force are not exactly the ones published with this page.
+/// The keys published with this page, per proof system.
+const pinnedText = (keys) =>
+  `SP1: blocks ${keys.pinned.sp1.leaf.join(', ')}, segments ${keys.pinned.sp1.segment.join(', ')}. ` +
+  `OpenVM: blocks ${keys.pinned.openvm.leaf.join(', ')}, segments ${keys.pinned.openvm.segment.join(', ')}.`;
+
+/// The keys in force, per proof system.
+const keysText = (keys) =>
+  `SP1 blocks ${keys.sp1.leaf.join(', ')}, segments ${keys.sp1.segment.join(', ')}; ` +
+  `OpenVM blocks ${keys.openvm.leaf.join(', ')}, segments ${keys.openvm.segment.join(', ')}`;
+
+/// True when the keys in force are not exactly the ones published with this page. Only SP1's can
+/// be entered under Advanced; OpenVM's are always the published ones.
 function customKeys(keys) {
-  const same = (list, pinned) => list.length === 1 && bare(list[0]) === bare(pinned);
-  return !same(keys.leaf, keys.pinned.leaf) || !same(keys.segment, keys.pinned.segment);
+  const same = (list, pinned) => list.length === pinned.length && list.every((k, i) => bare(k) === bare(pinned[i]));
+  return !same(keys.sp1.leaf, keys.pinned.sp1.leaf) || !same(keys.sp1.segment, keys.pinned.sp1.segment);
+}
+
+/// "3 SP1 and 2 OpenVM proofs", "1 SP1 proof", "2 OpenVM proofs": `c` is the report's `proofs`.
+function systemsText(c) {
+  const total = c.sp1 + c.openvm;
+  const parts = [c.sp1 ? `${n(c.sp1)} SP1` : '', c.openvm ? `${n(c.openvm)} OpenVM` : ''].filter(Boolean);
+  return `${parts.join(' and ') || '0'} proof${total === 1 ? '' : 's'}`;
 }
 
 // ---------- proofs ----------
@@ -669,10 +698,11 @@ function askFirst(title, text, more = []) {
   });
 }
 
-function confirmDownload(count, g) {
+function confirmDownload(count, mb, g) {
   return askFirst(
-    `Verifying this needs ${n(count)} SP1 proofs, about ${n(Math.round(count * PROOF_WIRE_MB))} MB to download`,
-    'Each proof is about 1.3 MB, sent as about 2.5 MB of hex, and your browser keeps the proofs in memory while it verifies them. ' +
+    `Verifying this needs ${n(count)} proofs, about ${n(Math.round(mb))} MB to download`,
+    'An SP1 proof is about 1.3 MB, sent as about 2.5 MB of hex; an OpenVM proof, which this chain uses from its switch to OpenVM, about 0.5 MB as hex. ' +
+      'Your browser keeps the proofs in memory while it verifies them. ' +
       `The number of proofs depends on the block range, not on the filter: ${proofsPer(g)}. ` +
       'Continue, or cancel and verify fewer blocks.',
   );
@@ -695,7 +725,7 @@ function confirmTail(t, from, to, ch) {
   return askFirst(
     `Verifying this needs about ${mb(t.totalMb)} MB to download`,
     `${where} For those, Willow's answer carries ${each}, at most ${TAIL_ANSWER_MAX_MB} MB), ` +
-      `and each ${one ? 'block' : 'leaf'} needs its own SP1 proof (about ${PROOF_WIRE_MB} MB). Estimate: about ${mb(t.answerMb)} MB for the answer, then up to ${n(t.proofs)} proofs. ` +
+      `and each ${one ? 'block' : 'leaf'} needs its own proof (up to ${PROOF_WIRE_MB.sp1} MB). Estimate: about ${mb(t.answerMb)} MB for the answer, then up to ${n(t.proofs)} proofs. ` +
       `Your browser keeps it all in memory while it verifies. Continue, ${narrow ? `verify ${blocksText(narrow.from, narrow.to)} instead (only blocks in final segments), ` : ''}or cancel and verify fewer blocks.`,
     narrow ? [[`Verify ${blocksText(narrow.from, narrow.to)} instead`, narrow]] : [],
   );
@@ -1414,7 +1444,7 @@ async function runLogs() {
   const list = [
     ['range', 'Block range'],
     ['proof', 'Proof from Willow'],
-    ['download', 'SP1 proofs'],
+    ['download', 'Proofs'],
     ['verify', 'Verifying the proofs and completeness'],
   ];
   if (linkMode()) list.shift();
@@ -1504,7 +1534,8 @@ async function runLogs() {
       (leaves ? `, ${n(leaves)} multi-block lea${leaves === 1 ? 'f' : 'ves'}` : '');
     step('proof', 'done', `${partsText} (${bytes(answerSize)})`);
 
-    // 3. The SP1 proofs the parts name. The worker keeps the ones that passed last time.
+    // 3. The proofs the parts name (SP1 or OpenVM: the bytes say which, in the worker). The worker
+    // keeps the ones that passed last time.
     current = 'download';
     const ids = [...new Set(answer.parts.map((p) => p && p.proof).filter((x) => typeof x === 'string'))];
     step('download', 'active', 'Starting the verifier…');
@@ -1513,38 +1544,50 @@ async function runLogs() {
     const todo = ids.filter((id) => !kept.has(id));
     // Ask unless the estimate already agreed to covers it.
     if (todo.length > LARGE_DOWNLOAD && todo.length > agreedProofs) {
-      step('download', 'pending', `${n(todo.length)} proofs to download, about ${n(Math.round(todo.length * PROOF_WIRE_MB))} MB. Waiting for you to continue.`);
-      if (!(await confirmDownload(todo.length, g))) throw cancelled(g);
+      const mb = wireMb(todo, keys.openvmFrom == null ? null : Number(keys.openvmFrom));
+      step('download', 'pending', `${n(todo.length)} proofs to download, about ${n(Math.round(mb))} MB. Waiting for you to continue.`);
+      if (!(await confirmDownload(todo.length, mb, g))) throw cancelled(g);
     }
     step('download', 'active', `0 of ${todo.length}`);
     const fresh = {};
     const fetched = await downloadProofs(endpoint, todo, fresh, (k, b) => step('download', null, `${k} of ${todo.length} (${bytes(b)} downloaded)`));
     step('download', 'done', `${ids.length} proof${ids.length === 1 ? '' : 's'}, ${bytes(fetched)} downloaded${kept.size ? `, ${kept.size} already here` : ''}`);
-    facts.push(['Downloaded', `${bytes(fetched + answerSize)} (${ids.length} SP1 proof${ids.length === 1 ? '' : 's'}${kept.size ? `, ${kept.size} reused from this session` : ''})`]);
+    facts.push(['Downloaded', `${bytes(fetched + answerSize)} (${ids.length} proof${ids.length === 1 ? '' : 's'}${kept.size ? `, ${kept.size} reused from this session` : ''})`]);
 
     // 4. Everything that decides "proven" runs in the worker. The proof bytes move there
     // (transferred, not copied); this page keeps no copy.
     current = 'verify';
     step('verify', 'active', 'Verifying…');
-    const times = [];
+    // Check times per proof system, as the worker names each proof's.
+    const times = { sp1: [], openvm: [] };
+    const valid = () => times.sp1.length + times.openvm.length;
     const transfer = Object.values(fresh).map((b) => b.buffer);
     const v = await ask(
       { type: 'verify', response: answerText, filter: JSON.stringify(filter), ids, proofs: fresh },
       (m) => {
-        if (!m.error) times.push(m.ms);
-        step('verify', null, `${times.length} of ${ids.length} SP1 proofs valid${times.length ? `, last took ${secs(m.ms)}` : ''}`);
+        if (!m.error && times[m.system]) times[m.system].push(m.ms);
+        const name = m.system === 'openvm' ? 'OpenVM' : m.system === 'sp1' ? 'SP1' : 'a';
+        step('verify', null, `${valid()} of ${ids.length} proofs valid${valid() ? `, last took ${secs(m.ms)} (${name} proof)` : ''}`);
       },
       transfer,
     );
     const r = v.report;
     lastLogs = v.logs;
-    step('verify', 'done', `All ${ids.length} SP1 proof${ids.length === 1 ? '' : 's'} valid. ${n(r.logs)} matching log${r.logs === 1 ? '' : 's'}, none missing (${secs(v.ms)}).`);
+    step('verify', 'done', `All ${systemsText(r.proofs)} valid. ${n(r.logs)} matching log${r.logs === 1 ? '' : 's'}, none missing (${secs(v.ms)}).`);
     facts.push(['Matching logs in the proofs', n(r.logs)]);
     facts.push(['Proof parts', partsText]);
-    const avg = times.length ? times.reduce((a, b) => a + b, 0) / times.length : 0;
-    facts.push(['SP1 proofs verified', times.length ? `${times.length}, ${secs(avg)} each on average (longest ${secs(Math.max(...times))})` : '0']);
+    for (const [sys, name] of [['sp1', 'SP1'], ['openvm', 'OpenVM']]) {
+      const t = times[sys];
+      if (!t.length) continue;
+      const avg = t.reduce((a, b) => a + b, 0) / t.length;
+      facts.push([`${name} proofs verified`, `${t.length}, ${secs(avg)} each on average (longest ${secs(Math.max(...t))})`]);
+    }
+    if (r.proofs.sp1 && r.proofs.openvm) {
+      facts.push(['Proof systems', `SP1 to block ${n(Number(r.openvmFrom) - 1)}, OpenVM from block ${n(Number(r.openvmFrom))}` +
+        (r.cutover != null ? `, as published for ${ch.name}` : '')]);
+    }
     const custom = customKeys(keys);
-    facts.push(['Program keys', `${custom ? 'Custom, entered under Advanced' : 'Published with this page'}: blocks ${keys.leaf.join(', ')}; segments ${keys.segment.join(', ')}`]);
+    facts.push(['Program keys', `${custom ? 'Custom SP1 keys, entered under Advanced' : 'Published with this page'}: ${keysText(keys)}`]);
 
     // 5. Willow's plain answer against the proven logs.
     const diffs = [];
@@ -1618,7 +1661,7 @@ async function runLogs() {
         TRUST_ROW,
       ];
       relabel('proof', 'Willow sent a proof for every block in the range.');
-      relabel('download', `Your browser downloaded the ${n(ids.length)} SP1 proof${ids.length === 1 ? '' : 's'} they name.`);
+      relabel('download', `Your browser downloaded the ${n(ids.length)} proof${ids.length === 1 ? '' : 's'} they name.`);
       relabel('verify', 'Your browser verified every proof.');
       relabel('anchor', anchorSentence(anchor, ch, 'the last block', lastNum, last.hash));
       for (const key of ['proof', 'download', 'verify', 'anchor']) step(key, null, '');

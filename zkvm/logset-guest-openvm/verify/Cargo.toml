@@ -1,0 +1,46 @@
+[package]
+name = "willow-logs-verify-openvm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# The OpenVM side of a Willow log RPC answer check: `OvmCheck`, a `logset_query::ProofCheck` for
+# OpenVM 2.0.2 STARK proofs. It lives in this workspace, not next to `willow-logs-verify`
+# (../logset-guest/query-verify), because SP1 6.8.1 pins `p3-field =0.4.3-succinct` and OpenVM
+# pins `p3-field =0.4.3`: one dependency graph cannot hold both verifiers, optional or not, and a
+# `[patch]` of either side's p3 crates does not help (Cargo still sees one crates.io package).
+# So the SP1 CLI runs this crate's binary for OpenVM proofs, and the verify page loads it as a
+# second wasm module (`verify-wasm`).
+[dependencies]
+logset-query = { path = "../../logset-guest/query" }
+hex = "0.4"
+openvm-verify-stark-host = { git = "https://github.com/openvm-org/openvm.git", tag = "v2.0.2", optional = true }
+openvm-stark-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.1", default-features = false, optional = true }
+openvm-stark-sdk = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.1", default-features = false, features = ["cpu-backend"], optional = true }
+bitcode = { version = "0.6", features = ["serde"], optional = true }
+zstd = { version = "0.13", optional = true }
+sha2 = { version = "0.10", optional = true }
+
+[features]
+default = ["verifier"]
+# The verifier. Without it the crate is only the minted program keys (`pinned::{minted, key,
+# Kind}`, read from pins/program-keys.txt), with no OpenVM dependency: what the SP1 side
+# (`willow-logs-verify`, `willow-logs-verify-wasm`) builds against to trust OpenVM parts it
+# hands to this crate's verifier.
+verifier = [
+  "dep:openvm-verify-stark-host",
+  "dep:openvm-stark-backend",
+  "dep:openvm-stark-sdk",
+  "dep:bitcode",
+  "dep:zstd",
+  "dep:sha2",
+]
+
+# The OpenVM verifier `willow-logs-verify` (the SP1 CLI) runs for OpenVM proofs.
+[[bin]]
+name = "willow-logs-verify-openvm"
+path = "src/main.rs"
+required-features = ["verifier"]
+
+[dev-dependencies]
+serde_json = "1"

@@ -1,5 +1,8 @@
 use super::*;
-use crate::fixtures::{addr, chain as make_chain, fake_proof, topic, Chain, FakeCheck, L1_VK};
+use crate::fixtures::{
+    addr, chain as make_chain, fake_openvm_proof, fake_proof, topic, Chain, FakeCheck, L1_VK,
+    OVM_L1_VK,
+};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -13,6 +16,9 @@ fn chain(n: usize, seed: u64) -> Chain {
 enum Part {
     Seg(usize, usize),
     Blk(usize),
+    /// An OpenVM L1 (its pv commits the OpenVM leaf key) and an OpenVM block proof.
+    OvmSeg(usize, usize),
+    OvmBlk(usize),
 }
 
 /// What the server assembles, plus the stand-in proof store.
@@ -37,6 +43,27 @@ fn serve(c: &Chain, layout: &[Part], f: &LogFilter) -> (LogsProof, HashMap<Strin
                 let pv = c.leaf_pvs[i].clone();
                 let id = c.block_id(i).to_string();
                 store.insert(id.clone(), fake_proof(&leaf_vk, &pv));
+                parts.push(ProofPart::Block(BlockProof {
+                    public_values: pv,
+                    proof: id,
+                    records: c.records[i].clone(),
+                }));
+            }
+            Part::OvmSeg(i0, i1) => {
+                let pv = c.ovm_l1(i0, i1);
+                let ix = SegmentIndex::build(&pv, &c.records[i0..i1]).expect("build");
+                let id = c.segment_id(i0, i1).to_string();
+                store.insert(id.clone(), fake_openvm_proof(&OVM_L1_VK, &pv));
+                parts.push(ProofPart::Segment(SegmentProof {
+                    ranges: ix.prove(f).unwrap().into_iter().map(Into::into).collect(),
+                    public_values: pv,
+                    proof: id,
+                }));
+            }
+            Part::OvmBlk(i) => {
+                let pv = c.leaf_pvs[i].clone();
+                let id = c.block_id(i).to_string();
+                store.insert(id.clone(), fake_openvm_proof(&c.ovm_leaf_vkey(), &pv));
                 parts.push(ProofPart::Block(BlockProof {
                     public_values: pv,
                     proof: id,
@@ -265,7 +292,7 @@ fn proofs_programs_and_chain_are_checked() {
     ));
     let mut fetch = |id: &str| store.get(id).cloned().ok_or_else(|| "missing".to_string());
     let mut t = c.trust();
-    t.leaf_vkeys = vec![[7; 32]];
+    t.sp1.leaf = vec![[7; 32]];
     assert_eq!(
         verify(&p, &f, &t, &mut fetch, &mut FakeCheck).unwrap_err(),
         VerifyError::UnknownLeafProgram
@@ -401,6 +428,259 @@ fn eth_filters_parse_with_the_log_rpc_rules() {
     );
     assert!(LogFilter::from_eth_filter(&json!({"address": "0x12"}), 1, 1).is_err());
     assert!(LogFilter::from_eth_filter(&json!({"address": 7}), 1, 1).is_err());
+}
+
+// ---- Two proof systems: SP1 below a chain's cutover, OpenVM from it ----
+
+/// SP1 to block 15, OpenVM from block 16: an OpenVM segment, then OpenVM blocks.
+const SWITCH: &[Part] = &[
+    Part::Seg(0, 16),
+    Part::OvmSeg(16, 32),
+    Part::OvmBlk(32),
+    Part::OvmBlk(33),
+    Part::OvmBlk(34),
+    Part::OvmBlk(35),
+    Part::OvmBlk(36),
+    Part::OvmBlk(37),
+    Part::OvmBlk(38),
+    Part::OvmBlk(39),
+];
+
+fn verify_with(
+    p: &LogsProof,
+    store: &HashMap<String, Vec<u8>>,
+    f: &LogFilter,
+    t: &Trust,
+) -> Result<Verified, VerifyError> {
+    let mut fetch = |id: &str| store.get(id).cloned().ok_or_else(|| "missing".to_string());
+    verify(p, f, t, &mut fetch, &mut FakeCheck)
+}
+
+fn proof_id(p: &LogsProof, i: usize) -> String {
+    match &p.parts[i] {
+        ProofPart::Segment(s) => s.proof.clone(),
+        ProofPart::Block(b) => b.proof.clone(),
+        ProofPart::Leaf(l) => l.proof.clone(),
+    }
+}
+
+#[test]
+fn an_answer_across_the_cutover_verifies_with_each_part_in_its_own_system() {
+    let c = chain(40, 51);
+    let all = c.all_logs();
+    for f in filters() {
+        let (p, store) = serve(&c, SWITCH, &f);
+        let got = check(&c, &p, &store, &f).unwrap_or_else(|e| panic!("{f:?}: {e}"));
+        let want: Vec<Log> = all.iter().filter(|l| f.matches(l)).cloned().collect();
+        assert_eq!(got.logs, want, "{f:?}");
+    }
+    let f = filter(0, 39, None, &[]);
+    let (p, store) = serve(&c, SWITCH, &f);
+    let got = check(&c, &p, &store, &f).unwrap();
+    use crate::ProofSystem::{OpenVm, Sp1};
+    assert_eq!(got.systems, [vec![Sp1], vec![OpenVm; 9]].concat());
+    assert_eq!(got.openvm_from, Some(START + 16));
+    // All SP1 says so too.
+    let (p, store) = serve(&c, LAYOUT, &f);
+    let got = check(&c, &p, &store, &f).unwrap();
+    assert_eq!((got.systems.len(), got.openvm_from), (10, None));
+    assert!(got.systems.iter().all(|&s| s == Sp1));
+}
+
+#[test]
+fn no_key_of_one_system_vouches_for_a_part_of_the_other() {
+    let c = chain(40, 52);
+    let f = filter(0, 39, Some(&[1]), &[Some(&[1])]);
+    let (p, store) = serve(&c, SWITCH, &f);
+    let ProofPart::Segment(sp1_seg) = p.parts[0].clone() else {
+        unreachable!()
+    };
+    let ProofPart::Segment(ovm_seg) = p.parts[1].clone() else {
+        unreachable!()
+    };
+    let ProofPart::Block(ovm_blk) = p.parts[2].clone() else {
+        unreachable!()
+    };
+    let t = c.trust();
+    let refused = |id: &str, bytes: Vec<u8>| {
+        let mut bad = store.clone();
+        bad.insert(id.to_string(), bytes);
+        verify_with(&p, &bad, &f, &t).unwrap_err()
+    };
+    // An OpenVM proof made under the SP1 L1 key: OpenVM parts are checked under OpenVM keys only.
+    assert!(matches!(
+        refused(
+            &ovm_seg.proof,
+            fake_openvm_proof(&L1_VK, &ovm_seg.public_values)
+        ),
+        VerifyError::Proof { .. }
+    ));
+    // The OpenVM L1 pv in SP1 bytes: an SP1 L1 must commit an SP1 leaf key, and this commits OpenVM's.
+    assert_eq!(
+        refused(&ovm_seg.proof, fake_proof(&L1_VK, &ovm_seg.public_values)),
+        VerifyError::UnknownLeafProgram
+    );
+    // And the reverse: the SP1 L1 pv in OpenVM bytes commits a leaf key OpenVM does not trust.
+    assert_eq!(
+        refused(
+            &sp1_seg.proof,
+            fake_openvm_proof(&OVM_L1_VK, &sp1_seg.public_values)
+        ),
+        VerifyError::UnknownLeafProgram
+    );
+    // An OpenVM block proof under the SP1 leaf key, and an SP1 one under the OpenVM leaf key.
+    assert!(matches!(
+        refused(
+            &ovm_blk.proof,
+            fake_openvm_proof(&c.leaf_vkey(), &ovm_blk.public_values)
+        ),
+        VerifyError::Proof { .. }
+    ));
+    assert!(matches!(
+        refused(
+            &ovm_blk.proof,
+            fake_proof(&c.ovm_leaf_vkey(), &ovm_blk.public_values)
+        ),
+        VerifyError::SystemOrder { .. }
+    ));
+    let (s1, s1store) = serve(&c, LAYOUT, &f);
+    let ProofPart::Block(sp1_blk) = s1.parts[2].clone() else {
+        unreachable!()
+    };
+    let mut bad = s1store.clone();
+    bad.insert(
+        sp1_blk.proof.clone(),
+        fake_proof(&c.ovm_leaf_vkey(), &sp1_blk.public_values),
+    );
+    assert!(matches!(
+        verify_with(&s1, &bad, &f, &t),
+        Err(VerifyError::Proof { .. })
+    ));
+    // A client that trusts no OpenVM key verifies no OpenVM part.
+    let mut sp1_only = c.trust();
+    sp1_only.openvm = Keys::default();
+    assert_eq!(
+        verify_with(&p, &store, &f, &sp1_only).unwrap_err(),
+        VerifyError::UnknownLeafProgram
+    );
+    let (p2, store2) = serve(&c, &[Part::OvmBlk(0)], &filter(0, 0, None, &[]));
+    match verify_with(&p2, &store2, &filter(0, 0, None, &[]), &sp1_only).unwrap_err() {
+        VerifyError::Proof { reason, .. } => assert_eq!(reason, "no trusted OpenVM program key"),
+        e => panic!("{e}"),
+    }
+    // Bytes of neither system are refused before any check.
+    match refused(&ovm_blk.proof, b"OVM1 not a proof".to_vec()) {
+        VerifyError::Proof { reason, .. } => assert_eq!(reason, NOT_A_PROOF),
+        e => panic!("{e}"),
+    }
+}
+
+#[test]
+fn the_split_must_agree_with_the_chains_cutover() {
+    use crate::ProofSystem::{OpenVm, Sp1};
+    let c = chain(40, 53);
+    let f = filter(0, 39, None, &[]);
+    let (p, store) = serve(&c, SWITCH, &f);
+    let at = |from: Option<u64>| {
+        let mut t = c.trust();
+        t.openvm_from = from;
+        verify_with(&p, &store, &f, &t)
+    };
+    // F = block 16, where the answer switches: verified.
+    assert_eq!(at(Some(START + 16)).unwrap().openvm_from, Some(START + 16));
+    // F later: the OpenVM segment over 16..31 should have been SP1.
+    assert_eq!(
+        at(Some(START + 32)).unwrap_err(),
+        VerifyError::System {
+            block: START + 16,
+            got: OpenVm,
+            want: Sp1
+        }
+    );
+    assert_eq!(
+        at(Some(START + 32)).unwrap_err().to_string(),
+        format!(
+            "part at block {} is proven with OpenVM, but this chain uses SP1 there",
+            START + 16
+        )
+    );
+    // F earlier: the SP1 segment ends at 15, at or after F, so it should have been OpenVM.
+    assert_eq!(
+        at(Some(START + 15)).unwrap_err(),
+        VerifyError::System {
+            block: START,
+            got: Sp1,
+            want: OpenVm
+        }
+    );
+    // A part that crosses F is in the system of its last block (the runner's L2 rule): the
+    // OpenVM segment over 16..31, for F anywhere from 17 to 31.
+    assert!(at(Some(START + 20)).is_ok());
+    let (q, qstore) = serve(
+        &c,
+        &[Part::Seg(0, 16), Part::OvmSeg(16, 32)],
+        &filter(0, 31, None, &[]),
+    );
+    let mut t = c.trust();
+    t.openvm_from = Some(START + 31);
+    assert!(verify_with(&q, &qstore, &filter(0, 31, None, &[]), &t).is_ok());
+    // All SP1 below F, all OpenVM from it, and either alone with F unknown.
+    let (s1, s1store) = serve(&c, LAYOUT, &f);
+    t.openvm_from = Some(START + 40);
+    assert!(verify_with(&s1, &s1store, &f, &t).is_ok());
+    t.openvm_from = Some(START + 39);
+    assert!(matches!(
+        verify_with(&s1, &s1store, &f, &t),
+        Err(VerifyError::System { .. })
+    ));
+    let ovm_only: Vec<Part> = std::iter::once(Part::OvmSeg(0, 16))
+        .chain((16..40).map(Part::OvmBlk))
+        .collect();
+    let (o, ostore) = serve(&c, &ovm_only, &f);
+    let got = verify_with(&o, &ostore, &f, &c.trust()).unwrap();
+    assert_eq!((got.systems.len(), got.openvm_from), (25, Some(START)));
+    t.openvm_from = Some(START);
+    assert!(verify_with(&o, &ostore, &f, &t).is_ok());
+    // F unknown: one switch, from SP1 to OpenVM. Back to SP1 is refused wherever it happens.
+    let back = [Part::OvmSeg(0, 16), Part::Seg(16, 32), Part::OvmBlk(32)];
+    let (b, bstore) = serve(&c, &back, &filter(0, 32, None, &[]));
+    assert_eq!(
+        verify_with(&b, &bstore, &filter(0, 32, None, &[]), &c.trust()).unwrap_err(),
+        VerifyError::SystemOrder { block: START + 16 }
+    );
+    let late = [Part::Seg(0, 16), Part::OvmBlk(16), Part::Blk(17)];
+    let (l, lstore) = serve(&c, &late, &filter(0, 17, None, &[]));
+    assert_eq!(
+        verify_with(&l, &lstore, &filter(0, 17, None, &[]), &c.trust()).unwrap_err(),
+        VerifyError::SystemOrder { block: START + 17 }
+    );
+    // The proof id says nothing about the system: the same ids, other bytes.
+    assert_eq!(proof_id(&p, 1), c.segment_id(16, 32).to_string());
+}
+
+#[test]
+fn by_system_sends_each_proof_to_its_systems_check() {
+    struct Count(&'static str, Vec<&'static str>);
+    impl ProofCheck for Count {
+        fn check(&mut self, vk: &[u8; 32], proof: &[u8], pv: &[u8]) -> Result<(), String> {
+            self.1.push(self.0);
+            FakeCheck.check(vk, proof, pv)
+        }
+    }
+    let c = chain(40, 54);
+    let f = filter(0, 39, None, &[]);
+    let (p, store) = serve(&c, SWITCH, &f);
+    let mut fetch = |id: &str| store.get(id).cloned().ok_or_else(|| "missing".to_string());
+    let mut by = BySystem {
+        sp1: Count("sp1", vec![]),
+        openvm: Count("openvm", vec![]),
+    };
+    verify(&p, &f, &c.trust(), &mut fetch, &mut by).unwrap();
+    assert_eq!((by.sp1.1.len(), by.openvm.1.len()), (1, 9));
+    assert_eq!(
+        by.check(&[0; 32], b"\x09\x00\x00\x00", b"").unwrap_err(),
+        NOT_A_PROOF
+    );
 }
 
 // ---- Multi-block leaves (fast chains: one leaf per aligned S-block segment) ----
@@ -681,7 +961,7 @@ fn a_leaf_is_linked_proven_and_on_the_trusted_chain() {
     ));
     let mut fetch = |id: &str| store.get(id).cloned().ok_or_else(|| "missing".to_string());
     let mut t = c.trust();
-    t.leaf_vkeys = vec![[7; 32]];
+    t.sp1.leaf = vec![[7; 32]];
     assert!(matches!(
         verify(&p, &f, &t, &mut fetch, &mut FakeCheck),
         Err(VerifyError::Proof { .. })

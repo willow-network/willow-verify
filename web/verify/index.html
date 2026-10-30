@@ -84,13 +84,13 @@
       </div>
       <div id="keysFields">
         <div class="field">
-          <label for="leafKeys">Block program keys</label>
+          <label for="leafKeys">SP1 block program keys</label>
           <textarea id="leafKeys" rows="2" spellcheck="false" autocomplete="off" placeholder="Leave empty to use the published key"></textarea>
         </div>
         <div class="field">
-          <label for="segmentKeys">Segment program keys</label>
+          <label for="segmentKeys">SP1 segment program keys</label>
           <textarea id="segmentKeys" rows="2" spellcheck="false" autocomplete="off" placeholder="Leave empty to use the published key"></textarea>
-          <p class="hint">A log proof only counts if it was made by a program with one of these keys. One pair serves all seven chains. Replace them only if Willow tells you a new program is in use. Published keys: <span id="pinned" class="mono"></span></p>
+          <p class="hint">A log proof only counts if it was made by a program with one of these keys. Each proof system has one pair, which serves all seven chains. Replace these only if Willow tells you a new SP1 program is in use. OpenVM proofs are always checked against the OpenVM keys published with this page. Published keys: <span id="pinned" class="mono"></span></p>
         </div>
       </div>
     </details>
@@ -172,7 +172,7 @@
   <details class="about">
     <summary>How this works</summary>
     <p><strong>Transactions.</strong> A block's header commits to every transaction and receipt in it. Willow sends them with Merkle proofs, and your browser verifies they are in the block, in milliseconds.</p>
-    <p><strong>Logs.</strong> Willow proves each block's logs with SP1 proofs. Your browser verifies them and works out from your filter which logs must be there, so none can be left out.</p>
+    <p><strong>Logs.</strong> Willow proves each block's logs with SP1 proofs, and with OpenVM proofs from each chain's switch to OpenVM. Your browser verifies them, each against its own system's program keys, and works out from your filter which logs must be there, so none can be left out.</p>
     <p><strong>Blocks.</strong> Your browser then verifies the block against Ethereum. On Ethereum it follows the validators' signatures from a starting point built into this page. On the other six chains it reads the chain's claim on Ethereum, which settles once its challenge period ends, after 5 to 7 days. Newer blocks are verified by the sequencer's signature. If Willow can't send that data, the page asks public nodes and shows the result in gold.</p>
     <p><strong>What you rely on.</strong> No node, Willow included. This page's code is served by Willow, with the program keys and the starting point. Its source is <a href="https://github.com/willow-network/willow-verify" target="_blank" rel="noopener noreferrer">on GitHub</a>, with a script that rebuilds this page and verifies that each file in <a href="SHA256SUMS.txt">SHA256SUMS.txt</a> is the one Willow serves. To run the same verification on your own machine, ask Willow for the command-line verifier.</p>
     <p><strong>Links.</strong> <code>?chain=base&amp;tx=0x…</code> opens a transaction, and <code>?chain=base&amp;from=…&amp;to=…&amp;address=…&amp;topic0=…</code> every matching log in a block range. Copy link makes one.</p>

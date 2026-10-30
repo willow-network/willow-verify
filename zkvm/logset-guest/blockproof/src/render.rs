@@ -23,7 +23,10 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Receipt {
     pub ty: u8,
+    /// False where a state root stands in its place.
     pub status: bool,
+    /// Before Byzantium: the state root after the transaction, where a status goes.
+    pub root: Option<[u8; 32]>,
     pub cumulative_gas_used: u64,
     pub bloom: Vec<u8>,
     pub logs: Vec<Log>,
@@ -46,18 +49,18 @@ pub fn decode_receipt(value: &[u8], chain_id: u64) -> Result<Receipt> {
         ensure!(b.len() <= 8, "scalar of {} bytes", b.len());
         Ok(b.iter().fold(0u64, |a, x| a << 8 | u64::from(*x)))
     };
-    let status = match f[0].0 {
-        [] => false,
-        [1] => true,
-        s => bail!(
-            "receipt status of {} bytes (a pre-Byzantium root?)",
-            s.len()
-        ),
+    let (status, root) = match f[0] {
+        ([], false) => (false, None),
+        ([1], false) => (true, None),
+        // Before Byzantium (EIP-658) a legacy receipt holds the post-state root.
+        (r, false) if r.len() == 32 && ty == 0 => (false, Some(r.try_into().expect("32 bytes"))),
+        (s, _) => bail!("receipt status of {} bytes", s.len()),
     };
     let deposit = ty == DEPOSIT_TX_TYPE && deposits_allowed(chain_id);
     Ok(Receipt {
         ty,
         status,
+        root,
         cumulative_gas_used: scalar(f[1].0)?,
         bloom: f[2].0.to_vec(),
         logs: logs_from_value(value, chain_id)?,
@@ -148,6 +151,53 @@ struct Slot<'a> {
     hash: [u8; 32],
 }
 
+/// Base's BaseTime predeploy and its `setTimestampMillisPart(uint16)`: from
+/// Denim every Base block's second transaction is a deposit calling it with the
+/// millisecond part of the block's time.
+const BASE_TIME: [u8; 20] = [
+    0x42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x30,
+];
+const SET_MILLIS: [u8; 4] = [0x86, 0xbd, 0xf3, 0x94];
+
+/// When Base's blocks became 200 ms (Denim), by chain.
+fn denim_at(chain_id: u64) -> Option<u64> {
+    (chain_id == 8_453).then_some(1_793_901_600)
+}
+
+/// The millisecond part a BaseTime deposit sets, if `tx` is one.
+pub fn base_time_millis(tx: &Decoded) -> Option<u64> {
+    let input = tx.input();
+    let ms = u16::from_be_bytes(input.get(34..36)?.try_into().ok()?);
+    (tx.ty() == DEPOSIT_TX_TYPE
+        && tx.to() == Some(BASE_TIME)
+        && input.len() == 36
+        && input[..4] == SET_MILLIS
+        && input[4..34].iter().all(|b| *b == 0)
+        && ms < 1_000)
+        .then_some(u64::from(ms))
+}
+
+/// The millisecond part of a block's time from its second transaction's bytes
+/// (a BaseTime deposit), if it is one.
+pub fn block_millis(chain_id: u64, txs: &[&[u8]]) -> Option<u64> {
+    let tx1 = txs.get(1).filter(|t| t.first() == Some(&DEPOSIT_TX_TYPE))?;
+    deposits_allowed(chain_id)
+        .then(|| txs::decode(tx1, chain_id).ok())
+        .flatten()
+        .as_ref()
+        .and_then(base_time_millis)
+}
+
+/// The block's millisecond part (Base from Denim), as far as the view knows it.
+#[derive(Clone, Copy)]
+enum Millis {
+    /// A block without one.
+    None,
+    Known(u64),
+    /// A Base block from Denim on whose BaseTime deposit the view lacks.
+    Unknown,
+}
+
 /// The block's L1 info deposit (OP stack), as far as the view knows it.
 enum L1 {
     /// Not an OP-stack block, or one whose first transaction carries none.
@@ -194,6 +244,7 @@ pub struct View<'a> {
     /// receipt is held.
     first_log: Vec<Option<u64>>,
     l1: L1,
+    millis: Millis,
 }
 
 impl<'a> View<'a> {
@@ -286,6 +337,11 @@ impl<'a> View<'a> {
                 _ => L1::Unknown,
             }
         };
+        let millis = match txs.get(1) {
+            Some(Some(s)) => base_time_millis(&s.tx).map_or(Millis::None, Millis::Known),
+            _ if denim_at(ctx.chain_id).is_some_and(|t| ctx.timestamp >= t) => Millis::Unknown,
+            _ => Millis::None,
+        };
         Self {
             ctx,
             txs,
@@ -293,6 +349,7 @@ impl<'a> View<'a> {
             extras,
             first_log,
             l1,
+            millis,
         }
     }
 
@@ -341,6 +398,11 @@ impl<'a> View<'a> {
         put(&mut o, "blockHash", hx(&ctx.hash));
         put(&mut o, "blockNumber", q(ctx.number));
         put(&mut o, "blockTimestamp", q(ctx.timestamp));
+        match self.millis {
+            Millis::Known(ms) => put(&mut o, "blockTimestampMs", q(ctx.timestamp * 1_000 + ms)),
+            Millis::Unknown => unproven.push("blockTimestampMs".to_string()),
+            Millis::None => {}
+        }
         put(&mut o, "transactionIndex", q(i as u64));
         put(&mut o, "hash", hx(hash));
         put(&mut o, "from", hx(sender));
@@ -438,7 +500,11 @@ impl<'a> View<'a> {
         }
         put(&mut o, "transactionIndex", q(i as u64));
         put(&mut o, "type", q(u64::from(r.ty)));
-        put(&mut o, "status", q(r.status as u64));
+        // geth's `MarshalReceipt`: `root` in place of `status` before Byzantium.
+        match r.root {
+            Some(root) => put(&mut o, "root", hx(&root)),
+            None => put(&mut o, "status", q(r.status as u64)),
+        }
         put(&mut o, "cumulativeGasUsed", q(r.cumulative_gas_used));
         let prev = match i.checked_sub(1) {
             None => Some(0),
@@ -584,6 +650,9 @@ impl<'a> View<'a> {
             if tx_hash.is_none() {
                 missing(&["logs[].transactionHash"]);
             }
+            if matches!(self.millis, Millis::Unknown) {
+                missing(&["logs[].blockTimestampMs"]);
+            }
         }
         r.logs
             .iter()
@@ -614,7 +683,11 @@ impl<'a> View<'a> {
     }
 
     fn log_json(&self, tx: usize, tx_hash: Option<[u8; 32]>, index: Option<u64>, l: &Log) -> Value {
-        log_json(&self.ctx, tx, tx_hash, index, l)
+        let millis = match self.millis {
+            Millis::Known(ms) => Some(ms),
+            _ => None,
+        };
+        log_json(&self.ctx, millis, tx, tx_hash, index, l)
     }
 
     /// `eth_getBlockByNumber(n, true)`: the stored header with every
@@ -648,6 +721,7 @@ pub fn block_logs(
         txs.len(),
         receipts.len()
     );
+    let millis = block_millis(ctx.chain_id, txs);
     let (mut out, mut first) = (Vec::new(), 0u64);
     for (i, r) in receipts.iter().enumerate() {
         let logs = logs_from_value(r, ctx.chain_id).with_context(|| format!("receipt {i}"))?;
@@ -655,7 +729,7 @@ pub fn block_logs(
         for (k, l) in logs.iter().enumerate() {
             if keep(l) {
                 let h = *tx_hash.get_or_insert_with(|| alloy::primitives::keccak256(txs[i]).0);
-                out.push(log_json(ctx, i, Some(h), Some(first + k as u64), l));
+                out.push(log_json(ctx, millis, i, Some(h), Some(first + k as u64), l));
             }
         }
         first += logs.len() as u64;
@@ -663,9 +737,10 @@ pub fn block_logs(
     Ok(out)
 }
 
-/// One log in `eth_getLogs` form.
+/// One log in `eth_getLogs` form; `millis`, its block's millisecond part (Base from Denim).
 fn log_json(
     ctx: &Context,
+    millis: Option<u64>,
     tx: usize,
     tx_hash: Option<[u8; 32]>,
     index: Option<u64>,
@@ -681,6 +756,9 @@ fn log_json(
     put(&mut o, "blockNumber", q(ctx.number));
     put(&mut o, "blockHash", hx(&ctx.hash));
     put(&mut o, "blockTimestamp", q(ctx.timestamp));
+    if let Some(ms) = millis {
+        put(&mut o, "blockTimestampMs", q(ctx.timestamp * 1_000 + ms));
+    }
     if let Some(h) = tx_hash {
         put(&mut o, "transactionHash", hx(&h));
     }

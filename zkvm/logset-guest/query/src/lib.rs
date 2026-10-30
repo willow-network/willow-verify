@@ -4,7 +4,7 @@
 //! blocks (`IndexCommitment`). Everything a filter can match inside the segment
 //! lies in a few contiguous runs of that index, so a query proof is the segment
 //! proof plus one [`RangeProof`](logset_core::index::RangeProof) per run: no new
-//! SP1 proof per query. Blocks not yet in a final segment are served as their
+//! zkVM proof per query. Blocks not yet in a final segment are served as their
 //! leaf proof (one block on Ethereum, an aligned `S`-block segment on a fast
 //! chain) with every block's full record stream, which the client filters itself.
 //!
@@ -15,14 +15,16 @@
 
 pub mod filter;
 pub mod serve;
+pub mod system;
 pub mod verify;
 pub mod wire;
 
 pub use filter::{plan, Log, LogFilter, MAX_RANGES};
 pub use serve::{SegmentIndex, ServeError};
+pub use system::{openvm_body, ProofSystem, OPENVM_PROOF_MAGIC};
 pub use verify::{
-    block_statement, compare, leaf_statement, verify, Comparison, ProofCheck, Trust, Verified,
-    VerifyError,
+    block_statement, compare, leaf_statement, verify, BySystem, Comparison, Keys, ProofCheck,
+    Trust, Verified, VerifyError, NOT_A_PROOF,
 };
 pub use wire::{
     BlockProof, LeafProof, LogsProof, ProofId, ProofPart, RangeProofWire, RecordWire, SegmentProof,

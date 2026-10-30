@@ -1,10 +1,12 @@
 //! TEST FIXTURES (feature `fixtures`): a synthetic chain whose segment public
 //! values come from the aggregator's own native code (`aggregate_index`), so
-//! they are what the L1 guest commits. SP1 proofs are stood in for by
-//! `sha256(vkey | pv)` ([`fake_proof`], [`FakeCheck`]).
+//! they are what the L1 guest commits. Proofs are stood in for by
+//! `sha256(vkey | pv)` behind the system's first bytes: an SP1 compressed proof's
+//! bincode tag ([`fake_proof`]) or the OpenVM magic ([`fake_openvm_proof`]);
+//! [`FakeCheck`] accepts either.
 
-use crate::verify::{ProofCheck, Trust};
-use crate::{frame, pack_streams, Log, ProofId};
+use crate::verify::{Keys, ProofCheck, Trust};
+use crate::{frame, pack_streams, Log, ProofId, OPENVM_PROOF_MAGIC};
 use logset_agg_core::index_agg::{
     aggregate_index, encode_idx_input_blocks, host_block_records, host_hint,
 };
@@ -15,6 +17,9 @@ use std::path::Path;
 
 pub const LEAF_VK: [u32; 8] = [0x687c_1233, 1, 2, 3, 4, 5, 6, 0x5db6_4b1d];
 pub const L1_VK: [u8; 32] = [0x0b; 32];
+/// The stand-in OpenVM leaf and L1 program keys (other than SP1's).
+pub const OVM_LEAF_VK: [u32; 8] = [0x28b8_1964, 7, 8, 9, 10, 11, 12, 0x0849_0119];
+pub const OVM_L1_VK: [u8; 32] = [0x3b; 32];
 
 pub fn sha256(b: &[u8]) -> [u8; 32] {
     use sha2::Digest;
@@ -210,6 +215,16 @@ impl Chain {
 
     /// The L1 pv over blocks `i0..i1` from children of `span` blocks (the last may be shorter).
     pub fn l1_over(&self, span: usize, i0: usize, i1: usize) -> Vec<u8> {
+        self.l1_over_key(&LEAF_VK, span, i0, i1)
+    }
+
+    /// [`Chain::l1`] as the OpenVM L1 commits it: its leaves' key is the OpenVM leaf's.
+    pub fn ovm_l1(&self, i0: usize, i1: usize) -> Vec<u8> {
+        self.l1_over_key(&OVM_LEAF_VK, 1, i0, i1)
+    }
+
+    /// [`Chain::l1_over`] for leaves of program key `leaf_vk`.
+    pub fn l1_over_key(&self, leaf_vk: &[u32; 8], span: usize, i0: usize, i1: usize) -> Vec<u8> {
         let kids: Vec<(Vec<u8>, Vec<Vec<u8>>)> = (i0..i1)
             .step_by(span)
             .map(|a| {
@@ -221,7 +236,7 @@ impl Chain {
                 (pv, self.records[a..b].to_vec())
             })
             .collect();
-        let input = encode_idx_input_blocks(&LEAF_VK, &kids);
+        let input = encode_idx_input_blocks(leaf_vk, &kids);
         let hint = host_hint(&input).expect("hint");
         aggregate_index(&input, &hint, &sha256, &mut |_, _| {})
             .expect("aggregate")
@@ -233,11 +248,24 @@ impl Chain {
         logset_agg_core::vkey::vkey_words_to_bytes(&LEAF_VK)
     }
 
+    /// The stand-in OpenVM leaf program key as an OpenVM L1 commits it.
+    pub fn ovm_leaf_vkey(&self) -> [u8; 32] {
+        logset_agg_core::vkey::vkey_words_to_bytes(&OVM_LEAF_VK)
+    }
+
+    /// Both systems' stand-in keys; no cutover block.
     pub fn trust(&self) -> Trust {
         Trust {
             chain_id: self.chain_id,
-            segment_vkeys: vec![L1_VK],
-            leaf_vkeys: vec![self.leaf_vkey()],
+            sp1: Keys {
+                segment: vec![L1_VK],
+                leaf: vec![self.leaf_vkey()],
+            },
+            openvm: Keys {
+                segment: vec![OVM_L1_VK],
+                leaf: vec![self.ovm_leaf_vkey()],
+            },
+            openvm_from: None,
         }
     }
 
@@ -350,15 +378,26 @@ impl Chain {
     }
 }
 
+/// A stand-in SP1 proof: an SP1 compressed proof's first bytes, then `sha256(vk | pv)`.
 pub fn fake_proof(vk: &[u8; 32], pv: &[u8]) -> Vec<u8> {
-    sha256(&[vk.as_slice(), pv].concat()).to_vec()
+    [&[1u8, 0, 0, 0][..], &sha256(&[vk.as_slice(), pv].concat())].concat()
 }
 
+/// A stand-in OpenVM proof: the OpenVM magic, then `sha256(vk | pv)`.
+pub fn fake_openvm_proof(vk: &[u8; 32], pv: &[u8]) -> Vec<u8> {
+    [
+        &OPENVM_PROOF_MAGIC[..],
+        &sha256(&[vk.as_slice(), pv].concat()),
+    ]
+    .concat()
+}
+
+/// Accepts [`fake_proof`] and [`fake_openvm_proof`] of exactly `(vk, pv)`.
 pub struct FakeCheck;
 
 impl ProofCheck for FakeCheck {
     fn check(&mut self, vk: &[u8; 32], proof: &[u8], pv: &[u8]) -> Result<(), String> {
-        (proof == fake_proof(vk, pv))
+        (proof == fake_proof(vk, pv) || proof == fake_openvm_proof(vk, pv))
             .then_some(())
             .ok_or_else(|| "bad proof".into())
     }

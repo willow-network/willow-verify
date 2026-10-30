@@ -554,6 +554,10 @@ fn op_stack_blocks_of_every_fee_era_render_as_their_nodes_report_them() {
         ("op-117387811", 10, false),
         ("op-117387812", 10, false),
         ("op-117387820", 10, false),
+        // Base Sepolia's last 2 s block, Denim's first and its second (as Base data).
+        ("base-sepolia-48418655", 8453, false),
+        ("base-sepolia-48418656", 8453, false),
+        ("base-sepolia-48418657", 8453, false),
     ] {
         let b = opstack(name, chain);
         let node_txs = b.full["transactions"].as_array().unwrap();
@@ -608,4 +612,117 @@ fn op_stack_blocks_of_every_fee_era_render_as_their_nodes_report_them() {
         let c = compare(&t, &b.full["transactions"]);
         assert!(c.is_exact(), "{name}: {:?}", c.differ);
     }
+}
+
+/// From Denim a Base block's second transaction, a BaseTime deposit, sets its
+/// timestamp's millisecond part, which nodes report as `blockTimestampMs` on
+/// every transaction and log. A proof of any one transaction or receipt
+/// carries that deposit, so proves it; a view without it leaves it unproven.
+#[test]
+fn a_denim_blocks_milliseconds_come_from_its_basetime_deposit() {
+    use crate::render::{Context, View};
+    use std::collections::BTreeMap;
+    let b = opstack("base-sepolia-48418657", 8453);
+    let n = decode_header(&b.header).unwrap().number;
+    let node_txs = b.full["transactions"].as_array().unwrap();
+    let node_receipts = b.receipts_json.as_array().unwrap();
+    assert_eq!(node_txs[0]["blockTimestampMs"], "0x1a15f9eb9c8");
+    let last = b.txs.len() - 1;
+    for i in [0, 1, 2, last] {
+        let at = format!("item {i}");
+        let item = Item::Hash(b.tx_hash(i));
+        let tx = verify(&b.item(i, false), b.chain, &Subject::Transaction(item)).unwrap();
+        let r = tx.answer().unwrap();
+        assert!(r.unproven.is_empty(), "{at}: {:?}", r.unproven);
+        assert_eq!(
+            r.json["blockTimestampMs"], node_txs[i]["blockTimestampMs"],
+            "{at}"
+        );
+        let c = compare(&r, &node_txs[i]);
+        assert!(c.is_exact(), "{at}: {:?}", c.differ);
+        let rc = verify(&b.item(i, true), b.chain, &Subject::Receipt(item)).unwrap();
+        let r = rc.answer().unwrap();
+        let c = compare(&r, &node_receipts[i]);
+        assert!(c.differ.is_empty(), "{at}: {:?}", c.differ);
+        assert!(
+            c.unproven.iter().all(|f| f.ends_with(".logIndex")),
+            "{at}: {:?}",
+            c.unproven
+        );
+    }
+    let all = verify(
+        &b.block(),
+        b.chain,
+        &Subject::BlockReceipts(Block::Number(n)),
+    )
+    .unwrap();
+    let logs = all.answer().unwrap().json;
+    let with_logs = logs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["logs"][0].is_object());
+    assert_eq!(
+        with_logs.unwrap()["logs"][0]["blockTimestampMs"],
+        "0x1a15f9eb9c8"
+    );
+    // A view without the deposit can't render it (here as Base's own block from Denim on).
+    let txs = BTreeMap::from([(2, b.txs[2].clone())]);
+    let receipts = BTreeMap::from([(2, b.receipts[2].clone())]);
+    let mut ctx = Context::from_header(b.chain, &b.full).unwrap();
+    ctx.timestamp = 1_793_901_601;
+    let v = View::partial(ctx, &txs, &receipts).unwrap();
+    let t = v.tx(2).unwrap();
+    assert!(t.json.get("blockTimestampMs").is_none());
+    assert!(t.unproven.contains(&"blockTimestampMs".to_string()));
+    let r = v.receipt(2).unwrap();
+    assert!(r.unproven.contains(&"logs[].blockTimestampMs".to_string()));
+    // Before Denim there is none.
+    let pre = opstack("base-sepolia-48418655", 8453);
+    let v = verify(
+        &pre.item(2, false),
+        8453,
+        &Subject::Transaction(Item::Hash(pre.tx_hash(2))),
+    )
+    .unwrap();
+    let r = v.answer().unwrap();
+    assert!(r.json.get("blockTimestampMs").is_none() && r.unproven.is_empty());
+}
+
+/// A receipt before Byzantium holds the post-state root where a status goes:
+/// read back as `root` (no status) from a legacy receipt, refused in a typed
+/// one, where no fork ever put it.
+#[test]
+fn a_receipt_before_byzantium_reads_back_its_state_root() {
+    use crate::render::decode_receipt;
+    let path = format!("{FIXTURES}/uncles/eth-1500000.receipts.json");
+    let node: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let (values, _) = values_and_logs_from_rpc(&node, 1).unwrap();
+    for (v, n) in values.iter().zip(node.as_array().unwrap()) {
+        let r = decode_receipt(v, 1).unwrap();
+        assert_eq!(
+            r.root.map(|r| format!("0x{}", hex::encode(r))),
+            n["root"].as_str().map(String::from)
+        );
+        assert_eq!(r.ty, 0);
+    }
+    let mut typed = vec![2u8];
+    typed.extend_from_slice(&values[0]);
+    assert!(decode_receipt(&typed, 1).is_err());
+}
+
+#[test]
+fn a_frontier_transactions_high_s_signature_recovers_its_sender() {
+    // Block 201151's first transaction: before Homestead (EIP-2) an s above n/2 was valid.
+    let raw = hex::decode(
+        "f86c07850ba43b7400825208948692e0f957e496f8b8708b5957d572c3c32fd65d883782dace9d900000801b\
+         a0bc99199da25edc17739de87f767ef6ac25569e67a4cc3590df8caa24ed8fb96e\
+         a0bfd65c1c5cd346d47e84f34a4e198afa1f01a5eec38bbeb48e52d208d0c26730",
+    )
+    .unwrap();
+    let sender = crate::txs::sender(&crate::txs::decode(&raw, 1).unwrap()).unwrap();
+    assert_eq!(
+        hex::encode(sender),
+        "9e5e1eac108fb93802384d26973ad35034db7462"
+    );
 }

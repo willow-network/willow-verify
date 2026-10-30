@@ -1,10 +1,13 @@
-// Runs the wasm verifiers off the main thread: the log verifier (SP1) and the transaction and
-// receipt verifier, each loaded on first use. `response` is a JSON-RPC response body as the
-// server sent it (the wasm parses it; the page never re-serialises server data). Requests are
-// answered in order. Messages:
+// Runs the wasm verifiers off the main thread: the log verifier (SP1 proofs, and every check of
+// an answer but the OpenVM proofs' own), its OpenVM proof module, and the transaction and receipt
+// verifier, each loaded on first use. The OpenVM module loads when an answer's proofs include an
+// OpenVM one; the log verifier calls it for each such proof, under the key it chose. `response` is
+// a JSON-RPC response body as the server sent it (the wasm parses it; the page never re-serialises
+// server data). Requests are answered in order. Messages:
 //   {type:'init', chainId, segmentKeys, leafKeys}               -> {type:'ready', keys} | {type:'error'}
 //   {type:'cached', ids}                                        -> {type:'cached', ids} (the ones kept here)
-//   {type:'verify', response, filter, ids, proofs: {id: bytes}} -> {type:'checked', id, ms, error}* then {type:'verified', report, logs} | {type:'error'}
+//   {type:'verify', response, filter, ids, proofs: {id: bytes}} -> {type:'checked', id, ms, error, system}* then {type:'verified', report, logs} | {type:'error'}
+//     (system: 'sp1' or 'openvm', the proof's own, read from its bytes in the wasm)
 //   {type:'compare', response}                                  -> {type:'compared', result} | {type:'error'}
 // Transaction and receipt proofs (no init needed):
 //   {type:'items-request', chainId, kind, target}               -> {type:'items-requested', method, params} | {type:'error'}
@@ -24,6 +27,7 @@
 // large answer can still run the browser out of memory. Kinds are never guessed from message
 // text, which can carry strings the server chose.
 import initLogs, { Verifier } from './__GLUE__';
+import initOpenVm, { OpenVmVerifier } from './__OPENVM_GLUE__';
 import initItems, { ItemVerifier } from './__ITEMS_GLUE__';
 import initAnchor, { Anchor } from './__ANCHOR_GLUE__';
 
@@ -32,14 +36,37 @@ import initAnchor, { Anchor } from './__ANCHOR_GLUE__';
 const KEEP = 20;
 let kept = new Map();
 let verifier = null;
+// The OpenVM proof check, made once: it holds the pinned verifying keys.
+let openvm = null;
 let items = null;
 // Ethereum's light client: the committees it verified live as long as the worker.
 let anchor = null;
 // Each module loads once, when a message first needs it. Every message awaits its module and reports a failed load.
 let logsReady = null;
+let openvmReady = null;
 let itemsReady = null;
 let anchorReady = null;
 const logsModule = () => (logsReady ??= initLogs({ module_or_path: new URL('./__WASM__', import.meta.url) }));
+const openvmModule = () => (openvmReady ??= initOpenVm({ module_or_path: new URL('./__OPENVM_WASM__', import.meta.url) }));
+// An OpenVM proof's first bytes ("OVM2"). Only decides whether to load the OpenVM module: which
+// system a proof is, and the keys it is checked under, are decided in the log verifier.
+const isOpenVm = (b) => b && b.length >= 4 && b[0] === 0x4f && b[1] === 0x56 && b[2] === 0x4d && b[3] === 0x32;
+
+/// The OpenVM check, loaded and made once, after confirming it verifies under exactly the OpenVM
+/// keys the log verifier trusts (both read pins/program-keys.txt; a mismatch is a broken build).
+async function openvmCheck() {
+  if (openvm) return openvm;
+  await openvmModule();
+  const o = new OpenVmVerifier();
+  const k = JSON.parse(o.keys());
+  const want = JSON.parse(verifier.keys()).pinned.openvm;
+  if (!k.ok || k.leaf !== want.leaf[0] || k.l1 !== want.segment[0]) {
+    o.free();
+    throw new Error(`the OpenVM module trusts other programs than the log verifier: ${JSON.stringify(k)}`);
+  }
+  openvm = o;
+  return openvm;
+}
 const itemsModule = () => (itemsReady ??= initItems({ module_or_path: new URL('./__ITEMS_WASM__', import.meta.url) }));
 const anchorModule = () => (anchorReady ??= initAnchor({ module_or_path: new URL('./__ANCHOR_WASM__', import.meta.url) }));
 const moduleFor = (type) => (type.startsWith('items-') ? itemsModule() : type.startsWith('anchor-') ? anchorModule() : logsModule());
@@ -82,13 +109,19 @@ async function handle(m) {
       t0 = performance.now();
       return proofs.get(id);
     };
-    const onChecked = (id, error) => {
+    const onChecked = (id, error, system) => {
       if (!error) passed.push(id);
-      postMessage({ type: 'checked', id, ms: performance.now() - t0, error: error ?? null });
+      postMessage({ type: 'checked', id, ms: performance.now() - t0, error: error ?? null, system: system ?? null });
     };
     const start = performance.now();
     try {
-      const r = JSON.parse(verifier.verify(m.response, m.filter, getProof, onChecked));
+      // Without the OpenVM module, an OpenVM proof fails in the log verifier ("no OpenVM module").
+      let checkOpenVm;
+      if ([...proofs.values()].some(isOpenVm)) {
+        const o = await openvmCheck();
+        checkOpenVm = (key, proof, pv) => o.check(key, proof, pv);
+      }
+      const r = JSON.parse(verifier.verify(m.response, m.filter, getProof, onChecked, checkOpenVm));
       if (!r.ok) return refused('verify', r);
       if (passed.length <= KEEP) for (const id of passed) kept.set(id, proofs.get(id));
       postMessage({ type: 'verified', report: r.report, logs: r.logs, ms: performance.now() - start });

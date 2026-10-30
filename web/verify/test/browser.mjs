@@ -395,8 +395,8 @@ await section('9', async () => {
   await page.context().close();
   page = await openPage();
   r = await checkUntilAsked(page, { filter: RANGE, rpc: 'big' });
-  expect('more than 20 proofs asks before downloading', /32 SP1 proofs/.test(r.title) && /about 80 MB/.test(r.title) && r.actions.join() === 'Download and verify,Cancel', `${short(r)} | ${r.actions}`);
-  expect('nothing is downloaded while it asks', /pending|active/.test(r.steps.find((s) => s.includes('SP1 proofs')) || ''), r.steps.join(' / '));
+  expect('more than 20 proofs asks before downloading', /32 proofs/.test(r.title) && /about 80 MB/.test(r.title) && r.actions.join() === 'Download and verify,Cancel', `${short(r)} | ${r.actions}`);
+  expect('nothing is downloaded while it asks', /pending|active/.test(r.steps.find((s) => s.includes('Proofs')) || ''), r.steps.join(' / '));
   await page.click('#verdictActions button:text-is("Cancel")');
   await page.waitForFunction(() => !document.getElementById('run').disabled);
   r = await result(page, Date.now());
@@ -591,9 +591,9 @@ await section('18', async () => {
 
   await checkUntilAsked(page, { filter: wide, rpc: 'big50' });
   await page.click('#verdictActions button:text-is("Download and verify")');
-  await page.waitForFunction(() => /SP1 proofs, about/.test(document.getElementById('verdictTitle').textContent));
+  await page.waitForFunction(() => /proofs, about/.test(document.getElementById('verdictTitle').textContent));
   r = await result(page, Date.now());
-  expect('more proofs than the estimate asks again', /^Verifying this needs 52 SP1 proofs/.test(r.title), short(r));
+  expect('more proofs than the estimate asks again', /^Verifying this needs 52 proofs/.test(r.title), short(r));
   await page.click('#verdictActions button:text-is("Cancel")');
   await page.waitForFunction(() => !document.getElementById('run').disabled);
 

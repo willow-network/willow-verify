@@ -1,0 +1,48 @@
+[package]
+name = "willow-logs-verify-openvm-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# The verify page's OpenVM log module (web/verify): willow-logs-verify-openvm's check under the
+# pinned programs, compiled to wasm32. The page's other log module (../../logset-guest/query-wasm)
+# runs `logset_query::verify`, with SP1's verifier, and hands each OpenVM proof here through its
+# `checkOpenVm` callback: SP1's and OpenVM's verifiers cannot share one dependency graph (see
+# ../verify/Cargo.toml). Its own workspace and lockfile, so the patch below reaches nothing else.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+willow-logs-verify-openvm = { path = "../verify" }
+logset-query = { path = "../../logset-guest/query" }
+# One wasm-bindgen for all four modules (web/verify/build.sh checks the CLI). OpenVM's verifier
+# needs >= 0.2.129: `quanta` and `web-sys` come in through openvm-stark-sdk's metrics.
+wasm-bindgen = "=0.2.129"
+serde_json = "1"
+hex = "0.4"
+# Something in OpenVM's graph pulls getrandom 0.2 and 0.3; on wasm32-unknown-unknown they need
+# their JS backends (0.3 also needs `--cfg getrandom_backend="wasm_js"`, which build.sh passes).
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# OpenVM v2.0.2's `openvm-circuit` always links `abi_stable`, which pulls `libloading`, which does
+# not build for wasm32. willow-network/openvm branch willow/v2.0.2-wasm32 is v2.0.2 plus one commit
+# that gates `abi_stable` to unix/windows (upstream: openvm-org/openvm#3178). Every crate of that
+# repo in this graph comes from the one commit, so no type exists twice.
+[patch."https://github.com/openvm-org/openvm.git"]
+openvm-circuit = { git = "https://github.com/willow-network/openvm.git", rev = "c016b6d8c5e1b749cb23c47e1f836cf4332e1831" }
+openvm-circuit-derive = { git = "https://github.com/willow-network/openvm.git", rev = "c016b6d8c5e1b749cb23c47e1f836cf4332e1831" }
+openvm-circuit-primitives = { git = "https://github.com/willow-network/openvm.git", rev = "c016b6d8c5e1b749cb23c47e1f836cf4332e1831" }
+openvm-circuit-primitives-derive = { git = "https://github.com/willow-network/openvm.git", rev = "c016b6d8c5e1b749cb23c47e1f836cf4332e1831" }
+openvm-instructions = { git = "https://github.com/willow-network/openvm.git", rev = "c016b6d8c5e1b749cb23c47e1f836cf4332e1831" }
+openvm-instructions-derive = { git = "https://github.com/willow-network/openvm.git", rev = "c016b6d8c5e1b749cb23c47e1f836cf4332e1831" }
+openvm-poseidon2-air = { git = "https://github.com/willow-network/openvm.git", rev = "c016b6d8c5e1b749cb23c47e1f836cf4332e1831" }
+openvm-recursion-circuit-derive = { git = "https://github.com/willow-network/openvm.git", rev = "c016b6d8c5e1b749cb23c47e1f836cf4332e1831" }
+openvm-verify-stark-host = { git = "https://github.com/willow-network/openvm.git", rev = "c016b6d8c5e1b749cb23c47e1f836cf4332e1831" }

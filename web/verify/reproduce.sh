@@ -6,7 +6,8 @@
 # The build pins the Ethereum checkpoint the served page carries (ETH_CHECKPOINT in its app.js),
 # since each build otherwise reads a fresh one. It runs on x86-64 Linux, the machine type Willow
 # builds on (see Dockerfile): directly when this machine is one and has the pinned toolchain and
-# wasm-bindgen 0.2.103, else in the Dockerfile's image (DOCKER=1 forces that).
+# wasm-bindgen 0.2.129 (and clang and llvm-ar for wasm32), else in the Dockerfile's image (DOCKER=1
+# forces that).
 set -euo pipefail
 origin="${1:-https://api.willow.tech}"
 here="$(cd "$(dirname "$0")" && pwd)"

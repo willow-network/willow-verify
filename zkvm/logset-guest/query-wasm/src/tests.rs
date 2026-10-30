@@ -1,5 +1,7 @@
 use super::*;
-use logset_query::fixtures::{addr, chain, fake_proof, topic, Chain, FakeCheck, L1_VK};
+use logset_query::fixtures::{
+    addr, chain, fake_openvm_proof, fake_proof, topic, Chain, FakeCheck, L1_VK,
+};
 use logset_query::{BlockProof, SegmentIndex, SegmentProof};
 use std::collections::HashMap;
 
@@ -134,16 +136,34 @@ fn a_tampered_answer_fails() {
 }
 
 #[test]
-fn key_overrides_replace_the_pinned_keys() {
+fn key_overrides_replace_the_pinned_sp1_keys_only() {
+    use willow_logs_verify::{LEAF_VKEY, SEGMENT_VKEY};
     let t = trust(1, "", "").unwrap();
-    assert_eq!(t.leaf_vkeys, vec![parse_vkey(LEAF_VKEY).unwrap()]);
-    assert_eq!(t.segment_vkeys, vec![parse_vkey(SEGMENT_VKEY).unwrap()]);
+    assert_eq!(t.sp1.leaf, vec![parse_vkey(LEAF_VKEY).unwrap()]);
+    assert_eq!(t.sp1.segment, vec![parse_vkey(SEGMENT_VKEY).unwrap()]);
+    assert_eq!(t.openvm, openvm_keys());
     let a = "11".repeat(32);
     let b = format!("0x{}", "22".repeat(32));
     let t = trust(1, "", &format!("{a}, {b}\n")).unwrap();
-    assert_eq!(t.leaf_vkeys, vec![[0x11; 32], [0x22; 32]]);
-    assert_eq!(t.segment_vkeys, vec![parse_vkey(SEGMENT_VKEY).unwrap()]);
+    assert_eq!(t.sp1.leaf, vec![[0x11; 32], [0x22; 32]]);
+    assert_eq!(t.sp1.segment, vec![parse_vkey(SEGMENT_VKEY).unwrap()]);
+    assert_eq!(t.openvm, openvm_keys());
     assert_eq!(trust(1, "zz", "").unwrap_err().kind, Kind::InvalidKeys);
+    // keys() names both systems, in force and pinned.
+    let k = keys_json(&trust(1, "", &a));
+    assert_eq!(k["sp1"]["leaf"], json!([a]));
+    assert_eq!(k["pinned"]["sp1"]["leaf"], json!([LEAF_VKEY.trim()]));
+    assert_eq!(k["openvm"], k["pinned"]["openvm"]);
+    assert_eq!(
+        k["pinned"]["openvm"]["leaf"],
+        json!(["28b819642cb4cbd26da3b3762408c71656423fd4267bb71e12a0c76e08490119"])
+    );
+    assert_eq!(
+        k["pinned"]["openvm"]["segment"],
+        json!(["3b585e4468e56c4e4ee629bb67c85e26328301473b4e0d611dde318e47585789"])
+    );
+    // Ethereum's pinned first OpenVM block, which an SP1 key override leaves as it is.
+    assert_eq!(k["openvmFrom"], json!(format!("0x{:x}", 26_361_856)));
 }
 
 /// The page decides "browser failure" or "Willow's answer failed a check" by `kind`
@@ -247,7 +267,10 @@ fn compare_and_keys_answer_with_a_kind() {
     );
     let k = keys_json(&Ok(trust(1, "", "").unwrap()));
     assert_eq!(k["ok"], json!(true));
-    assert_eq!(k["leaf"][0], json!(LEAF_VKEY.trim()));
+    assert_eq!(
+        k["sp1"]["leaf"][0],
+        json!(willow_logs_verify::LEAF_VKEY.trim())
+    );
 }
 
 /// The page passes response bodies as the server sent them. Nesting deep enough to break a
@@ -330,7 +353,8 @@ fn each_served_chain_is_pinned_and_others_are_named_unknown() {
     for id in ids {
         let t = trust(id, "", "").unwrap();
         assert_eq!(t.chain_id, id);
-        assert_eq!(t.leaf_vkeys, vec![parse_vkey(LEAF_VKEY).unwrap()]);
+        assert_eq!(t.sp1, sp1_keys());
+        assert_eq!(t.openvm, openvm_keys());
     }
     let k = keys_json(&trust(4663, "", ""));
     assert_eq!(
@@ -344,8 +368,58 @@ fn each_served_chain_is_pinned_and_others_are_named_unknown() {
     assert!(trust(56, &a, "").is_err());
     let t = trust(56, &a, &b).unwrap();
     assert_eq!(
-        (t.segment_vkeys, t.leaf_vkeys),
+        (t.sp1.segment, t.sp1.leaf),
         (vec![[0x11; 32]], vec![[0x22; 32]])
+    );
+    assert_eq!(t.openvm, Keys::default());
+}
+
+/// An answer across the cutover: an SP1 segment, then OpenVM blocks. The report counts each
+/// system's proofs and says where OpenVM starts; a pinned cutover elsewhere is refused.
+#[test]
+fn an_answer_across_the_cutover_reports_each_systems_proofs() {
+    let c = chain(1, START, 8, 11);
+    let ef = eth_filter(START + 1, START + 7);
+    let f = LogFilter::from_eth_filter(&ef, START + 1, START + 7).unwrap();
+    let (answer, mut store) = served(&c, &f);
+    for i in 6..8 {
+        store.insert(
+            c.block_id(i).to_string(),
+            fake_openvm_proof(&c.ovm_leaf_vkey(), &c.leaf_pvs[i]),
+        );
+    }
+    let out = run(&c, &answer, &ef, &store).unwrap();
+    let r = out.report();
+    assert_eq!(r["proofs"], json!({"sp1": 1, "openvm": 2}));
+    assert_eq!(r["openvmFrom"], json!(format!("0x{:x}", START + 6)));
+    assert_eq!(r["cutover"], Value::Null);
+    let mut fetch = |id: &str| store.get(id).cloned().ok_or_else(|| "missing".to_string());
+    let mut t = c.trust();
+    t.openvm_from = Some(START + 6);
+    let out = check_answer(
+        &t,
+        &rpc(&answer),
+        &ef.to_string(),
+        &mut fetch,
+        &mut FakeCheck,
+    )
+    .unwrap();
+    assert_eq!(out.report()["cutover"], json!(format!("0x{:x}", START + 6)));
+    t.openvm_from = Some(START + 7);
+    let e = check_answer(
+        &t,
+        &rpc(&answer),
+        &ef.to_string(),
+        &mut fetch,
+        &mut FakeCheck,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(e.kind, Kind::Rejected);
+    assert!(
+        e.message
+            .contains("is proven with OpenVM, but this chain uses SP1"),
+        "{e:?}"
     );
 }
 
@@ -402,4 +476,22 @@ fn a_fast_chain_answer_with_multi_block_leaves_verifies() {
     .err()
     .unwrap();
     assert_eq!(e.kind, Kind::Rejected);
+}
+
+/// The page's test build (feature `test-cutover`) can replace the chain's pinned first OpenVM
+/// block, either way; build.sh checks that no other build has `setTestCutover` at all.
+#[cfg(feature = "test-cutover")]
+#[test]
+fn the_test_build_replaces_the_pinned_cutover() {
+    let keys = |v: &Verifier| serde_json::from_str::<Value>(&v.keys()).unwrap();
+    let mut v = Verifier::new(1, "", "");
+    assert_eq!(keys(&v)["openvmFrom"], json!(format!("0x{:x}", 26_361_856)));
+    v.set_test_cutover(Some(START));
+    assert_eq!(keys(&v)["openvmFrom"], json!(format!("0x{START:x}")));
+    v.set_test_cutover(None);
+    assert_eq!(keys(&v)["openvmFrom"], Value::Null);
+    // A verifier whose keys were refused stays refused.
+    let mut bad = Verifier::new(1, "", "zz");
+    bad.set_test_cutover(Some(START));
+    assert_eq!(keys(&bad)["kind"], json!("invalid-keys"));
 }

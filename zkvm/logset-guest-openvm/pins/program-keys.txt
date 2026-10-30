@@ -1,0 +1,13 @@
+# The minted OpenVM program keys: MINT.txt's key table and field-LE commits, line for line, and nothing else.
+# The trust module (verify/src/pinned.rs) reads this file; its tests fail unless these lines are MINT.txt's.
+guest          elf                            bytes    sha256      program key (exe commit limbs, big-endian)
+logset-leaf    logset-program-openvm          194184   427e764c…   0x28b819642cb4cbd26da3b3762408c71656423fd4267bb71e12a0c76e08490119
+logset-index   logset-index-program-openvm    230948   56a72fc0…   0x483b92da536f304c406dba280f4456e65f737b2e4692be09432655c31d6dc04d
+logset-idxagg  logset-idxagg-program-openvm   208948   bc100328…   0x3b585e4468e56c4e4ee629bb67c85e26328301473b4e0d611dde318e47585789
+logset-fold    logset-fold-program-openvm     131084   87973f14…   0x5616fc714c626d144e19cb6d1f6dc17127e5e79f42aa3cd276c0589472134199
+commits, field-LE (8 canonical BabyBear limbs, each u32 LE: the pin and deferral-output format)
+guest          exe commit                                                           vm commit
+logset-leaf    0x6419b828d2cbb42c76b3a36d16c70824d43f42561eb77b266ec7a01219014908   0x4a35385af45c6242b40e1c11a1f6741a287ba32b23fdd6634d11ab62f222514d
+logset-index   0xda923b484c306f5328ba6d40e656440f2e7b735f09be9246c35526434dc06d1d   0x4a35385af45c6242b40e1c11a1f6741a287ba32b23fdd6634d11ab62f222514d
+logset-idxagg  0x445e583b4e6ce568bb29e64e265ec86747018332610d4e3b8e31de1d89575847   0xc16f6976a6272c33c021115742b0c658dc35f8174c35493d40f0d977266ffc38
+logset-fold    0x71fc1656146d624c6dcb194e71c16d1f9fe7e527d23caa429458c07699411372   0xc16f6976a6272c33c021115742b0c658dc35f8174c35493d40f0d977266ffc38

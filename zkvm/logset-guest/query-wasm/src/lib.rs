@@ -1,20 +1,26 @@
 //! The browser verifier (`web/verify`): [`logset_query::verify`] with
 //! [`Sp1Check`], compiled to wasm32 and run in a Web Worker. The page fetches
-//! the answer and the SP1 proofs; everything that decides "verified" is here.
+//! the answer and the proofs; everything that decides "verified" is here, except
+//! the verdict on each OpenVM proof, which comes from the page's OpenVM module
+//! (`willow-logs-verify-openvm-wasm`, a second wasm module: OpenVM's verifier and
+//! SP1's cannot share one dependency graph) through the `checkOpenVm` callback.
+//! Which keys a proof is checked under, and whether its system is the right one
+//! for its blocks, is decided here.
 
 use logset_query::{
-    compare, verify, Log, LogFilter, LogsProof, ProofCheck, ProofPart, Trust, Verified,
+    compare, verify, BySystem, Keys, Log, LogFilter, LogsProof, ProofCheck, ProofPart, ProofSystem,
+    Trust, Verified,
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 use willow_logs_verify::{
-    parse_vkey, pinned_chain, trust_with, Sp1Check, LEAF_VKEY, PINNED_CHAINS, SEGMENT_VKEY,
+    openvm_keys, parse_vkey, pinned_chain, sp1_keys, trust_with, Sp1Check, PINNED_CHAINS,
 };
 
-/// Trust in the pinned program keys on `chain_id`. A non-empty override
-/// (hex keys separated by commas or whitespace) replaces that tier's keys; a
-/// chain without pinned keys needs both.
+/// Trust in both systems' pinned program keys on `chain_id`. A non-empty override
+/// (hex keys separated by commas or whitespace) replaces that SP1 tier's keys; a
+/// chain without pinned keys needs both, and then trusts no OpenVM program.
 pub fn trust(chain_id: u64, segment_vkeys: &str, leaf_vkeys: &str) -> Result<Trust, Failure> {
     let keys = |s: &str| -> Result<Vec<[u8; 32]>, Failure> {
         s.split(|c: char| c == ',' || c.is_whitespace())
@@ -27,7 +33,7 @@ pub fn trust(chain_id: u64, segment_vkeys: &str, leaf_vkeys: &str) -> Result<Tru
     trust_with(chain_id, seg, leaf).map_err(|e| Failure::new(Kind::UnknownChain, e))
 }
 
-/// The chains with pinned program keys: `[{"chainId", "name"}]` (one key pair serves all).
+/// The chains with pinned program keys: `[{"chainId", "name"}]` (one key pair per system serves all).
 pub fn pinned_chains_json() -> Value {
     PINNED_CHAINS
         .iter()
@@ -102,6 +108,8 @@ pub fn result_of<T: DeserializeOwned>(body: &str, method: &str) -> Result<T, Fai
 
 /// A checked answer and its shape.
 pub struct Outcome {
+    /// The chain's first OpenVM block, if the client knew it ([`Trust::openvm_from`]).
+    pub cutover: Option<u64>,
     pub verified: Verified,
     pub from_block: u64,
     pub to_block: u64,
@@ -149,6 +157,7 @@ pub fn check_answer(
         .map_err(|e| Failure::new(Kind::Rejected, e.to_string()))?;
     let count = |f: fn(&ProofPart) -> bool| p.parts.iter().filter(|x| f(x)).count();
     Ok(Outcome {
+        cutover: trust.openvm_from,
         verified,
         from_block: from,
         to_block: to,
@@ -173,14 +182,24 @@ fn hash_json((number, hash): (u64, [u8; 32])) -> Value {
     json!({"number": format!("0x{number:x}"), "hash": format!("0x{}", hex::encode(hash))})
 }
 
+fn quantity(n: Option<u64>) -> Value {
+    n.map_or(Value::Null, |n| json!(format!("0x{n:x}")))
+}
+
 impl Outcome {
     pub fn report(&self) -> Value {
         let v = &self.verified;
+        let count = |s| v.systems.iter().filter(|&&x| x == s).count();
         json!({
             "fromBlock": format!("0x{:x}", self.from_block),
             "toBlock": format!("0x{:x}", self.to_block),
             "logs": v.logs.len(),
             "parts": {"segments": self.segments, "blocks": self.blocks, "leaves": self.leaves},
+            // Proofs per system; where the answer's OpenVM parts start; the chain's pinned
+            // first OpenVM block, which the split was checked against (null: not pinned).
+            "proofs": {"sp1": count(ProofSystem::Sp1), "openvm": count(ProofSystem::OpenVm)},
+            "openvmFrom": quantity(v.openvm_from),
+            "cutover": quantity(self.cutover),
             "firstParent": hash_json(v.first_parent),
             "checkpoints": v.checkpoints.iter().copied().map(hash_json).collect::<Vec<_>>(),
             "lastProvenBlock": hash_json(*v.checkpoints.last().expect("verify returns a part")),
@@ -227,17 +246,22 @@ pub fn compare_json(checked: Option<&Outcome>, response: &str) -> Value {
     }
 }
 
-/// What `Verifier.keys` returns: the program keys in force, or a [`Failure`].
+/// What `Verifier.keys` returns: each system's program keys in force and pinned, and the
+/// chain's pinned first OpenVM block (null: not pinned), or a [`Failure`].
 pub fn keys_json(trust: &Result<Trust, Failure>) -> Value {
-    let hex = |v: &[[u8; 32]]| v.iter().map(hex::encode).collect::<Vec<_>>();
+    let keys = |k: &Keys| {
+        let hex = |v: &[[u8; 32]]| v.iter().map(hex::encode).collect::<Vec<_>>();
+        json!({"segment": hex(&k.segment), "leaf": hex(&k.leaf)})
+    };
     match trust {
         Ok(t) => json!({
             "ok": true,
             "chainId": t.chain_id,
             "chain": pinned_chain(t.chain_id),
-            "segment": hex(&t.segment_vkeys),
-            "leaf": hex(&t.leaf_vkeys),
-            "pinned": {"segment": SEGMENT_VKEY.trim(), "leaf": LEAF_VKEY.trim()},
+            "sp1": keys(&t.sp1),
+            "openvm": keys(&t.openvm),
+            "openvmFrom": quantity(t.openvm_from),
+            "pinned": {"sp1": keys(&sp1_keys()), "openvm": keys(&openvm_keys())},
         }),
         Err(f) => f.json(),
     }
@@ -249,10 +273,10 @@ pub fn pinned_chains() -> String {
     pinned_chains_json().to_string()
 }
 
-/// The JS face: `new Verifier(chainId, segmentKeys, leafKeys)`. No method throws for a
-/// bad answer, bad keys or a bad filter: each returns JSON with `ok` and, when it is
-/// false, `kind` and `message`. Anything thrown is the runtime itself failing (a wasm
-/// trap, out of memory), never a verdict on the answer.
+/// The JS face: `new Verifier(chainId, segmentKeys, leafKeys)` (the keys: SP1 overrides).
+/// No method throws for a bad answer, bad keys or a bad filter: each returns JSON with `ok`
+/// and, when it is false, `kind` and `message`. Anything thrown is the runtime itself
+/// failing (a wasm trap, out of memory), never a verdict on the answer.
 #[wasm_bindgen]
 pub struct Verifier {
     trust: Result<Trust, Failure>,
@@ -269,23 +293,28 @@ impl Verifier {
         }
     }
 
-    /// The program keys in force: `{"ok": true, "chainId", "chain", "segment", "leaf",
-    /// "pinned"}`, or `{"ok": false, "kind": "invalid-keys" | "unknown-chain", "message"}`.
+    /// The program keys in force: `{"ok": true, "chainId", "chain", "sp1", "openvm",
+    /// "openvmFrom", "pinned"}` (each system's `{"segment", "leaf"}`), or
+    /// `{"ok": false, "kind": "invalid-keys" | "unknown-chain", "message"}`.
     pub fn keys(&self) -> String {
         keys_json(&self.trust).to_string()
     }
 
     /// Checks `response` (the `willow_getLogsProof` response body, as the server sent it)
-    /// against `filter`. `getProof(id)` returns the proof bytes
-    /// (`Uint8Array`); `onChecked(id, error)` runs after each SP1 check (`error` is
-    /// `undefined` when it passed). Returns `{"ok": true, "report", "logs"}` (every
-    /// proven log as `eth_getLogs` JSON, without block and transaction hashes) or a failure.
+    /// against `filter`. `getProof(id)` returns the proof bytes (`Uint8Array`);
+    /// `onChecked(id, error, system)` runs after each proof check (`error` is `undefined`
+    /// when it passed; `system` is `"sp1"` or `"openvm"`). `checkOpenVm(key, proof,
+    /// publicValues)` (each a `Uint8Array`) verifies one OpenVM proof in the OpenVM module
+    /// and returns `undefined` when it holds, else the reason; without it, every OpenVM
+    /// proof fails. Returns `{"ok": true, "report", "logs"}` (every proven log as
+    /// `eth_getLogs` JSON, without block and transaction hashes) or a failure.
     pub fn verify(
         &mut self,
         response: &str,
         filter: &str,
         get_proof: &js_sys::Function,
         on_checked: &js_sys::Function,
+        check_openvm: Option<js_sys::Function>,
     ) -> String {
         self.checked = None;
         let trust = match &self.trust {
@@ -304,7 +333,10 @@ impl Verifier {
             Ok(js_sys::Uint8Array::from(v).to_vec())
         };
         let mut check = Reporting {
-            inner: Sp1Check::default(),
+            inner: BySystem {
+                sp1: Sp1Check::default(),
+                openvm: JsOpenVm(check_openvm),
+            },
             current: &current,
             on_checked,
         };
@@ -321,9 +353,38 @@ impl Verifier {
     }
 }
 
-/// [`Sp1Check`] that tells the page after each check.
+/// An OpenVM proof check in the page's OpenVM module: `checkOpenVm(key, proof, publicValues)`
+/// returns `undefined` when the proof holds. Anything else, a throw included, is a failure.
+pub struct JsOpenVm(pub Option<js_sys::Function>);
+
+/// Why an OpenVM proof fails when the page gave no OpenVM check.
+pub const NO_OPENVM: &str = "this verifier has no OpenVM module, so it cannot check OpenVM proofs";
+
+impl ProofCheck for JsOpenVm {
+    fn check(&mut self, vkey: &[u8; 32], proof: &[u8], public_values: &[u8]) -> Result<(), String> {
+        let f = self.0.as_ref().ok_or(NO_OPENVM)?;
+        let bytes = |b: &[u8]| JsValue::from(js_sys::Uint8Array::from(b));
+        let r = f
+            .call3(
+                &JsValue::NULL,
+                &bytes(vkey),
+                &bytes(proof),
+                &bytes(public_values),
+            )
+            .map_err(|e| format!("OpenVM check: {}", js_text(&e)))?;
+        if r.is_undefined() {
+            Ok(())
+        } else {
+            Err(r
+                .as_string()
+                .unwrap_or_else(|| "OpenVM check failed".into()))
+        }
+    }
+}
+
+/// Each system's check, that tells the page after each one.
 struct Reporting<'a> {
-    inner: Sp1Check,
+    inner: BySystem<Sp1Check, JsOpenVm>,
     current: &'a std::cell::RefCell<String>,
     on_checked: &'a js_sys::Function,
 }
@@ -335,8 +396,9 @@ impl ProofCheck for Reporting<'_> {
             .as_ref()
             .err()
             .map_or(JsValue::UNDEFINED, |e| JsValue::from_str(e));
+        let system = ProofSystem::of(proof).map_or(JsValue::UNDEFINED, |s| s.as_str().into());
         let id = JsValue::from_str(&self.current.borrow());
-        let _ = self.on_checked.call2(&JsValue::NULL, &id, &err);
+        let _ = self.on_checked.call3(&JsValue::NULL, &id, &err, &system);
         r
     }
 }
@@ -348,6 +410,25 @@ fn js_text(v: &JsValue) -> String {
                 .map(|e| String::from(e.message()))
         })
         .unwrap_or_else(|| format!("{v:?}"))
+}
+
+/// The page's test build only (feature `test-cutover`, which `web/verify/build.sh` turns on for
+/// `CHECKPOINT=test` alone, and checks is absent from every other build): a test cutover in place
+/// of the chain's pinned first OpenVM block, so `test/real-openvm.mjs` can verify real OpenVM
+/// answers from before the pin end to end. Kept below everything else in this file, so the
+/// production build's code (its panic locations included) is the same with or without it.
+#[cfg(feature = "test-cutover")]
+#[wasm_bindgen]
+impl Verifier {
+    /// Replaces the chain's first OpenVM block for this verifier (`undefined`: none, so an
+    /// answer may switch once anywhere). No effect on a verifier whose keys were refused.
+    #[wasm_bindgen(js_name = setTestCutover)]
+    pub fn set_test_cutover(&mut self, block: Option<u64>) {
+        if let Ok(t) = &mut self.trust {
+            t.openvm_from = block;
+        }
+        self.checked = None;
+    }
 }
 
 #[cfg(test)]

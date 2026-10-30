@@ -26,7 +26,8 @@ pub mod transactions;
 pub mod trie;
 
 pub use block::{
-    block_logs, bloom_may_contain, verify_body, verify_header, verify_receipts, BlockLog,
+    block_logs, bloom_may_contain, header_from_rlp, receipts_from_slim, verify_body,
+    verify_body_rlp, verify_body_with_uncles, verify_header, verify_receipts, BlockLog,
     VerifiedBody, VerifiedHeader,
 };
 pub use receipts::Log;

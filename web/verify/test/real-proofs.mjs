@@ -1,4 +1,5 @@
-// Runs the built wasm verifier (web/verify-dist) under Node on real SP1 proofs.
+// Runs the built wasm verifier (web/verify-dist) under Node on real SP1 proofs (OpenVM's:
+// real-openvm.mjs).
 //   node web/verify/test/real-proofs.mjs <dist dir> <data dir> <leaf key hex>
 // <data dir> holds answer.json (a willow_getLogsProof result of one-block parts) and store/ (their
 // SP1 proofs), as test/save_live_data.py saves them; <leaf key> is the key of the program that
@@ -53,7 +54,7 @@ function check({ ans = answer, response = body(ans), flt = filter, leaf = leafKe
     t0 = performance.now();
     return proofs(id);
   };
-  const done = (id, err) => times.push({ id, ms: performance.now() - t0, err });
+  const done = (id, err, system) => times.push({ id, ms: performance.now() - t0, err, system });
   let r;
   try {
     r = JSON.parse(v.verify(response, JSON.stringify(flt), get, done));
@@ -75,6 +76,9 @@ function flipHex(s, at) {
 // Positive: the real answer verifies to its logs, and every proof is timed.
 const ok = check();
 expect('real answer verifies', !ok.error && ok.report.logs === LOGS, ok.error || `${ok.report.logs} logs`);
+// SP1 only: no OpenVM module was given, and none was needed.
+expect('the report counts SP1 proofs only', ok.report && ok.report.proofs.sp1 === 2 && ok.report.proofs.openvm === 0 && ok.report.openvmFrom === null, JSON.stringify(ok.report && ok.report.proofs));
+expect('each check names its system', ok.times.length === 2 && ok.times.every((t) => t.system === 'sp1'), JSON.stringify(ok.times.map((t) => t.system)));
 for (const t of ok.times) console.log(`      SP1 check ${t.id}: ${t.ms.toFixed(1)} ms${t.err ? ` error ${t.err}` : ''}`);
 const again = check();
 for (const t of again.times) console.log(`      SP1 check again ${t.id}: ${t.ms.toFixed(1)} ms`);
@@ -177,7 +181,7 @@ neg('program keys that do not parse', { leaf: 'zz' }, null, 'invalid-keys');
 const badKeys = JSON.parse(new Verifier(1, '', 'zz').keys());
 expect('keys() reports keys that do not parse', !badKeys.ok && badKeys.kind === 'invalid-keys', JSON.stringify(badKeys));
 const goodKeys = JSON.parse(new Verifier(1, '', '').keys());
-expect('keys() reports the published keys', goodKeys.ok && goodKeys.leaf[0] === goodKeys.pinned.leaf, JSON.stringify(goodKeys));
+expect('keys() reports the published keys', goodKeys.ok && goodKeys.sp1.leaf[0] === goodKeys.pinned.sp1.leaf[0] && goodKeys.openvm.leaf[0] === goodKeys.pinned.openvm.leaf[0], JSON.stringify(goodKeys));
 
 // Nesting 300,000 levels deep (past JSON.stringify in Firefox and Safari): skipped where the
 // verifier reads nothing, malformed-input where it reads, and never a throw.

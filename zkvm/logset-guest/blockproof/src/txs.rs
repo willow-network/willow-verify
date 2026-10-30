@@ -327,6 +327,13 @@ pub fn decode(value: &[u8], chain_id: u64) -> Result<Decoded> {
 /// bytes carry, or ArbOS for an internal transaction.
 pub fn sender(tx: &Decoded) -> Result<[u8; 20]> {
     match tx {
+        // Before Homestead (EIP-2) a legacy signature's s could be above n/2.
+        Decoded::Eth(env) if env.is_legacy() && env.chain_id().is_none() => {
+            let from = env
+                .recover_signer_unchecked()
+                .context("signature recovery")?;
+            Ok(from.0 .0)
+        }
         Decoded::Eth(env) => Ok(env.recover_signer().context("signature recovery")?.0 .0),
         Decoded::Table { ty, .. } if *ty == ARB_INTERNAL => Ok(ARBOS_ADDRESS),
         _ => tx.address("from").context("no from"),

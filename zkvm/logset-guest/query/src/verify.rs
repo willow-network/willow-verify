@@ -2,6 +2,7 @@
 
 use crate::filter::{plan, Log, LogFilter};
 use crate::frame;
+use crate::system::ProofSystem;
 use crate::wire::{LogsProof, ProofPart};
 use logset_agg_core::decode_statements;
 use logset_agg_core::index_agg::decode_l1_pv;
@@ -11,21 +12,75 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// Accepts an SP1 proof of exactly `public_values` under the program whose
-/// verifying key hash is `vkey` (the `.koalabear` bytes in `vkeys/`).
+/// Accepts a proof of exactly `public_values` under the program whose key is
+/// `vkey`. [`verify`] takes `vkey` only from the trusted keys of the proof's own
+/// system ([`ProofSystem::of`] of its bytes), so a check must refuse the bytes of
+/// a system it does not verify; [`BySystem`] routes each proof to its system's.
 pub trait ProofCheck {
     fn check(&mut self, vkey: &[u8; 32], proof: &[u8], public_values: &[u8]) -> Result<(), String>;
 }
 
-/// What a client trusts: the chain and the program keys.
+/// The reason a proof that is neither SP1 nor OpenVM is refused.
+pub const NOT_A_PROOF: &str = "neither an SP1 nor an OpenVM proof";
+
+/// Sends each proof to the check of its system, by its first bytes ([`ProofSystem::of`]),
+/// the same test [`verify`] picks the trusted keys by.
+pub struct BySystem<S, O> {
+    pub sp1: S,
+    pub openvm: O,
+}
+
+impl<S: ProofCheck, O: ProofCheck> ProofCheck for BySystem<S, O> {
+    fn check(&mut self, vkey: &[u8; 32], proof: &[u8], public_values: &[u8]) -> Result<(), String> {
+        match ProofSystem::of(proof) {
+            Some(ProofSystem::Sp1) => self.sp1.check(vkey, proof, public_values),
+            Some(ProofSystem::OpenVm) => self.openvm.check(vkey, proof, public_values),
+            None => Err(NOT_A_PROOF.into()),
+        }
+    }
+}
+
+/// One proof system's program keys.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Keys {
+    /// L1 index aggregator keys.
+    pub segment: Vec<[u8; 32]>,
+    /// Leaf program keys: checked against each L1's committed leaf key, and
+    /// used for the leaves outside every segment.
+    pub leaf: Vec<[u8; 32]>,
+}
+
+/// What a client trusts: the chain, each proof system's program keys, and the
+/// block the chain's proofs move from SP1 to OpenVM, when the client knows it.
+///
+/// Each part is checked only under the keys of its own proof's system: an SP1
+/// key never vouches for an OpenVM part, nor an OpenVM key for an SP1 one, and
+/// an L1's committed leaf key must be one of its own system's leaf keys.
 #[derive(Clone, Debug)]
 pub struct Trust {
     pub chain_id: u64,
-    /// L1 index aggregator keys.
-    pub segment_vkeys: Vec<[u8; 32]>,
-    /// Leaf program keys: checked against each L1's committed leaf key, and
-    /// used for the leaves outside every segment.
-    pub leaf_vkeys: Vec<[u8; 32]>,
+    pub sp1: Keys,
+    pub openvm: Keys,
+    /// The chain's first OpenVM block: on Ethereum its cutover block F, on an L2
+    /// (whose F is a timestamp) the first block with a timestamp at or after F.
+    /// Known, a part that ends before it must be SP1 and one that ends at or after
+    /// it OpenVM, the proof runner's rule. (On an L2 the runner picks a part's
+    /// system by its last block's timestamp; on Ethereum by its first block, but F
+    /// is a window boundary there and no part crosses it, so the two agree.)
+    /// `None`: the answer may switch systems once, from SP1 to OpenVM, in block
+    /// order, and [`Verified::openvm_from`] says where it did. Each proof still
+    /// holds under its own system's keys; F only says which system the chain uses.
+    pub openvm_from: Option<u64>,
+}
+
+impl Trust {
+    /// The keys a proof of `system` is checked under.
+    pub fn keys(&self, system: ProofSystem) -> &Keys {
+        match system {
+            ProofSystem::Sp1 => &self.sp1,
+            ProofSystem::OpenVm => &self.openvm,
+        }
+    }
 }
 
 /// A checked answer.
@@ -39,6 +94,10 @@ pub struct Verified {
     /// in between, so the answer is about the chain these hashes are on: a
     /// client confirms the last one is canonical with a node it trusts.
     pub checkpoints: Vec<(u64, [u8; 32])>,
+    /// Each part's proof system, in part order.
+    pub systems: Vec<ProofSystem>,
+    /// The first block of the first OpenVM part, if any.
+    pub openvm_from: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,6 +123,16 @@ pub enum VerifyError {
         block: u64,
     },
     UnknownLeafProgram,
+    /// The part's proof is of another system than the chain uses for its blocks.
+    System {
+        block: u64,
+        got: ProofSystem,
+        want: ProofSystem,
+    },
+    /// An SP1 part after an OpenVM one: a chain moves to OpenVM once.
+    SystemOrder {
+        block: u64,
+    },
     Proof {
         id: String,
         reason: String,
@@ -107,6 +176,14 @@ impl fmt::Display for VerifyError {
             Gap { block } => write!(f, "no proof covers block {block}"),
             Link { block } => write!(f, "block {block} does not link to the previous part"),
             UnknownLeafProgram => write!(f, "segment was built from an untrusted leaf program"),
+            System { block, got, want } => write!(
+                f,
+                "part at block {block} is proven with {got}, but this chain uses {want} there"
+            ),
+            SystemOrder { block } => write!(
+                f,
+                "part at block {block} is proven with SP1 after a part proven with OpenVM"
+            ),
             Proof { id, reason } => write!(f, "proof {id} rejected: {reason}"),
             RangeCount { block, want, got } => {
                 write!(
@@ -207,8 +284,9 @@ fn block_logs(block: u64, records: &[u8]) -> Result<Vec<Log>, VerifyError> {
         .collect()
 }
 
-/// Check `p` against `f`. `fetch` returns a stored proof by id; `check` runs
-/// the SP1 verifier. Returns every log `f` matches, proven complete.
+/// Check `p` against `f`. `fetch` returns a stored proof by id; `check` verifies
+/// it (SP1 or OpenVM, see [`BySystem`]) under a key from `trust`'s keys for that
+/// proof's own system. Returns every log `f` matches, proven complete.
 pub fn verify(
     p: &LogsProof,
     f: &LogFilter,
@@ -223,6 +301,7 @@ pub fn verify(
         return Err(VerifyError::Chain { got: p.chain_id });
     }
     let mut chain = Chain::new(f.from_block, trust.chain_id);
+    let mut split = Split::new(trust.openvm_from);
     let mut logs = BTreeMap::new();
     let mut keep = |log: Log| {
         if f.matches(&log) {
@@ -235,9 +314,6 @@ pub fn verify(
                 let (s, c, leaf_vkey) =
                     decode_l1_pv(&seg.public_values).ok_or(VerifyError::PublicValues)?;
                 chain.link(&s)?;
-                if !trust.leaf_vkeys.contains(&leaf_vkey) {
-                    return Err(VerifyError::UnknownLeafProgram);
-                }
                 let block = s.start_block;
                 let ranges = plan(f, s.start_block, s.end_block);
                 if ranges.len() != seg.ranges.len() {
@@ -247,11 +323,18 @@ pub fn verify(
                         got: seg.ranges.len(),
                     });
                 }
+                let (proof, system) = split.fetch(fetch, &seg.proof, &s)?;
+                // The leaf key the L1 committed: a leaf program of the L1's own system.
+                let keys = trust.keys(system);
+                if !keys.leaf.contains(&leaf_vkey) {
+                    return Err(VerifyError::UnknownLeafProgram);
+                }
                 prove_part(
-                    fetch,
                     check,
                     &seg.proof,
-                    &trust.segment_vkeys,
+                    &proof,
+                    system,
+                    &keys.segment,
                     &seg.public_values,
                 )?;
                 for ((o, kmin, kmax), r) in ranges.iter().zip(&seg.ranges) {
@@ -275,13 +358,9 @@ pub fn verify(
             ProofPart::Block(blk) => {
                 let s = block_statement(&blk.public_values, &blk.records)?;
                 chain.link(&s)?;
-                prove_part(
-                    fetch,
-                    check,
-                    &blk.proof,
-                    &trust.leaf_vkeys,
-                    &blk.public_values,
-                )?;
+                let (proof, system) = split.fetch(fetch, &blk.proof, &s)?;
+                let keys = &trust.keys(system).leaf;
+                prove_part(check, &blk.proof, &proof, system, keys, &blk.public_values)?;
                 block_logs(s.start_block, &blk.records)?
                     .into_iter()
                     .for_each(&mut keep);
@@ -289,11 +368,14 @@ pub fn verify(
             ProofPart::Leaf(leaf) => {
                 let s = leaf_statement(&leaf.public_values, &leaf.records)?;
                 chain.link(&s)?;
+                let (proof, system) = split.fetch(fetch, &leaf.proof, &s)?;
+                let keys = &trust.keys(system).leaf;
                 prove_part(
-                    fetch,
                     check,
                     &leaf.proof,
-                    &trust.leaf_vkeys,
+                    &proof,
+                    system,
+                    keys,
                     &leaf.public_values,
                 )?;
                 for (i, rec) in leaf.records.iter().enumerate() {
@@ -314,29 +396,88 @@ pub fn verify(
         logs: logs.into_values().collect(),
         first_parent: chain.first_parent.expect("set with prev"),
         checkpoints: chain.checkpoints,
+        systems: split.systems,
+        openvm_from: split.openvm_from_seen,
     })
 }
 
+/// Checks `proof` under each of `vkeys` (its own system's) until one accepts.
 fn prove_part(
-    fetch: &mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
     check: &mut dyn ProofCheck,
     id: &str,
+    proof: &[u8],
+    system: ProofSystem,
     vkeys: &[[u8; 32]],
     public_values: &[u8],
 ) -> Result<(), VerifyError> {
-    let fail = |reason: String| VerifyError::Proof {
-        id: id.to_string(),
-        reason,
-    };
-    let proof = fetch(id).map_err(fail)?;
-    let mut last = "no trusted program key".to_string();
+    let mut last = format!("no trusted {system} program key");
     for vk in vkeys {
-        match check.check(vk, &proof, public_values) {
+        match check.check(vk, proof, public_values) {
             Ok(()) => return Ok(()),
             Err(e) => last = e,
         }
     }
-    Err(fail(last))
+    Err(VerifyError::Proof {
+        id: id.to_string(),
+        reason: last,
+    })
+}
+
+/// Which proof system each part is in, and whether that agrees with the chain's cutover.
+struct Split {
+    /// [`Trust::openvm_from`].
+    openvm_from: Option<u64>,
+    /// The first block of the first OpenVM part so far.
+    openvm_from_seen: Option<u64>,
+    systems: Vec<ProofSystem>,
+}
+
+impl Split {
+    fn new(openvm_from: Option<u64>) -> Self {
+        Self {
+            openvm_from,
+            openvm_from_seen: None,
+            systems: Vec::new(),
+        }
+    }
+
+    /// The proof of the part for statement `s` (linked already, so parts come in block
+    /// order) and its system, which must be the one the chain uses for the part's blocks.
+    fn fetch(
+        &mut self,
+        fetch: &mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
+        id: &str,
+        s: &LogSetStatement,
+    ) -> Result<(Vec<u8>, ProofSystem), VerifyError> {
+        let fail = |reason: String| VerifyError::Proof {
+            id: id.to_string(),
+            reason,
+        };
+        let proof = fetch(id).map_err(fail)?;
+        let got = ProofSystem::of(&proof).ok_or_else(|| fail(NOT_A_PROOF.into()))?;
+        let block = s.start_block;
+        match self.openvm_from {
+            Some(from) => {
+                let want = if s.end_block >= from {
+                    ProofSystem::OpenVm
+                } else {
+                    ProofSystem::Sp1
+                };
+                if got != want {
+                    return Err(VerifyError::System { block, got, want });
+                }
+            }
+            None if got == ProofSystem::Sp1 && self.openvm_from_seen.is_some() => {
+                return Err(VerifyError::SystemOrder { block });
+            }
+            None => {}
+        }
+        if got == ProofSystem::OpenVm && self.openvm_from_seen.is_none() {
+            self.openvm_from_seen = Some(block);
+        }
+        self.systems.push(got);
+        Ok((proof, got))
+    }
 }
 
 /// Contiguity and hash links across parts.

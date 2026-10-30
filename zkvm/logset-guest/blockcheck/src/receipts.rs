@@ -289,7 +289,10 @@ pub fn rlp_item(b: &[u8]) -> Result<(&[u8], usize, bool)> {
         0xc0..=0xf7 => (1, (first - 0xc0) as usize, true),
         0xf8..=0xff => long(b, first - 0xf7, true)?,
     };
-    ensure!(b.len() >= hdr + len, "RLP: item runs past the end");
+    ensure!(
+        len <= b.len().saturating_sub(hdr),
+        "RLP: item runs past the end"
+    );
     Ok((&b[hdr..hdr + len], hdr + len, is_list))
 }
 
@@ -707,5 +710,20 @@ mod tests {
             alloy_trie::root::ordered_trie_root_encoded::<Vec<u8>>(&[]).0,
             willow_receipts_trie::empty_root()
         );
+    }
+
+    /// A long-form length near the top of `usize` is refused, never wrapped
+    /// into a slice past the input (the archive's bytes reach this parser).
+    #[test]
+    fn an_rlp_length_past_the_input_is_refused() {
+        for b in [
+            vec![0xbf, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xf8],
+            vec![0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01],
+            vec![0xb8, 0x40, 0x01],
+        ] {
+            let e = rlp_item(&b).unwrap_err();
+            assert!(e.to_string().contains("past the end"), "{e}");
+        }
+        assert!(rlp_list_items(&[0xbf, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xf8]).is_err());
     }
 }

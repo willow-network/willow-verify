@@ -6,6 +6,7 @@
 //! willow-logs-verify --rpc <willow rpc url> --filter '<eth_getLogs filter json>'
 //!     [--chain-id N] [--compare-rpc <url>] [--anchor-rpc <url>] [--print-logs]
 //!     [--segment-vkey <hex>]... [--leaf-vkey <hex>]...
+//!     [--openvm-from <block>] [--openvm-verifier <path>]
 //! willow-logs-verify --proof <saved willow_getLogsProof result> --proofs-dir <dir>
 //!     --filter '<json>' [same options]
 //! willow-logs-verify --rpc <willow rpc url>
@@ -14,16 +15,29 @@
 //! ```
 //! A block is a number (decimal or 0x), a block hash, or `latest`. The third
 //! form checks a Merkle-Patricia proof against the block hash ([`items`]).
-//! The second form checks an archived answer offline, reading each SP1 proof
+//! The second form checks an archived answer offline, reading each proof
 //! from `<dir>/<id>.proof` (the segment tier's store layout).
+//!
+//! Each proof is SP1 or OpenVM, told by its first bytes, and is checked only
+//! under its own system's pinned keys. SP1 proofs are verified here; OpenVM
+//! proofs by `willow-logs-verify-openvm` (OpenVM's verifier cannot be linked
+//! with SP1's), run as a helper: put it next to this binary or pass
+//! `--openvm-verifier <path>`. Without it, an answer with OpenVM parts fails.
+//! `--segment-vkey`/`--leaf-vkey` replace the SP1 keys only.
+//!
+//! A chain moves from SP1 to OpenVM at its cutover. Where that is known (pinned
+//! per chain once set, or `--openvm-from <block>`: the chain's first OpenVM
+//! block), a part ending before it must be SP1 and one ending at or after it
+//! OpenVM. Otherwise the answer may switch once, SP1 to OpenVM, and the report's
+//! `openvmFrom` says where.
 //!
 //! `--chain-id` is the chain the answer must be about: Ethereum 1, Base 8453,
 //! OP 10, Unichain 130, Ink 57073, Arbitrum One 42161, Robinhood 4663 have
-//! pinned program keys (the same pair for all). Without it, the chain in the
+//! pinned program keys (the same pair per system for all). Without it, the chain in the
 //! `--rpc` URL's `/rpc/<chain>` path is used, else 1. Never the server's answer.
-//! 1. Asks the Willow RPC for `willow_getLogsProof(filter)` and each SP1 proof it
+//! 1. Asks the Willow RPC for `willow_getLogsProof(filter)` and each proof it
 //!    names (`willow_getProof`).
-//! 2. Verifies every SP1 proof against the pinned program keys, every range
+//! 2. Verifies every proof against its system's pinned program keys, every range
 //!    proof, and the hash links between parts. The result is every log the
 //!    filter matches, proven complete.
 //! 3. `--compare-rpc`: fetches that provider's `eth_getLogs` answer for the same
@@ -32,10 +46,11 @@
 //!
 //! Prints a JSON report; exits 1 if anything fails to verify or differs.
 
-use logset_query::{compare, verify, LogFilter, LogsProof, ProofPart};
+use logset_query::{compare, verify, BySystem, LogFilter, LogsProof, ProofPart, ProofSystem};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use willow_logs_verify::{parse_vkey, pinned_chain, trust_with, Sp1Check};
+use std::path::PathBuf;
+use willow_logs_verify::{parse_vkey, pinned_chain, trust_with, OvmProcess, Sp1Check};
 
 mod items;
 
@@ -57,6 +72,8 @@ struct Args {
     print_logs: bool,
     segment_vkeys: Vec<[u8; 32]>,
     leaf_vkeys: Vec<[u8; 32]>,
+    openvm_from: Option<u64>,
+    openvm_verifier: Option<PathBuf>,
     items: Option<items::Ask>,
 }
 
@@ -72,6 +89,8 @@ fn args() -> Result<Args, String> {
         print_logs: false,
         segment_vkeys: vec![],
         leaf_vkeys: vec![],
+        openvm_from: None,
+        openvm_verifier: None,
         items: None,
     };
     let mut it = std::env::args().skip(1);
@@ -91,6 +110,15 @@ fn args() -> Result<Args, String> {
             "--anchor-rpc" => a.anchor_rpc = Some(val()?),
             "--segment-vkey" => a.segment_vkeys.push(parse_vkey(&val()?)?),
             "--leaf-vkey" => a.leaf_vkeys.push(parse_vkey(&val()?)?),
+            "--openvm-from" => {
+                let v = val()?;
+                let n = match v.strip_prefix("0x") {
+                    Some(h) => u64::from_str_radix(h, 16),
+                    None => v.parse(),
+                };
+                a.openvm_from = Some(n.map_err(|e| format!("--openvm-from: {e}"))?)
+            }
+            "--openvm-verifier" => a.openvm_verifier = Some(val()?.into()),
             "--print-logs" | "--print" => a.print_logs = true,
             "--tx" => a.items = Some(items::Ask::Tx(items::parse_item(&val()?)?)),
             "--receipt" => a.items = Some(items::Ask::Receipt(items::parse_item(&val()?)?)),
@@ -199,7 +227,10 @@ fn run() -> Result<(), String> {
     }
     let f = LogFilter::from_eth_filter(&a.filter, proof.from_block, proof.to_block)?;
     let chain_id = a.chain_id.or_else(|| url_chain(&a.rpc)).unwrap_or(1);
-    let trust = trust_with(chain_id, a.segment_vkeys.clone(), a.leaf_vkeys.clone())?;
+    let mut trust = trust_with(chain_id, a.segment_vkeys.clone(), a.leaf_vkeys.clone())?;
+    if a.openvm_from.is_some() {
+        trust.openvm_from = a.openvm_from;
+    }
     let mut cache: HashMap<String, Vec<u8>> = HashMap::new();
     let mut fetch = |id: &str| -> Result<Vec<u8>, String> {
         if let Some(b) = cache.get(id) {
@@ -221,8 +252,13 @@ fn run() -> Result<(), String> {
         Ok(bytes)
     };
     let t = std::time::Instant::now();
-    let verified = verify(&proof, &f, &trust, &mut fetch, &mut Sp1Check::default())
-        .map_err(|e| e.to_string())?;
+    let mut check = BySystem {
+        sp1: Sp1Check::default(),
+        openvm: OvmProcess::new(a.openvm_verifier.clone()),
+    };
+    let verified = verify(&proof, &f, &trust, &mut fetch, &mut check).map_err(|e| e.to_string())?;
+    let count = |s| verified.systems.iter().filter(|&&x| x == s).count();
+    let hexn = |n: Option<u64>| n.map(|n| format!("0x{n:x}"));
     let (segments, blocks, leaves) = proof.parts.iter().fold((0, 0, 0), |(s, b, l), p| match p {
         ProofPart::Segment(_) => (s + 1, b, l),
         ProofPart::Block(_) => (s, b + 1, l),
@@ -237,6 +273,12 @@ fn run() -> Result<(), String> {
         "toBlock": format!("0x{:x}", f.to_block),
         "logs": verified.logs.len(),
         "parts": {"segments": segments, "blocks": blocks, "leaves": leaves},
+        "proofs": {"sp1": count(ProofSystem::Sp1), "openvm": count(ProofSystem::OpenVm)},
+        "openvmFrom": hexn(verified.openvm_from),
+        "cutover": match trust.openvm_from {
+            Some(n) => json!({"openvmFrom": format!("0x{n:x}"), "checked": true}),
+            None => json!({"checked": false, "note": "this chain's first OpenVM block is not pinned: the answer may switch from SP1 to OpenVM once, at openvmFrom"}),
+        },
         "lastProvenBlock": {"number": format!("0x{last:x}"), "hash": format!("0x{}", hex::encode(last_hash))},
         "verifySeconds": t.elapsed().as_secs_f64(),
     });

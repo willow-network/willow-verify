@@ -12,7 +12,7 @@
 //! canonical: a node or light client of its own confirms it.
 
 use crate::mpt;
-use crate::render::{Context, Rendered, View};
+use crate::render::{block_millis, Context, Rendered, View};
 use alloy_rlp::Decodable;
 use anyhow::{bail, ensure, Context as _, Result};
 use logset_blockcheck::receipts::{deposits_allowed, rlp_item, rlp_list_items, DEPOSIT_TX_TYPE};
@@ -114,16 +114,27 @@ fn items_for(
     receipt: bool,
 ) -> (Vec<usize>, Vec<usize>) {
     let deposit = deposits_allowed(chain_id);
+    // Base from Denim: the BaseTime deposit (every object's `blockTimestampMs`).
+    let millis = index != 1 && block_millis(chain_id, txs).is_some();
     if !receipt {
         // A deposit's nonce is its receipt's deposit nonce.
         let is_deposit = deposit && txs[index].first() == Some(&DEPOSIT_TX_TYPE);
-        return (vec![index], if is_deposit { vec![index] } else { vec![] });
+        let mut t = vec![index];
+        if millis {
+            t.push(1);
+            t.sort_unstable();
+        }
+        return (t, if is_deposit { vec![index] } else { vec![] });
     }
     // The transaction (hash, sender, recipient, prices), the previous receipt
     // (gasUsed), and on the OP stack the L1 info deposit (the L1 fee fields).
     let mut t = vec![index];
     if deposit && index > 0 {
         t.insert(0, 0);
+    }
+    if millis {
+        t.push(1);
+        t.sort_unstable();
     }
     let r = match index {
         0 => vec![0],

@@ -4,13 +4,20 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
-# Checks a Willow log RPC answer on the client: every SP1 proof against the
-# pinned program keys, every range proof, the links between parts, and
-# (optionally) another provider's eth_getLogs answer against the proven logs.
-# Transaction and receipt proofs (Merkle-Patricia, no zk) with
-# logset-blockproof.
+# Checks a Willow log RPC answer on the client: every SP1 and OpenVM proof
+# against the pinned program keys of its own system, every range proof, the
+# links between parts, and (optionally) another provider's eth_getLogs answer
+# against the proven logs. Transaction and receipt proofs (Merkle-Patricia, no
+# zk) with logset-blockproof.
+#
+# SP1 and OpenVM cannot share one dependency graph (see
+# ../../logset-guest-openvm/verify/Cargo.toml), so this crate verifies SP1 proofs
+# itself and has OpenVM proofs verified by `willow-logs-verify-openvm`: the CLI
+# runs that binary, the browser loads it as a second wasm module. Only the
+# minted OpenVM keys are linked here (that crate without its `verifier`).
 [dependencies]
 logset-query = { path = "../query" }
+willow-logs-verify-openvm = { path = "../../logset-guest-openvm/verify", default-features = false }
 logset-blockproof = { path = "../blockproof", optional = true }
 sp1-verifier = "=6.8.1"
 sp1-primitives = "=6.8.1"
@@ -19,6 +26,10 @@ bincode = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
 serde_json = "1"
 hex = "0.4"
+
+# Stand-in proofs, for the test of the pinned cutover.
+[dev-dependencies]
+logset-query = { path = "../query", features = ["fixtures"] }
 
 # The library (`Sp1Check`, pinned keys) builds without the HTTP client or the
 # block proofs, so the browser verifier (`query-wasm`) reuses it on wasm32.
