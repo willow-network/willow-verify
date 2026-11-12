@@ -726,3 +726,36 @@ fn a_frontier_transactions_high_s_signature_recovers_its_sender() {
         "9e5e1eac108fb93802384d26973ad35034db7462"
     );
 }
+
+/// reth reports a deposit creation at `CREATE(from, 0)` (the node's view of
+/// Base 53,785,762's third receipt): no disagreement with ours at its
+/// `depositNonce`. Any other address, a creation that is not a deposit, or a
+/// deposit that creates nothing, still disagrees.
+#[test]
+fn only_a_deposit_creation_may_be_reported_at_nonce_0() {
+    use crate::derive::create_address;
+    use crate::render::{difference, hx};
+    use serde_json::json;
+    let from = hex::decode("000000733a6e2c3c16c69590983a16ef636e0372").unwrap();
+    let from: [u8; 20] = from.try_into().unwrap();
+    let at = |n| json!(hx(&create_address(&from, n)));
+    assert_eq!(at(0), json!("0x9337a6816b04f490333eb727a53c44114db633d3"));
+    let ours = json!({
+        "type": "0x7e", "from": hx(&from), "to": null,
+        "contractAddress": at(0x1a1e), "depositNonce": "0x1a1e",
+    });
+    let node = |base: &Value, v: Value| {
+        let mut n = base.clone();
+        n["contractAddress"] = v;
+        n
+    };
+    assert_eq!(difference(&ours, &node(&ours, at(0)), "r"), None);
+    assert_eq!(difference(&ours, &node(&ours, at(0x1a1e)), "r"), None);
+    assert!(difference(&ours, &node(&ours, at(0x1a1f)), "r").is_some());
+    let mut plain = ours.clone();
+    plain["type"] = json!("0x2");
+    plain.as_object_mut().unwrap().remove("depositNonce");
+    assert!(difference(&plain, &node(&plain, at(0)), "r").is_some());
+    let call = node(&ours, Value::Null);
+    assert!(difference(&call, &node(&call, at(0)), "r").is_some());
+}

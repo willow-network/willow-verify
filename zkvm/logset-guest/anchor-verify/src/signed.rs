@@ -85,8 +85,9 @@ fn rejected(message: impl Into<String>) -> Failure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedConfirmed {
     pub hash: [u8; 32],
-    /// The block the sequencer signed, and its key.
+    /// The block the sequencer signed, its time, and its key.
     pub anchor_block: u64,
+    pub anchor_time: u64,
     pub signer: Address,
     /// The Ethereum block whose state named the key.
     pub l1_block: u64,
@@ -306,6 +307,7 @@ pub fn confirm_signed(
     Ok(SignedConfirmed {
         hash,
         anchor_block: top.number,
+        anchor_time: top.timestamp,
         signer,
         l1_block: l1.number,
     })

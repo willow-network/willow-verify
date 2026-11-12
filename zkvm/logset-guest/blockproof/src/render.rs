@@ -737,6 +737,18 @@ pub fn block_logs(
     Ok(out)
 }
 
+/// Log `index` of a block, of its transaction `tx` (`tx_hash`), as [`block_logs`] renders it.
+pub fn log_value(
+    ctx: &Context,
+    millis: Option<u64>,
+    tx: usize,
+    tx_hash: [u8; 32],
+    index: u64,
+    l: &Log,
+) -> Value {
+    log_json(ctx, millis, tx, Some(tx_hash), Some(index), l)
+}
+
 /// One log in `eth_getLogs` form; `millis`, its block's millisecond part (Base from Denim).
 fn log_json(
     ctx: &Context,
@@ -906,9 +918,23 @@ fn nodes_may_add(key: &str, path: &str, value: &Value, ours: &Map<String, Value>
         || (key == "to" && value.is_null() && deposit)
 }
 
+/// A deposit receipt's `contractAddress` as `CREATE(from, 0)`: reth's receipt
+/// builder takes a deposit's nonce, always 0, where op-geth and the spec take
+/// its `depositNonce` (every Base node until base/base#6337).
+fn nodes_create_deposits_at_nonce_0(key: &str, value: &Value, ours: &Map<String, Value>) -> bool {
+    let deposit =
+        ours.get("type").is_some_and(|t| t == "0x7e") && ours.contains_key("depositNonce");
+    let from = ours.get("from").and_then(hex_fixed::<20>);
+    key == "contractAddress"
+        && deposit
+        && ours.get(key).is_some_and(Value::is_string)
+        && from.is_some_and(|f| *value == Value::String(hx(&create_address(&f, 0))))
+}
+
 /// Where our JSON differs from the node's, if it does. Tolerated, because nodes
 /// differ on them among themselves: a field some nodes leave out
-/// ([`nodes_may_omit`]) or add ([`nodes_may_add`]), and a log's
+/// ([`nodes_may_omit`]) or add ([`nodes_may_add`]), a deposit creation's
+/// address at nonce 0 ([`nodes_create_deposits_at_nonce_0`]), and a log's
 /// `blockTimestamp` of `0x0` (Robinhood Chain's own RPC).
 pub fn difference(ours: &Value, node: &Value, path: &str) -> Option<String> {
     match (ours, node) {
@@ -925,6 +951,9 @@ pub fn difference(ours: &Value, node: &Value, path: &str) -> Option<String> {
                     continue;
                 }
                 if k == "blockTimestamp" && theirs.is_some_and(|t| t == "0x0") {
+                    continue;
+                }
+                if theirs.is_some_and(|t| nodes_create_deposits_at_nonce_0(k, t, a)) {
                     continue;
                 }
                 let at = format!("{path}.{k}");

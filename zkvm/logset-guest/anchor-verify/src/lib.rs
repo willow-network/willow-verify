@@ -381,6 +381,7 @@ impl Anchor {
                     "hash": format!("{}", B256::from(c.hash)),
                     "matches": c.hash == want,
                     "anchorBlock": c.anchor_block,
+                    "anchorTime": c.anchor_time,
                     "signer": format!("{}", c.signer),
                     "l1Block": c.l1_block,
                 }));

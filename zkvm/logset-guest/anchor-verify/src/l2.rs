@@ -10,45 +10,48 @@ use crate::{Failure, Kind};
 use alloy_primitives::{address, keccak256, Address, Bytes};
 use serde_json::Value;
 
-/// An OP-stack chain: its AnchorStateRegistry on Ethereum, the address that posts its games, and
-/// whether its games claim super roots (OP Mainnet, Unichain, Ink) or output roots (Base).
+/// An OP-stack chain: its AnchorStateRegistry on Ethereum, the addresses whose games count as
+/// committed, and whether its games claim super roots (OP Mainnet, Unichain, Ink) or output roots
+/// (Base).
 pub struct OpChain {
     pub chain_id: u64,
     pub name: &'static str,
     pub registry: Address,
-    pub proposer: Address,
+    /// A short list, so that a proposer rotation can be pinned before it happens.
+    pub proposers: &'static [Address],
     pub super_root: bool,
 }
 
-/// Read from each chain's contracts on Ethereum on 2026-10-19: the respected game type's games
-/// are all posted by these addresses.
+/// Read from each chain's contracts on Ethereum: the proposer its DisputeGameFactory names for the
+/// permissioned game type 5 (`gameArgs(5)`, 2026-11-11; Unichain's changed from `0xD5F0…FA9A` on
+/// 2026-10-29, block 26,299,517), and on Base the creator of its type-621 games (2026-10-19).
 pub const OP_CHAINS: [OpChain; 4] = [
     OpChain {
         chain_id: 8453,
         name: "Base",
         registry: address!("909f6cf47ed12f010A796527f562bFc26C7F4E72"),
-        proposer: address!("c1366Fabe614d42D367A1ecE61821238A1d31cF5"),
+        proposers: &[address!("c1366Fabe614d42D367A1ecE61821238A1d31cF5")],
         super_root: false,
     },
     OpChain {
         chain_id: 10,
         name: "OP Mainnet",
         registry: address!("23B2C62946350F4246f9f9D027e071f0264FD113"),
-        proposer: address!("473300df21D047806A082244b417f96b32f13A33"),
+        proposers: &[address!("473300df21D047806A082244b417f96b32f13A33")],
         super_root: true,
     },
     OpChain {
         chain_id: 130,
         name: "Unichain",
         registry: address!("27Cf508E4E3Aa8d30b3226aC3b5Ea0e8bcaCAFF9"),
-        proposer: address!("D5F0E2912C70771C589CD8bB087EDE0Dab4AFA9A"),
+        proposers: &[address!("86b392ca30ad7453c8d88b56eb5a04fd0e2175b7")],
         super_root: true,
     },
     OpChain {
         chain_id: 57073,
         name: "Ink",
         registry: address!("Ee018bAf058227872540AC60eFbd38b023d9dAe2"),
-        proposer: address!("3832bfbeF03173E4C49a00ec0DD178817A02D177"),
+        proposers: &[address!("3832bfbeF03173E4C49a00ec0DD178817A02D177")],
         super_root: true,
     },
 ];
@@ -274,6 +277,19 @@ pub fn confirm_op(
                 format!("chain {chain_id} is not an OP-stack chain here"),
             )
         })?;
+    confirm_op_on(lc, chain, number, answer, now)
+}
+
+/// [`confirm_op`] for `chain`. A claim valid on Ethereum is `final` whoever created it, as the
+/// chain's bridge pays withdrawals on it; `committed` needs one of `chain.proposers`.
+pub(crate) fn confirm_op_on(
+    lc: &LightClient,
+    chain: &OpChain,
+    number: u64,
+    answer: &Value,
+    now: u64,
+) -> Result<L2Confirmed, Failure> {
+    let chain_id = chain.chain_id;
     let (l1, state) = ethereum_at(lc, number, answer, now)?;
     let game: Address = answer
         .get("game")
@@ -294,7 +310,8 @@ pub fn confirm_op(
         let status = word(&at(game, "status()", &[])?, 0)?[31];
         let creator = Address::from_slice(&word(&at(game, "gameCreator()", &[])?, 0)?[12..]);
         // Not a verdict on the block: a claim this page does not count on, not one shown wrong.
-        if !proper || !respected || status == CHALLENGER_WINS || creator != chain.proposer {
+        if !proper || !respected || status == CHALLENGER_WINS || !chain.proposers.contains(&creator)
+        {
             return Err(Failure::new(
                 Kind::Declined,
                 format!(

@@ -137,6 +137,8 @@ On `/v1/rpc/1/...` (and `public`):
 | `willow_lightClientBootstrap [blockRoot]` | the beacon API's bootstrap, as it sends it (`{version, data}`) | about 55 KB |
 | `willow_lightClientUpdates [startPeriod, count]` | the beacon API's best update per period, at most 16 | about 58 KB each |
 | `willow_getBlockAnchor [blockNumber]` | `{blockNumber, update, proof}`: the finality update the proof hangs from, and `{kind: "head"}`, `{kind: "history", proof: <eth_getProof result>}` or `{kind: "beacon", witness}` | 10 to 16 KB |
+| `willow_getBlockAnchor ["latest"]` | the same for the light client's head (`head`), `blockNumber` naming it | about 5 KB |
+| `willow_getBlockAnchor ["finalized"]` | the same for the head's finalized block (`history`) | about 16 KB |
 
 Willow's server verifies every answer with this same code before serving it, so bad upstream data
 is not passed on to every browser. For `beacon` it keeps finalized beacon states and a table of
@@ -224,16 +226,28 @@ hash. JSON from servers goes to the wasm as sent; no verdict reads message text.
    its header (RLP, verified by hash) gives that block's state root, and so on: about 6 KB a hop.
    Hops by chain (games every 20 minutes on Base, 1 hour on OP and Unichain, 12 hours on Ink): 0
    on Base, OP and Unichain; up to 6 on Ink.
-4. **Posted.** A game for `M >= N` that exists in the DisputeGameFactory, is of the respected
-   type, is not resolved against, and was created by the chain's proposer. OP Mainnet's, Unichain's
-   and Ink's games are permissionless: anyone can post one for a bond. Others' games are there:
-   Ink's game 2574, of the respected type, was created by `0xe3B9…7e89` and claims a time 5.4 days
-   ahead (read on Ethereum on 2026-10-20). So the proposer is pinned per chain (`OP_CHAINS` in
-   `anchor-verify`); the browser declines a game by anyone else (not a verdict on the block: the
-   public-node fallback, in gold), and Willow's game search follows only the proposer's games,
-   whose positions only grow, skipping the rest. When the proposer changes, games stop reading as
-   posted until the page is updated. A game being challenged still reads as posted: the
-   claim is the proposer's until it is lost.
+4. **Posted.** A game for `M >= N` that exists in the DisputeGameFactory, is of the respected type,
+   is not resolved against, and was created by one of the chain's pinned proposers. OP Mainnet's,
+   Unichain's and Ink's games are permissionless: anyone can post one for a bond. Others' games are
+   there: Ink's game 2574, of the respected type, was created by `0xe3B9…7e89` and claims a time 5.4
+   days ahead (read on Ethereum on 2026-10-20); on Unichain `0x8e68…d964` posted a game twice a day
+   from 2026-10-30 to 11-04, each lost. So the proposers are pinned per chain (`OP_CHAINS` in
+   `anchor-verify`, a short list): the address each chain's DisputeGameFactory names as the proposer
+   of its permissioned game type (`gameArgs(5)`), and on Base the creator of its type-621 games. The
+   browser declines a game by anyone else (not a verdict on the block: the public-node fallback, in
+   gold). Proposers do change: Unichain's factory named `0x86b3…75b7` in place of `0xD5F0…FA9A` on
+   2026-10-29 (Ethereum block 26,299,517). When one changes, recent blocks stop reading as posted
+   until the page pins the new one, and `willow-eth-anchor` logs a warning once three proposal
+   intervals pass with others posting and no pinned proposer. A game being challenged still reads as
+   posted: the claim is the proposer's until it is lost.
+
+   Settled needs no pin. The registry's `isGameClaimValid` does not read the creator, and the
+   chain's OptimismPortal finalizes a withdrawal against any game that passes it
+   (`checkWithdrawal`), taking the chain's output root from the super root with
+   `rootClaimByChainId`, the first entry for the chain, as the browser does. So Willow's game search
+   offers the pinned proposers' games first, then anyone's whose claim is already valid. It finds
+   them by bisecting the factory's games by creation time, which only grows: about 15 `eth_call`s to
+   reach any date.
 5. **Signed by the sequencer.** For a block newer than the newest game: a block `M >= N` the
    sequencer gossiped, `signature ‖ [parent beacon root] ‖ SSZ execution payload` (decompressed),
    signed over `keccak(0^32 ‖ chainId ‖ keccak(data))`. The browser recovers the signer and
@@ -251,6 +265,8 @@ On each L2's route, `willow_getBlockAnchor [blockNumber]` answers with the final
 Ethereum state witness `l1` (`eth_getProof` results with code; trie nodes shared by several proofs
 are sent once, `{"accounts", "nodes"}`), `headers`, L2 history `proofs`, and either the `game` or
 the `signed` gossip message. The browser picks the level from what it verifies, never from a label.
+`["latest"]` serves the newest block the sequencer signed that Willow's L2 RPC has: the
+`signed` shape with that block's header alone and no history proofs, `blockNumber` naming it.
 Willow finds the earliest game at or after N, and proves L2 state at `M` from a node that keeps
 old state (games for Settled are 3.5 to 7 days old).
 

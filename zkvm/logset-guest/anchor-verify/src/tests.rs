@@ -738,18 +738,39 @@ fn op_stack_blocks_are_final_or_committed_through_their_games() {
         (Some(true), Some("committed"), Some(true)),
         "{r}"
     );
-    // A super-root chain: the output root comes out of the game's super root.
-    let r = verify_l2(130, 61680000, HASH_UNI_61680000, &json_of(UNI_COMMITTED));
+    // A super-root chain: the output root comes out of the game's super root. The game is by
+    // Unichain's proposer before the 2026-10-29 rotation: committed under that pin, declined now.
+    let uni = json_of(UNI_COMMITTED);
+    let c = op_on(&UNICHAIN_BEFORE, 61680000, &uni, l2_now(&uni)).unwrap();
     assert_eq!(
-        (
-            r["ok"].as_bool(),
-            r["level"].as_str(),
-            r["matches"].as_bool()
-        ),
-        (Some(true), Some("committed"), Some(true)),
-        "{r}"
+        (c.level, format!("{}", alloy_primitives::B256::from(c.hash))),
+        ("committed", HASH_UNI_61680000.to_string())
     );
-    assert!(r["anchorBlock"].as_u64().unwrap() >= 61680000);
+    assert!(c.anchor_block >= 61680000);
+    let r = verify_l2(130, 61680000, HASH_UNI_61680000, &uni);
+    assert_eq!(kind(&r), "declined", "{r}");
+}
+
+/// Unichain as `OP_CHAINS` pinned it before its proposer changed on 2026-10-29.
+const UNICHAIN_BEFORE: crate::l2::OpChain = crate::l2::OpChain {
+    chain_id: 130,
+    name: "Unichain",
+    registry: alloy_primitives::address!("27Cf508E4E3Aa8d30b3226aC3b5Ea0e8bcaCAFF9"),
+    proposers: &[alloy_primitives::address!(
+        "D5F0E2912C70771C589CD8bB087EDE0Dab4AFA9A"
+    )],
+    super_root: true,
+};
+
+/// `confirm_op` with `chain`'s pins, on the light client the `l2-*` fixtures were saved against.
+fn op_on(
+    chain: &crate::l2::OpChain,
+    number: u64,
+    answer: &Value,
+    now: f64,
+) -> Result<crate::l2::L2Confirmed, Failure> {
+    let mut a = synced();
+    crate::l2::confirm_op_on(a.client().unwrap(), chain, number, answer, now as u64)
 }
 
 #[test]
@@ -1445,4 +1466,441 @@ fn a_game_by_someone_else_is_declined_not_called_committed_or_forged() {
             .contains("nor a standing claim by Ink's proposer"),
         "{r}"
     );
+}
+
+// `willow_getBlockAnchor ["latest"]` and `["finalized"]` (interface I5), saved by
+// `web/verify/test/save_tag_anchors.py`: each verified as the client does, by the response's own
+// `blockNumber` and any hash, then tampered.
+
+const TAGS_CHECKPOINT: &str =
+    include_str!("../../../../web/verify/test/anchor/tags/checkpoint.json");
+const TAGS_BOOTSTRAP: &str = include_str!("../../../../web/verify/test/anchor/tags/bootstrap.json");
+const TAGS_UPDATES: &str = include_str!("../../../../web/verify/test/anchor/tags/updates.json");
+const LATEST_1: &str = include_str!("../../../../web/verify/test/anchor/tags/latest-1.json");
+const FINALIZED_1: &str = include_str!("../../../../web/verify/test/anchor/tags/finalized-1.json");
+const LATEST_L2: [(u32, &str); 6] = [
+    (
+        8453,
+        include_str!("../../../../web/verify/test/anchor/tags/latest-8453.json"),
+    ),
+    (
+        10,
+        include_str!("../../../../web/verify/test/anchor/tags/latest-10.json"),
+    ),
+    (
+        130,
+        include_str!("../../../../web/verify/test/anchor/tags/latest-130.json"),
+    ),
+    (
+        57073,
+        include_str!("../../../../web/verify/test/anchor/tags/latest-57073.json"),
+    ),
+    (
+        42161,
+        include_str!("../../../../web/verify/test/anchor/tags/latest-42161.json"),
+    ),
+    (
+        4663,
+        include_str!("../../../../web/verify/test/anchor/tags/latest-4663.json"),
+    ),
+];
+const ANY_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+/// A light client synced from the tags' checkpoint at `now`.
+fn tags_synced(now: f64) -> Anchor {
+    let c = json_of(TAGS_CHECKPOINT);
+    let mut a = Anchor::new(c["root"].as_str().unwrap(), c["slot"].as_f64().unwrap());
+    let r = json_of(&a.bootstrap(&body(&json_of(TAGS_BOOTSTRAP)), now));
+    assert_eq!(r["ok"], true, "{r}");
+    let r = json_of(&a.updates(&body(&json_of(TAGS_UPDATES))));
+    assert_eq!(r["ok"], true, "{r}");
+    a
+}
+
+fn saved_at(fixture: &Value) -> f64 {
+    fixture["savedAt"].as_f64().unwrap()
+}
+
+fn number_of(result: &Value) -> u64 {
+    u64::from_str_radix(&result["blockNumber"].as_str().unwrap()[2..], 16).unwrap()
+}
+
+/// `Anchor.verify` of `result` on `chain` for block `number`, at `now`.
+fn verify_at(chain: u32, number: u64, result: &Value, now: f64) -> Value {
+    json_of(&tags_synced(now).verify(chain, number as f64, ANY_HASH, &body(result), now))
+}
+
+/// A fixture's response verified as the client verifies it: the block its `blockNumber` names.
+fn verify_tag(chain: u32, fixture: &Value) -> Value {
+    let result = &fixture["response"]["result"];
+    verify_at(chain, number_of(result), result, saved_at(fixture))
+}
+
+#[test]
+fn latest_on_ethereum_is_the_light_clients_head() {
+    let fx = json_of(LATEST_1);
+    assert_eq!(fx["request"]["params"], json!(["latest"]));
+    let n = number_of(&fx["response"]["result"]);
+    let r = verify_tag(1, &fx);
+    assert_eq!(
+        (r["ok"].as_bool(), r["path"].as_str(), r["level"].as_str()),
+        (Some(true), Some("head"), Some("signed")),
+        "{r}"
+    );
+    // The proven hash is the block a public node has; the client reads it from `hash`.
+    assert_eq!(r["hash"], fx["expect"]["hash"]);
+    assert_eq!(r["head"].as_u64(), Some(n));
+    assert!(
+        saved_at(&fx) - r["headTime"].as_f64().unwrap() < 60.0,
+        "{r}"
+    );
+    let hash = fx["expect"]["hash"].as_str().unwrap();
+    let body = fx["response"].to_string();
+    let r = json_of(&tags_synced(saved_at(&fx)).verify(1, n as f64, hash, &body, saved_at(&fx)));
+    assert_eq!(r["matches"], true, "{r}");
+}
+
+#[test]
+fn finalized_on_ethereum_is_the_heads_finalized_block_by_history() {
+    let fx = json_of(FINALIZED_1);
+    assert_eq!(fx["request"]["params"], json!(["finalized"]));
+    let n = number_of(&fx["response"]["result"]);
+    let r = verify_tag(1, &fx);
+    assert_eq!(
+        (r["ok"].as_bool(), r["path"].as_str(), r["level"].as_str()),
+        (Some(true), Some("history"), Some("final")),
+        "{r}"
+    );
+    assert_eq!(r["hash"], fx["expect"]["hash"]);
+    // The update's own finalized block, not an older final one: the client compares them.
+    assert_eq!(r["finalized"].as_u64(), Some(n));
+    assert!(r["head"].as_u64().unwrap() > n);
+}
+
+#[test]
+fn latest_on_each_l2_is_the_newest_block_its_sequencer_signed() {
+    for (chain, s) in LATEST_L2 {
+        let fx = json_of(s);
+        assert_eq!(fx["request"]["params"], json!(["latest"]), "{chain}");
+        let result = &fx["response"]["result"];
+        let n = number_of(result);
+        // No history hops: the signed block is the block.
+        assert_eq!(result["headers"].as_array().unwrap().len(), 1, "{chain}");
+        assert!(result["proofs"].as_array().unwrap().is_empty(), "{chain}");
+        let r = verify_tag(chain, &fx);
+        assert_eq!(
+            (r["ok"].as_bool(), r["path"].as_str(), r["level"].as_str()),
+            (Some(true), Some("sequencer"), Some("signed")),
+            "{chain}: {r}"
+        );
+        assert_eq!(r["hash"], fx["expect"]["hash"], "{chain}");
+        assert_eq!(r["anchorBlock"].as_u64(), Some(n), "{chain}");
+        assert_eq!(r["anchorTime"], fx["expect"]["anchorTime"], "{chain}");
+    }
+}
+
+#[test]
+fn another_blocks_tag_anchor_is_rejected() {
+    let latest = json_of(LATEST_1);
+    let (result, now) = (&latest["response"]["result"], saved_at(&latest));
+    let n = number_of(result);
+    // Read as another block, or renamed: the head is block n alone.
+    assert_eq!(kind(&verify_at(1, n - 1, result, now)), "rejected");
+    let renamed = edit(result, &["blockNumber"], |_| format!("0x{:x}", n - 1));
+    assert_eq!(kind(&verify_at(1, n - 1, &renamed, now)), "rejected");
+    // The finalized block's history proof, renamed to the block before it.
+    let fin = json_of(FINALIZED_1);
+    let (fr, fnow) = (&fin["response"]["result"], saved_at(&fin));
+    let f = number_of(fr);
+    let renamed = edit(fr, &["blockNumber"], |_| format!("0x{:x}", f - 1));
+    assert_eq!(kind(&verify_at(1, f - 1, &renamed, fnow)), "rejected");
+    // An L2's signed block, read as the one before it (no hop to it) or after it (out of reach).
+    for (chain, s) in LATEST_L2 {
+        let fx = json_of(s);
+        let (r, now) = (&fx["response"]["result"], saved_at(&fx));
+        let m = number_of(r);
+        assert_eq!(
+            kind(&verify_at(chain, m - 1, r, now)),
+            "rejected",
+            "{chain}"
+        );
+        let before = edit(r, &["blockNumber"], |_| format!("0x{:x}", m - 1));
+        assert_eq!(
+            kind(&verify_at(chain, m - 1, &before, now)),
+            "malformed-input",
+            "{chain}"
+        );
+        let after = edit(r, &["blockNumber"], |_| format!("0x{:x}", m + 1));
+        assert_eq!(
+            kind(&verify_at(chain, m + 1, &after, now)),
+            "not-covered",
+            "{chain}"
+        );
+    }
+}
+
+#[test]
+fn a_stale_tag_anchor_is_refused_or_shows_its_age() {
+    // Ethereum's head over 10 minutes old says nothing.
+    let latest = json_of(LATEST_1);
+    let result = &latest["response"]["result"];
+    let t = json_of(&tags_synced(saved_at(&latest)).verify(
+        1,
+        number_of(result) as f64,
+        ANY_HASH,
+        &body(result),
+        saved_at(&latest),
+    ))["headTime"]
+        .as_f64()
+        .unwrap();
+    let r = verify_at(1, number_of(result), result, t + 601.0);
+    assert_eq!(kind(&r), "stale-head", "{r}");
+    // A finalized block stays final: an old `finalized` verifies, and `headTime` shows its age,
+    // which the client bounds.
+    let fin = json_of(FINALIZED_1);
+    let fr = &fin["response"]["result"];
+    let day_later = saved_at(&fin) + 86_400.0;
+    let r = verify_at(1, number_of(fr), fr, day_later);
+    assert_eq!(
+        (r["ok"].as_bool(), r["level"].as_str()),
+        (Some(true), Some("final"))
+    );
+    assert!(
+        day_later - r["headTime"].as_f64().unwrap() > 86_400.0,
+        "{r}"
+    );
+    for (chain, s) in LATEST_L2 {
+        let fx = json_of(s);
+        let (r, now) = (&fx["response"]["result"], saved_at(&fx));
+        let m = number_of(r);
+        // Twenty minutes on, it verifies, and `anchorTime` shows its age.
+        let v = verify_at(chain, m, r, now + 1200.0);
+        assert_eq!(v["ok"], true, "{chain}: {v}");
+        assert!(
+            now + 1200.0 - v["anchorTime"].as_f64().unwrap() >= 1200.0,
+            "{chain}"
+        );
+        // An hour on, the Ethereum state naming the key is too old.
+        assert_eq!(
+            kind(&verify_at(chain, m, r, now + 3600.0)),
+            "stale-head",
+            "{chain}"
+        );
+    }
+}
+
+#[test]
+fn a_tag_anchor_for_another_chain_is_refused() {
+    let l2 = |c: u32| {
+        let fx = json_of(LATEST_L2.iter().find(|(id, _)| *id == c).unwrap().1);
+        (fx["response"]["result"].clone(), saved_at(&fx))
+    };
+    // Another chain's sequencer key or feed signature.
+    for (from, read_as) in [
+        (8453, 10),
+        (10, 130),
+        (130, 57073),
+        (57073, 8453),
+        (42161, 4663),
+        (4663, 42161),
+    ] {
+        let (r, now) = l2(from);
+        let v = verify_at(read_as, number_of(&r), &r, now);
+        assert_eq!(kind(&v), "rejected", "{from} as {read_as}: {v}");
+    }
+    // Ethereum's head on an L2's route, and an L2's block on Ethereum's: neither shape is the other.
+    let latest = json_of(LATEST_1);
+    let (r, now) = (&latest["response"]["result"], saved_at(&latest));
+    for chain in [8453, 42161] {
+        let v = verify_at(chain, number_of(r), r, now);
+        assert_eq!(v["ok"], false, "{chain}: {v}");
+    }
+    let (r, now) = l2(8453);
+    assert_eq!(
+        kind(&verify_at(1, number_of(&r), &r, now)),
+        "malformed-input"
+    );
+}
+
+// Unichain after its proposer changed on 2026-10-29, saved by eth-anchor's
+// `record_unichain_anchors` on 2026-11-11 at one finalized Ethereum block and verified with the
+// `tags/` light client: `{chainId, block, hash (the public node's), savedAt, result}`.
+
+/// The block the public route refused on 2026-11-11 (about 2 days old), through the first game
+/// after it by the proposer the factory names now, in progress.
+const UNI_REPRO: &str = include_str!("../../../../web/verify/test/anchor/l2-130-repro.json");
+/// A week-old block through the newest game valid on Ethereum, as the any-creator search found it
+/// with Unichain's old pin.
+const UNI_FINAL: &str = include_str!("../../../../web/verify/test/anchor/l2-130-final.json");
+/// The same block through the next game: resolved for its defender, inside the finality delay.
+const UNI_AIRGAPPED: &str =
+    include_str!("../../../../web/verify/test/anchor/l2-130-airgapped.json");
+/// The same block through a game by someone who posted one twice a day for a week, which lost.
+const UNI_LOST: &str = include_str!("../../../../web/verify/test/anchor/l2-130-lost.json");
+/// The same block's Ethereum state for a game of type 8, respected until 2026-09-24.
+const UNI_TYPE_8: &str = include_str!("../../../../web/verify/test/anchor/l2-130-type-8.json");
+
+/// Unichain with no proposer pinned.
+const UNICHAIN_NO_PINS: crate::l2::OpChain = crate::l2::OpChain {
+    proposers: &[],
+    ..UNICHAIN_BEFORE
+};
+
+struct Uni {
+    result: Value,
+    block: u64,
+    hash: String,
+    now: f64,
+}
+
+fn uni(fixture: &str) -> Uni {
+    let f = json_of(fixture);
+    Uni {
+        result: f["result"].clone(),
+        block: f["block"].as_u64().unwrap(),
+        hash: f["hash"].as_str().unwrap().into(),
+        now: f["savedAt"].as_f64().unwrap(),
+    }
+}
+
+/// `Anchor.verify` of `result` for a fixture's block, as the client runs it.
+fn verify_uni(u: &Uni, result: &Value) -> Value {
+    json_of(&tags_synced(u.now).verify(130, u.block as f64, &u.hash, &body(result), u.now))
+}
+
+/// `confirm_op` of a fixture with `chain`'s pins.
+fn uni_on(chain: &crate::l2::OpChain, u: &Uni) -> Result<crate::l2::L2Confirmed, Failure> {
+    let mut a = tags_synced(u.now);
+    crate::l2::confirm_op_on(a.client().unwrap(), chain, u.block, &u.result, u.now as u64)
+}
+
+fn level(r: &Value) -> (Option<bool>, Option<&str>, Option<bool>) {
+    (
+        r["ok"].as_bool(),
+        r["level"].as_str(),
+        r["matches"].as_bool(),
+    )
+}
+
+#[test]
+fn the_unichain_block_refused_on_11_11_is_committed_through_its_proposers_game() {
+    let u = uni(UNI_REPRO);
+    let r = verify_uni(&u, &u.result);
+    assert_eq!(
+        level(&r),
+        (Some(true), Some("committed"), Some(true)),
+        "{r}"
+    );
+    // With the pin before the rotation the game is no one's, and still in progress: declined,
+    // the refusal the route gave.
+    assert_eq!(
+        uni_on(&UNICHAIN_BEFORE, &u).unwrap_err().kind,
+        Kind::Declined
+    );
+}
+
+#[test]
+fn a_claim_valid_on_ethereum_is_final_whoever_made_it() {
+    let u = uni(UNI_FINAL);
+    let r = verify_uni(&u, &u.result);
+    assert_eq!(level(&r), (Some(true), Some("final"), Some(true)), "{r}");
+    for chain in [&UNICHAIN_BEFORE, &UNICHAIN_NO_PINS] {
+        let c = uni_on(chain, &u).unwrap();
+        assert_eq!(
+            (c.level, format!("{}", B256::from(c.hash))),
+            ("final", u.hash.clone())
+        );
+    }
+}
+
+#[test]
+fn committed_needs_a_pinned_proposer() {
+    let u = uni(UNI_AIRGAPPED);
+    let fin = uni(UNI_FINAL);
+    assert_eq!(u.block, fin.block);
+    assert_ne!(u.result["game"], fin.result["game"]);
+    let r = verify_uni(&u, &u.result);
+    assert_eq!(
+        level(&r),
+        (Some(true), Some("committed"), Some(true)),
+        "{r}"
+    );
+    for chain in [&UNICHAIN_BEFORE, &UNICHAIN_NO_PINS] {
+        let e = uni_on(chain, &u).unwrap_err();
+        assert_eq!(e.kind, Kind::Declined, "{}", e.message);
+    }
+    // An unresolved game too: the refused block's, with no pin for its creator.
+    let e = uni_on(&UNICHAIN_NO_PINS, &uni(UNI_REPRO)).unwrap_err();
+    assert_eq!(e.kind, Kind::Declined, "{}", e.message);
+}
+
+#[test]
+fn a_lost_game_or_one_of_another_type_is_refused() {
+    let u = uni(UNI_LOST);
+    assert_eq!(u.block, uni(UNI_FINAL).block);
+    let r = verify_uni(&u, &u.result);
+    assert_eq!(kind(&r), "declined", "{r}");
+    // The registry still counts a type-8 game's claim valid (respected when it was made, after
+    // the retirement), but its claim is an output root, not the super root Unichain's games claim
+    // now: refused.
+    let u = uni(UNI_TYPE_8);
+    let r = verify_uni(&u, &u.result);
+    assert_eq!(kind(&r), "rejected", "{r}");
+    assert!(r["message"].as_str().unwrap().contains("super root"), "{r}");
+}
+
+#[test]
+fn every_tampered_part_of_a_final_unichain_anchor_is_refused() {
+    let u = uni(UNI_FINAL);
+    let a0 = &u.result;
+    let good = verify_uni(&u, a0);
+    let m = good["anchorBlock"].as_u64().unwrap();
+    assert!(m > u.block, "{good}");
+    let mut swapped = a0.clone();
+    swapped["game"] = json_of(UNI_AIRGAPPED)["result"]["game"].clone();
+    let mut no_account = a0.clone();
+    no_account["l1"]["accounts"]
+        .as_array_mut()
+        .unwrap()
+        .remove(3);
+    let cases: Vec<(&str, Value)> = vec![
+        ("another game over this one's state", swapped),
+        ("header", edit(a0, &["headers", "0"], |s| flip_at(s, 200))),
+        (
+            "history proof",
+            edit(a0, &["proofs", "0", "storageProof", "0", "value"], flip),
+        ),
+        (
+            "Ethereum state",
+            edit(a0, &["l1", "accounts", "2", "storageHash"], flip),
+        ),
+        (
+            "a shared proof node",
+            edit(a0, &["l1", "nodes", "0"], |s| flip_at(s, 3)),
+        ),
+        ("a missing account", no_account),
+        (
+            "block asked",
+            edit(a0, &["blockNumber"], |_| format!("0x{:x}", u.block - 1)),
+        ),
+    ];
+    for (name, response) in cases {
+        let r = verify_uni(&u, &response);
+        assert_eq!(r["ok"], false, "{name}: {r}");
+        assert!(
+            matches!(kind(&r), "rejected" | "malformed-input"),
+            "{name}: {r}"
+        );
+    }
+    // Unichain's anchor read as OP Mainnet's: OP Mainnet's registry is not in the state.
+    let r = json_of(&tags_synced(u.now).verify(10, u.block as f64, &u.hash, &body(a0), u.now));
+    assert_eq!(kind(&r), "rejected", "{r}");
+    // A block after the claimed one is out of this game's reach.
+    let later = edit(a0, &["blockNumber"], |_| format!("0x{:x}", m + 1));
+    let r = json_of(&tags_synced(u.now).verify(130, (m + 1) as f64, &u.hash, &body(&later), u.now));
+    assert_eq!(kind(&r), "not-covered", "{r}");
+    // Ethereum state two hours old says nothing now.
+    let late = u.now + 7200.0;
+    let r = json_of(&tags_synced(u.now).verify(130, u.block as f64, &u.hash, &body(a0), late));
+    assert_eq!(kind(&r), "stale-head", "{r}");
 }
