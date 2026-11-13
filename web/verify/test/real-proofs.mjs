@@ -168,7 +168,7 @@ neg('a rejection whose text says "out of memory" is rejected', { ans: a, proofs:
 } }, /out of memory/);
 
 // Data that cannot be read is malformed-input; the page's own filter and keys have kinds of their own.
-neg('an answer that is not JSON', { response: '<html>502 Bad Gateway</html>' }, /willow_getLogsProof answer/, 'malformed-input');
+neg('an answer that is not JSON', { response: '<html>502 Bad Gateway</html>' }, /willow_getLogsProof response/, 'malformed-input');
 neg('a response without a result', { response: '{"jsonrpc":"2.0","id":1}' }, /missing field `result`/, 'malformed-input');
 a = clone(answer);
 delete a.parts;

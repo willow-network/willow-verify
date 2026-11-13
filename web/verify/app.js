@@ -272,7 +272,7 @@ async function rpc(url, method, params) {
     const msg = body && body.error ? errorText(body.error) : '';
     // Rate limiting is HTTP 429 (its JSON-RPC code, -32005, is shared with "too large").
     if (res.status === 429) {
-      throw new CheckError(`${hostOf(url)} answered HTTP 429 (${msg || 'too many requests'}). It is limiting requests for the moment; wait a minute, then try again.`, {
+      throw new CheckError(`${hostOf(url)} returned HTTP 429 (${msg || 'too many requests'}). It is limiting requests for the moment; wait a minute, then try again.`, {
         title: 'Could not verify: rate limit reached',
         tone: 'warn',
         rateLimited: true,
@@ -281,7 +281,7 @@ async function rpc(url, method, params) {
     if (res.status === 401 || res.status === 403) {
       throw new CheckError(`${hostOf(url)} did not accept the request (HTTP ${res.status}${msg ? `: ${msg}` : ''}). If it takes an API key in its URL, make sure the key is right.`);
     }
-    if (!body) throw new CheckError(`${hostOf(url)} answered ${method} with HTTP ${res.status}, not JSON-RPC.`);
+    if (!body) throw new CheckError(`${hostOf(url)} responded to ${method} with HTTP ${res.status}, not JSON-RPC.`);
     if (body.error) {
       // rpcData is only ever read field by field, never printed.
       throw new CheckError(`${method}: ${msg}`, { rpcMessage: msg, rpcCode: body.error.code, rpcData: body.error.data, httpStatus: res.status });
@@ -468,7 +468,7 @@ function readFilter() {
     const v = k in f ? f[k] : 'latest';
     if (v === 'latest') continue;
     if (v === 'safe' || v === 'finalized') {
-      throw new CheckError(`${k}: "${v}" is not supported. Willow's log RPC answers block numbers and "latest"; enter a block number instead.`);
+      throw new CheckError(`${k}: "${v}" is not supported. Willow's log RPC accepts block numbers and "latest"; enter a block number instead.`);
     }
     if (v === 'earliest' || v === 'pending') {
       throw new CheckError(`${k}: "${v}" is not supported here. This page takes block numbers and "latest"; enter a block number instead.`);
@@ -724,8 +724,8 @@ function confirmTail(t, from, to, ch) {
   const narrow = t.first > from ? { from, to: t.first - 1 } : null;
   return askFirst(
     `Verifying this needs about ${mb(t.totalMb)} MB to download`,
-    `${where} For those, Willow's answer carries ${each}, at most ${TAIL_ANSWER_MAX_MB} MB), ` +
-      `and each ${one ? 'block' : 'leaf'} needs its own proof (up to ${PROOF_WIRE_MB.sp1} MB). Estimate: about ${mb(t.answerMb)} MB for the answer, then up to ${n(t.proofs)} proofs. ` +
+    `${where} For those, Willow's response carries ${each}, at most ${TAIL_ANSWER_MAX_MB} MB), ` +
+      `and each ${one ? 'block' : 'leaf'} needs its own proof (up to ${PROOF_WIRE_MB.sp1} MB). Estimate: about ${mb(t.answerMb)} MB for the response, then up to ${n(t.proofs)} proofs. ` +
       `Your browser keeps it all in memory while it verifies. Continue, ${narrow ? `verify ${blocksText(narrow.from, narrow.to)} instead (only blocks in final segments), ` : ''}or cancel and verify fewer blocks.`,
     narrow ? [[`Verify ${blocksText(narrow.from, narrow.to)} instead`, narrow]] : [],
   );
@@ -774,8 +774,8 @@ async function proofRequestError(e, from, to, endpoint, head) {
         stepNote: msg,
       });
     }
-    return new CheckError(`Willow will not prove this range in one answer: ${plain}. Verify fewer blocks, or narrow the filter to fewer addresses or topics.`, {
-      title: 'Could not verify: the answer is too large',
+    return new CheckError(`Willow will not prove this range in one response: ${plain}. Verify fewer blocks, or narrow the filter to fewer addresses or topics.`, {
+      title: 'Could not verify: the response is too large',
       tone: 'warn',
     });
   }
@@ -803,8 +803,8 @@ function notInSegment(b, from, to, serverMessage, head, count, g) {
   }
   const where =
     b != null
-      ? `For ${blocksText(b, to)} that is more than one answer can carry.`
-      : `Once proven, ${n(count)} ${one ? 'blocks' : 'leaves'} of this range would be outside a segment, more than one answer can carry.`;
+      ? `For ${blocksText(b, to)} that is more than one response can carry.`
+      : `Once proven, ${n(count)} ${one ? 'blocks' : 'leaves'} of this range would be outside a segment, more than one response can carry.`;
   let next = 'Verify fewer blocks.';
   if (retry) next = `Verify ${blocksText(retry.from, retry.to)} now, or ${current ? 'this range again in a few minutes' : 'fewer blocks'}.`;
   else if (current) next = 'Verify this range again in a few minutes.';
@@ -1180,7 +1180,7 @@ async function confirmAnchor(ch, endpoint, list, number, hash) {
 async function confirmBlock(ch, node, number, hash) {
   try {
     const chain = quantity((await rpc(node, 'eth_chainId', [])).result, `The chain id from ${hostOf(node)}`);
-    if (chain !== ch.id) throw new CheckError(`${hostOf(node)} is not ${ch.a} ${ch.name} node: it answers for chain ${chain}.`);
+    if (chain !== ch.id) throw new CheckError(`${hostOf(node)} is not ${ch.a} ${ch.name} node: it serves chain ${chain}.`);
     for (let attempt = 0; ; attempt++) {
       const { result: header } = await rpc(node, 'eth_getBlockByNumber', [toHex(number), false]);
       if (header && typeof header.hash === 'string') {
@@ -1450,8 +1450,8 @@ async function runLogs() {
   if (linkMode()) list.shift();
   // The link view shows the proven logs; comparing Willow's plain answer is the full checker's.
   const plainCompare = !linkMode();
-  if (plainCompare) list.push(['compare', `Willow's eth_getLogs answer`]);
-  if (other) list.push(['other', `eth_getLogs answer from ${hostOf(other)}`]);
+  if (plainCompare) list.push(['compare', `Willow's eth_getLogs response`]);
+  if (other) list.push(['other', `eth_getLogs response from ${hostOf(other)}`]);
   list.push(['anchor', anchorLabel(nodes, 'Last block')]);
   setupSteps(list);
   const t0 = performance.now();
@@ -1525,7 +1525,7 @@ async function runLogs() {
       if (wait.p) facts.push(['Proven on request', `${blocksText(wait.p.from, wait.p.to)}, ${after}`]);
       else facts.push(['Waited for the chain', `${blocksText(wait.chainWait.from, wait.chainWait.end)}, ${after}`]);
     }
-    if (!answer || !Array.isArray(answer.parts)) throw new CheckError('willow_getLogsProof sent an answer without parts.', { kind: 'malformed-input' });
+    if (!answer || !Array.isArray(answer.parts)) throw new CheckError('willow_getLogsProof sent a response without parts.', { kind: 'malformed-input' });
     const segs = answer.parts.filter((p) => p && p.type === 'segment').length;
     // Multi-block leaves (a fast chain's leaf proves S blocks); Ethereum's leaves are single blocks.
     const leaves = answer.parts.filter((p) => p && p.type === 'leaf').length;
@@ -1628,14 +1628,14 @@ async function runLogs() {
         else {
           step('other', 'fail', `${n(c.missing.length)} proven log${c.missing.length === 1 ? '' : 's'} missing or different, ${n(c.unproven.length)} not proven.`);
           diffs.push([`${hostOf(other)} eth_getLogs`, c]);
-          otherNote = `The answer from ${hostOf(other)} differs from the proven logs; see Differences.`;
+          otherNote = `The response from ${hostOf(other)} differs from the proven logs; see Differences.`;
         }
       } catch (e) {
         // Another provider is only compared, never part of the proof: nothing it sends stops the check.
         const browser = e.kind === 'internal' || (!(e instanceof CheckError) && isRuntimeFailure(e));
         const why = browser ? `your browser could not finish the comparison (${e.message})` : e.message;
         step('other', 'warn', why);
-        otherNote = sentence(`The answer from ${hostOf(other)} could not be compared: ${why}`);
+        otherNote = sentence(`The response from ${hostOf(other)} could not be compared: ${why}`);
       }
     }
 
@@ -1683,18 +1683,18 @@ async function runLogs() {
       text = `The proofs are valid and show ${logsText} matching the filter in ${range}, but ${failedText(anchor, lastNum)}`;
     } else if (unreadable) {
       tone = 'bad';
-      title = "Not verified: Willow's answer failed verification";
-      text = `The proofs are valid and show ${logsText} matching the filter in ${range}, but Willow's plain eth_getLogs answer could not be read: ${sentence(unreadable)}`;
+      title = "Not verified: Willow's response failed verification";
+      text = `The proofs are valid and show ${logsText} matching the filter in ${range}, but Willow's plain eth_getLogs response could not be read: ${sentence(unreadable)}`;
     } else if (mismatch) {
       tone = 'bad';
-      title = `Not verified: Willow's eth_getLogs answer differs from the proven logs`;
-      text = `The proofs are valid and show ${logsText} matching the filter in ${range}, but the plain answer leaves out or changes ${n(mismatch.missing.length)} and has ${n(mismatch.unproven.length)} that are not proven. See Differences.`;
+      title = `Not verified: Willow's eth_getLogs response differs from the proven logs`;
+      text = `The proofs are valid and show ${logsText} matching the filter in ${range}, but the plain response leaves out or changes ${n(mismatch.missing.length)} and has ${n(mismatch.unproven.length)} that are not proven. See Differences.`;
     } else if (!anchor.confirmed || compareProblem) {
       tone = 'warn';
       title = `Proofs valid${custom ? ' with custom program keys' : ''}, but verification is not complete`;
       text = [
         `All proofs are valid for ${logsText} in ${range}.`,
-        compareProblem && sentence(`Willow's eth_getLogs answer could not be compared: ${compareProblem}`),
+        compareProblem && sentence(`Willow's eth_getLogs response could not be compared: ${compareProblem}`),
         !anchor.confirmed && sentence(`The last block could not be confirmed: ${problemsText(anchor)}`),
         custom && customText,
       ]
@@ -1703,7 +1703,7 @@ async function runLogs() {
     } else {
       verified = true;
       const what = `${logsText} in ${range} ${r.logs === 1 ? 'is' : 'are'} complete and correct`;
-      const body = `Every log that matches the filter in these blocks is ${plainCompare ? "in Willow's answer" : 'listed below'}, and none is altered or made up. ${confirmedText(anchor, ch, 'The last block')}`;
+      const body = `Every log that matches the filter in these blocks is ${plainCompare ? "in Willow's response" : 'listed below'}, and none is altered or made up. ${confirmedText(anchor, ch, 'The last block')}`;
       if (custom) {
         tone = 'warn';
         title = `Verified with custom program keys: ${what}`;
@@ -1746,14 +1746,14 @@ function showFailure(e, current, facts) {
   const failed = !browser && (e.kind === 'rejected' || e.kind === 'malformed-input');
   step(current, e.tone === 'warn' || browser ? 'warn' : 'fail', e.stepNote || e.message);
   let tone = e.tone || 'bad';
-  let title = e.title || (failed ? "Not verified: Willow's answer failed verification" : 'Could not finish verifying');
+  let title = e.title || (failed ? "Not verified: Willow's response failed verification" : 'Could not finish verifying');
   let text = failed ? `It is not proven complete and correct. What failed: ${e.message}` : e.message;
   if (browser) {
     tone = 'warn';
     title = 'Your browser could not finish verifying';
     text =
       `Verification stopped inside your browser before it reached a result (the browser reported: ${e.message}). ` +
-      `This is not a result about Willow's answer: it is neither verified nor shown to be wrong. ` +
+      `This is not a result about Willow's response: it is neither verified nor shown to be wrong. ` +
       `Running out of memory is the usual cause: try fewer blocks, close other tabs, or use a desktop browser.`;
   }
   const actions = [];
@@ -1871,11 +1871,11 @@ async function compareItems(url, method, params, which) {
 
 /// A comparison in a few words, for its step.
 function comparedText(c) {
-  if (c.absent) return 'It answered null: it does not report what the proof shows.';
+  if (c.absent) return 'It returned null: it does not report what the proof shows.';
   // Fields, not their instances: a block's receipts report each uncovered field once per receipt.
   const k = new Set(c.unproven.map((f) => f.replace(/\[\d+\]/g, '[]'))).size;
   const uncovered = k ? `; ${n(k)} field${k === 1 ? '' : 's'} it reports ${k === 1 ? 'is' : 'are'} not covered by the proof` : '';
-  if (c.exact) return `Matches the proven answer (${n(c.matched)} value${c.matched === 1 ? '' : 's'}${uncovered}).`;
+  if (c.exact) return `Matches the proven data (${n(c.matched)} value${c.matched === 1 ? '' : 's'}${uncovered}).`;
   return `${n(c.differCount)} proven value${c.differCount === 1 ? '' : 's'} reported differently or left out${uncovered}.`;
 }
 
@@ -1888,7 +1888,7 @@ function uncoveredText(fields) {
   if (plain.includes('logs[].logIndex')) notes.push("each log's logIndex: it counts every earlier log in the block, and this proof carries only the receipt before this one (verify the block's receipts to prove it)");
   const rest = plain.filter((f) => !nitro.includes(f) && f !== 'logs[].logIndex');
   if (rest.length) notes.push(rest.join(', '));
-  return notes.length ? `Not covered by this proof: ${notes.join('; ')}.` : 'Every field of this answer is covered by the proof.';
+  return notes.length ? `Not covered by this proof: ${notes.join('; ')}.` : 'Every field of this response is covered by the proof.';
 }
 
 async function runItems() {
@@ -1911,10 +1911,10 @@ async function runItems() {
   const list = [
     ['proof', 'Proof from Willow'],
     ['verify', 'Verifying the proof against the block hash'],
-    ['compare', `Willow's ${k.plain} answer`],
+    ['compare', `Willow's ${k.plain} response`],
   ];
   if (kind === 'blockReceipts') list.push(['compareTxs', "Willow's eth_getBlockByHash transactions"]);
-  if (other) list.push(['other', `${k.plain} answer from ${hostOf(other)}`]);
+  if (other) list.push(['other', `${k.plain} response from ${hostOf(other)}`]);
   list.push(['anchor', anchorLabel(nodes, 'The block')]);
   setupSteps(list);
   const t0 = performance.now();
@@ -2012,7 +2012,7 @@ async function runItems() {
           worst = c.result ? 'fail' : worst === 'fail' ? 'fail' : 'warn';
           if (c.result) diffs.push([`${hostOf(other)} ${method}`, c.result]);
           notes.push(`${method}: ${c.result ? comparedText(c.result) : c.problem || c.unreadable}`);
-          otherNote = otherNote || (c.result ? `The answer from ${hostOf(other)} differs from the proven one; see Differences.` : sentence(`The answer from ${hostOf(other)} could not be compared: ${c.problem || c.unreadable}`));
+          otherNote = otherNote || (c.result ? `The response from ${hostOf(other)} differs from the proven one; see Differences.` : sentence(`The response from ${hostOf(other)} could not be compared: ${c.problem || c.unreadable}`));
         }
       }
       step('other', worst, notes.join(' '));
@@ -2043,20 +2043,20 @@ async function runItems() {
       text = `The proof of ${thing} is valid, but ${failedText(anchor, blockNum)}`;
     } else if (unreadable) {
       tone = 'bad';
-      title = "Not verified: Willow's answer failed verification";
-      text = `The proof of ${thing} is valid, but Willow's plain answer could not be read: ${sentence(unreadable)}`;
+      title = "Not verified: Willow's response failed verification";
+      text = `The proof of ${thing} is valid, but Willow's plain response could not be read: ${sentence(unreadable)}`;
     } else if (mismatch) {
       tone = 'bad';
-      title = `Not verified: Willow's ${mismatch.method} answer differs from the proven one`;
+      title = `Not verified: Willow's ${mismatch.method} response differs from the proven one`;
       text = mismatch.c.absent
-        ? `The proof shows ${thing} in block ${blockNum}, but Willow's plain answer is null.`
-        : `The proof of ${thing} is valid, but Willow's plain answer reports ${n(mismatch.c.differCount)} proven value${mismatch.c.differCount === 1 ? '' : 's'} differently or leaves ${mismatch.c.differCount === 1 ? 'it' : 'them'} out. See Differences.`;
+        ? `The proof shows ${thing} in block ${blockNum}, but Willow's plain response is null.`
+        : `The proof of ${thing} is valid, but Willow's plain response reports ${n(mismatch.c.differCount)} proven value${mismatch.c.differCount === 1 ? '' : 's'} differently or leaves ${mismatch.c.differCount === 1 ? 'it' : 'them'} out. See Differences.`;
     } else if (!anchor.confirmed || compareProblem) {
       tone = 'warn';
       title = 'Proof valid, but verification is not complete';
       text = [
         `The proof of ${thing} in block ${blockNum} is valid.`,
-        compareProblem && sentence(`Willow's plain answer could not be compared: ${compareProblem}`),
+        compareProblem && sentence(`Willow's plain response could not be compared: ${compareProblem}`),
         !anchor.confirmed && sentence(`The block could not be confirmed: ${problemsText(anchor)}`),
       ]
         .filter(Boolean)
@@ -2066,12 +2066,12 @@ async function runItems() {
       verified = true;
       tone = 'warn';
       title = 'Proof valid, but the block is not verified against Ethereum';
-      text = `Every field the proof covers matches block ${blockNum}, and Willow's plain answer reports each of them the same way. ${confirmedText(anchor, ch, 'The block', rep.block.timestamp)}${uncovered}`;
+      text = `Every field the proof covers matches block ${blockNum}, and Willow's plain response reports each of them the same way. ${confirmedText(anchor, ch, 'The block', rep.block.timestamp)}${uncovered}`;
     } else {
       verified = true;
       tone = 'ok';
       title = `Verified: ${thing} ${whole ? 'are complete and correct' : 'is correct'}`;
-      text = `Every field the proof covers matches block ${blockNum}, and Willow's plain answer reports each of them the same way. ${confirmedText(anchor, ch, 'The block', rep.block.timestamp)}${uncovered}`;
+      text = `Every field the proof covers matches block ${blockNum}, and Willow's plain response reports each of them the same way. ${confirmedText(anchor, ch, 'The block', rep.block.timestamp)}${uncovered}`;
     }
     if (otherNote) text += ` ${otherNote}`;
     showVerdict(tone, title, text);
@@ -2170,7 +2170,7 @@ function showDiffs(diffs) {
     for (const u of c.unproven.slice(0, 20)) lines.push(`  not proven: ${JSON.stringify(u)}`);
     if (c.unproven.length > 20) lines.push(`  … and ${c.unproven.length - 20} more not proven`);
   }
-  $('diffText').textContent = '"Missing or different" means a proven log the answer leaves out or reports with other values. "Not proven" means an entry in the answer that is not one of the proven logs.';
+  $('diffText').textContent = '"Missing or different" means a proven log the response leaves out or reports with other values. "Not proven" means an entry in the response that is not one of the proven logs.';
   $('diffBody').textContent = lines.join('\n');
   $('diff').hidden = false;
 }
@@ -2189,7 +2189,7 @@ function showItemDiffs(diffs) {
     for (const u of c.unproven) lines.push(`  not covered by the proof: ${u}`);
     for (const o of c.omitted) lines.push(`  left out, as some nodes do: ${o}`);
   }
-  $('diffText').textContent = '"Differs" is a proven value the answer reports differently or leaves out. Fields not covered by the proof are listed, never counted against the answer.';
+  $('diffText').textContent = '"Differs" is a proven value the response reports differently or leaves out. Fields not covered by the proof are listed, never counted against the response.';
   $('diffBody').textContent = lines.join('\n');
   $('diff').hidden = false;
 }
@@ -3064,8 +3064,8 @@ function showKind() {
   $('itemLabel').textContent = block ? 'Block' : 'Transaction';
   $('item').placeholder = block ? 'A block number, a block hash, or latest' : 'A transaction hash, or <block>:<index>';
   $('compareHint').textContent = logs
-    ? 'Its eth_getLogs answer for the same blocks is compared with the proven logs too. The provider must allow browser requests.'
-    : `Its ${ITEM_KINDS[kind].plain} answer${block ? ' and the block\'s transactions' : ''} ${block ? 'are' : 'is'} compared with the proven one too. The provider must allow browser requests.`;
+    ? 'Its eth_getLogs response for the same blocks is compared with the proven logs too. The provider must allow browser requests.'
+    : `Its ${ITEM_KINDS[kind].plain} response${block ? ' and the block\'s transactions' : ''} ${block ? 'are' : 'is'} compared with the proven one too. The provider must allow browser requests.`;
 }
 
 function remember() {

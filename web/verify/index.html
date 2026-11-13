@@ -25,7 +25,7 @@
 
   <header class="dev-head">
     <h1>Proof <em>verifier</em></h1>
-    <p class="lede">Your browser verifies Willow's proofs itself, so it doesn't take the server's word for anything.</p>
+    <p class="lede">Your browser verifies Willow's proofs itself, so it doesn't have to trust the server.</p>
   </header>
 
   <form id="form" class="card" novalidate>
@@ -80,7 +80,7 @@
       <div class="field">
         <label for="compare">Also compare another provider (optional)</label>
         <input id="compare" type="url" autocomplete="off" spellcheck="false" placeholder="https://your-provider.example/rpc">
-        <p class="hint" id="compareHint">Its answer for the same request is compared with the proven one too. The provider must allow browser requests.</p>
+        <p class="hint" id="compareHint">Its response to the same request is compared with the proven one too. The provider must allow browser requests.</p>
       </div>
       <div id="keysFields">
         <div class="field">

@@ -93,6 +93,10 @@ const MAINNET_BLOB_FRACTIONS: [(u64, u64); 4] = [
     (1_767_747_671, 11_684_671),
 ];
 
+/// BNB Smart Chain's: Cancun's fraction from Cancun (Haber) on, kept through Prague and Osaka
+/// (`DefaultPragueBlobConfigBSC`, `DefaultOsakaBlobConfigBSC` in bnb-chain/bsc).
+const BSC_BLOB_FRACTIONS: [(u64, u64); 1] = [(1_718_863_500, 3_338_477)];
+
 /// One blob-parameter fork: from `at` (unix seconds) on, blob prices use
 /// `update_fraction` (`BLOB_BASE_FEE_UPDATE_FRACTION`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,10 +113,11 @@ pub struct BlobFork {
 pub struct BlobSchedule(Arc<[(u64, u64)]>);
 
 impl BlobSchedule {
-    /// Ethereum mainnet's built-in table; no blobs on any other chain.
+    /// Ethereum mainnet's and BNB Smart Chain's built-in tables; no blobs on any other chain.
     pub fn builtin(chain_id: u64) -> Self {
         match chain_id {
             1 => Self(MAINNET_BLOB_FRACTIONS.into()),
+            56 => Self(BSC_BLOB_FRACTIONS.into()),
             _ => Self::default(),
         }
     }

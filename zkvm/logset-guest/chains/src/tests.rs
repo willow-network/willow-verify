@@ -60,6 +60,22 @@ fn receipt_gates() {
     for id in [ARBITRUM_ONE, ROBINHOOD] {
         assert!(receipt_gate(id).nitro && !receipt_gate(id).deposits);
     }
+    // Served-only chains: gated like their families, never proven (no profile),
+    // and never in the guest's lists.
+    for id in SERVED_OP_STACK_CHAIN_IDS {
+        assert!(receipt_gate(id).deposits && !receipt_gate(id).nitro, "{id}");
+        assert!(
+            profile(id).is_none() && !OP_STACK_CHAIN_IDS.contains(&id),
+            "{id}"
+        );
+    }
+    for id in SERVED_NITRO_CHAIN_IDS {
+        assert!(receipt_gate(id).nitro && !receipt_gate(id).deposits, "{id}");
+        assert!(
+            profile(id).is_none() && !NITRO_CHAIN_IDS.contains(&id),
+            "{id}"
+        );
+    }
     // Families agree with the gates.
     for p in CHAINS.iter() {
         let g = p.receipt_gate();

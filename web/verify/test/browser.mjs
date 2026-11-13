@@ -241,7 +241,7 @@ function methodsOf(page) {
   return methods;
 }
 const CUSTOM_OK = new RegExp(`^Verified with custom program keys: ${logsText(logsIn(FROM, TO))} in ${BLOCKS} are complete and correct`);
-const FAILED = /^Not verified: Willow's answer failed verification/;
+const FAILED = /^Not verified: Willow's response failed verification/;
 const short = (r) => `${r.title} | ${r.text.slice(0, 200)}`;
 // Ethereum's light-client data the mock serves (test/anchor/): when its checkpoint was made, and when
 // the anchors were saved (their finality update's signature).
@@ -293,7 +293,7 @@ await section('3', async () => {
     if (r.logsShown) expect(`  ${name}: logs card does not call them proven`, !/proven/i.test(r.logsTitle + r.logsNote), `"${r.logsTitle}" "${r.logsNote}"`);
   }
   r = await check(page, { filter: RANGE, node: 'chain10' });
-  expect('a node on another chain gives an incomplete check', r.tone.includes('warn') && /is not an Ethereum node: it answers for chain 10/.test(r.text) && !/^Verified/.test(r.title), short(r));
+  expect('a node on another chain gives an incomplete check', r.tone.includes('warn') && /is not an Ethereum node: it serves chain 10/.test(r.text) && !/^Verified/.test(r.title), short(r));
   expect('an incomplete check does not call the logs proven', !/proven/i.test(r.logsTitle + r.logsNote), `"${r.logsTitle}"`);
   r = await check(page, { filter: RANGE, rpc: 'noproofs' });
   expect('an endpoint without proofs says so', r.tone.includes('bad') && /does not serve proofs/.test(r.text), r.text);
@@ -439,7 +439,7 @@ await section('12', async () => {
   const about = (await page.textContent('.about')).replace(/\s+/g, ' ');
   expect(
     'the intro claims only the answer and no independent backstop, and How this works says whose code it is',
-    /doesn't take the server's word for anything\./.test(lede) &&
+    /doesn't have to trust the server\./.test(lede) &&
       !/backstop|independent|SHA256SUMS/i.test(lede) &&
       /code is served by Willow/.test(about) &&
       /Its source is on GitHub, with a script that rebuilds this page/.test(about) &&
@@ -493,7 +493,7 @@ await section('13b', async () => {
   for (const [name, rpc, what] of [
     ['malformed proof bytes', 'badhex', /malformed bytes/],
     ['an answer without parts', 'noparts', /without parts/],
-    ['records that are not hex', 'badrecords', /willow_getLogsProof answer/],
+    ['records that are not hex', 'badrecords', /willow_getLogsProof response/],
     ['an eth_getLogs answer that is not an array', 'logsnotarray', /not an array/],
   ]) {
     r = await check(page, { filter: RANGE, rpc });
@@ -643,11 +643,11 @@ await section('19', async () => {
   r = await check(page, { filter: RANGE, rpc: 'good+deepproof' });
   expect('a deeply nested field the verifier does not read is skipped', CUSTOM_OK.test(r.title), short(r));
   r = await check(page, { filter: RANGE, rpc: 'lying+deeplogs' });
-  expect("Willow's eth_getLogs answer with a deeply nested entry is not verified", /^Not verified: Willow's answer failed verification/.test(r.title) && /recursion limit/.test(r.text) && r.tone.includes('bad'), short(r));
+  expect("Willow's eth_getLogs answer with a deeply nested entry is not verified", /^Not verified: Willow's response failed verification/.test(r.title) && /recursion limit/.test(r.text) && r.tone.includes('bad'), short(r));
   r = await check(page, { filter: RANGE, other: `${base}/v1/rpc/1/good+deeplogs` });
   expect(
     "another provider's deeply nested answer only goes uncompared",
-    CUSTOM_OK.test(r.title) && /answer from 127\.0\.0\.1:\d+ could not be compared/.test(r.text) && /recursion limit/.test(r.text),
+    CUSTOM_OK.test(r.title) && /response from 127\.0\.0\.1:\d+ could not be compared/.test(r.text) && /recursion limit/.test(r.text),
     short(r),
   );
   r = await check(page, { filter: RANGE, other: `${base}/v1/rpc/1/good+deeperror` });
@@ -1041,17 +1041,17 @@ await section('32', async () => {
   r = await checkItem(page, { chain: 42161, kind: 'receipt', item: arb.target, rpc: 'lying' });
   expect(
     "Willow's plain receipt that differs is caught, field by field",
-    r.tone.includes('bad') && r.title === "Not verified: Willow's eth_getTransactionReceipt answer differs from the proven one" && /differs: status: proven "0x1", the answer "0x0"/.test(r.diff) && /Receipt in Willow's proof/.test(r.itemTitle),
+    r.tone.includes('bad') && r.title === "Not verified: Willow's eth_getTransactionReceipt response differs from the proven one" && /differs: status: proven "0x1", the response "0x0"/.test(r.diff) && /Receipt in Willow's proof/.test(r.itemTitle),
     `${short(r)} | ${r.diff}`,
   );
   r = await checkItem(page, { chain: 42161, kind: 'receipt', item: arb.target, rpc: 'absent' });
-  expect("Willow's plain answer of null is caught", r.tone.includes('bad') && /Willow's plain answer is null/.test(r.text), short(r));
+  expect("Willow's plain answer of null is caught", r.tone.includes('bad') && /Willow's plain response is null/.test(r.text), short(r));
   r = await checkItem(page, { chain: 42161, kind: 'receipt', item: arb.target, other: `${base}/v1/rpc/42161/lying` });
-  expect("another provider's difference is noted, and the check still verifies", r.tone.includes('ok') && /differs from the proven one; see Differences/.test(r.text) && r.steps.some((x) => /^fail: eth_getTransactionReceipt answer from/.test(x)), short(r));
+  expect("another provider's difference is noted, and the check still verifies", r.tone.includes('ok') && /differs from the proven one; see Differences/.test(r.text) && r.steps.some((x) => /^fail: eth_getTransactionReceipt response from/.test(x)), short(r));
   r = await checkItem(page, { chain: 42161, kind: 'receipt', item: arb.target, node: 'wrong' });
   expect('a block hash the node does not have is caught', r.tone.includes('bad') && /is not on the chain/.test(r.title), short(r));
   r = await checkItem(page, { chain: 42161, kind: 'receipt', item: arb.target, node: 'chain10' });
-  expect('a node on another chain leaves verification incomplete', r.tone.includes('warn') && /is not an Arbitrum One node: it answers for chain 10/.test(r.text), short(r));
+  expect('a node on another chain leaves verification incomplete', r.tone.includes('warn') && /is not an Arbitrum One node: it serves chain 10/.test(r.text), short(r));
   await page.context().close();
   page = await openPage({ routes: publicNodes(42161, ['down', 'down']) });
   r = await checkItem(page, { chain: 42161, kind: 'receipt', item: arb.target, node: '' });
@@ -1302,7 +1302,7 @@ await section('36', async () => {
   const after = await hiddenNow();
   const proofButtons = await page.$$eval('#linkProofActions button', (b) => b.map((x) => x.textContent));
   expect('…the list, the steps and the proof folded under More, the facts in the steps', before.every((v) => !v) && after.slice(0, 3).every(Boolean) && !after[3] && proofButtons.join() === 'Technical details' && (await page.textContent('#verdictActions .r-toggle')) === 'Less', `${before} → ${after} | ${proofButtons}`);
-  expect('…with no plain eth_getLogs comparison', !methods.includes('eth_getLogs') && !r.steps.some((x) => /eth_getLogs answer/.test(x)), methods.join(','));
+  expect('…with no plain eth_getLogs comparison', !methods.includes('eth_getLogs') && !r.steps.some((x) => /eth_getLogs response/.test(x)), methods.join(','));
   const link = await page.$eval('#logs tbody tr td:nth-child(2) a', (a) => a.getAttribute('href'));
   expect("…each log's transaction linked to its own check", new RegExp(`\\?chain=ethereum&tx=${FROM}%3A\\d+$`).test(link), link);
   const intro = await page.textContent('#linkIntro');

@@ -159,9 +159,14 @@ const BASE_TIME: [u8; 20] = [
 ];
 const SET_MILLIS: [u8; 4] = [0x86, 0xbd, 0xf3, 0x94];
 
-/// When Base's blocks became 200 ms (Denim), by chain.
+/// When Base's blocks became 200 ms (Denim), by chain: Base, and Base Sepolia
+/// (block 48,418,656, its first with a BaseTime deposit).
 fn denim_at(chain_id: u64) -> Option<u64> {
-    (chain_id == 8_453).then_some(1_793_901_600)
+    match chain_id {
+        8_453 => Some(1_793_901_600),
+        84_532 => Some(1_792_605_600),
+        _ => None,
+    }
 }
 
 /// The millisecond part a BaseTime deposit sets, if `tx` is one.

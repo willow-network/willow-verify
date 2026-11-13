@@ -108,7 +108,7 @@ fn walk(ours: &Value, theirs: &Value, path: &str, unproven: &[String], c: &mut C
                     (Some(_), None) if may_omit(k, a) => c.omitted.push(at),
                     (Some(x), None) => c
                         .differ
-                        .push(format!("{at}: proven {x}, the answer has none")),
+                        .push(format!("{at}: proven {x}, the response has none")),
                     (None, Some(_)) => c.unproven.push(at),
                     (None, None) => {}
                 }
@@ -117,7 +117,7 @@ fn walk(ours: &Value, theirs: &Value, path: &str, unproven: &[String], c: &mut C
         (Value::Array(a), Value::Array(b)) => {
             if a.len() != b.len() {
                 c.differ.push(format!(
-                    "{path}: {} proven entries, the answer has {}",
+                    "{path}: {} proven entries, the response has {}",
                     a.len(),
                     b.len()
                 ));
@@ -128,6 +128,8 @@ fn walk(ours: &Value, theirs: &Value, path: &str, unproven: &[String], c: &mut C
             }
         }
         (a, b) if same(a, b) => c.matched += 1,
-        (a, b) => c.differ.push(format!("{path}: proven {a}, the answer {b}")),
+        (a, b) => c
+            .differ
+            .push(format!("{path}: proven {a}, the response {b}")),
     }
 }

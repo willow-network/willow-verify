@@ -113,11 +113,11 @@ impl Failure {
 /// serde_json's 128 levels: `malformed-input`.
 pub fn result_of(body: &str, method: &str) -> Result<Value, Failure> {
     let v: Value = serde_json::from_str(body)
-        .map_err(|e| Failure::new(Kind::MalformedInput, format!("{method} answer: {e}")))?;
+        .map_err(|e| Failure::new(Kind::MalformedInput, format!("{method} response: {e}")))?;
     v.get("result").cloned().ok_or_else(|| {
         Failure::new(
             Kind::MalformedInput,
-            format!("{method} answer has no result"),
+            format!("{method} response has no result"),
         )
     })
 }

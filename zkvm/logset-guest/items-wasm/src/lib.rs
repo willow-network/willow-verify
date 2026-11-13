@@ -69,7 +69,7 @@ struct Response<T> {
 pub fn result_of<T: DeserializeOwned>(body: &str, method: &str) -> Result<T, Failure> {
     serde_json::from_str::<Response<T>>(body)
         .map(|r| r.result)
-        .map_err(|e| Failure::new(Kind::MalformedInput, format!("{method} answer: {e}")))
+        .map_err(|e| Failure::new(Kind::MalformedInput, format!("{method} response: {e}")))
 }
 
 /// Differences listed per comparison, and characters kept of each.
@@ -231,7 +231,7 @@ impl ItemOutcome {
     /// every proven transaction).
     pub fn compare(&self, which: &str, response: &str) -> Result<Value, Failure> {
         let (proven, method) = match which {
-            "answer" => (&self.answer, "the answer"),
+            "answer" => (&self.answer, "the plain"),
             "transactions" => match &self.transactions {
                 Some(t) => (t, "eth_getBlockByHash"),
                 None => return Err(Failure::new(Kind::Internal, "no proven transactions")),
@@ -245,7 +245,7 @@ impl ItemOutcome {
                 _ => {
                     return Err(Failure::new(
                         Kind::MalformedInput,
-                        "eth_getBlockByHash answer has no transactions list",
+                        "eth_getBlockByHash response has no transactions list",
                     ))
                 }
             };

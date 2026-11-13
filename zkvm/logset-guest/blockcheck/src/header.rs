@@ -109,6 +109,17 @@ pub fn header_rlp_from_block_json(result: &serde_json::Value) -> Result<(u64, Ve
     Ok((number, rlp))
 }
 
+/// BNB Smart Chain (Parlia): its nodes report `milliTimestamp`, from `mixHash` since Lorentz.
+pub fn parlia(chain_id: u64) -> bool {
+    chain_id == 56
+}
+
+/// `milliTimestamp` as bsc geth reports it: the time in ms plus `mixHash`'s low 64 bits.
+pub fn parlia_milli_timestamp(h: &alloy::consensus::Header) -> u64 {
+    let mix = u64::from_be_bytes(h.mix_hash.0[24..].try_into().expect("8 bytes"));
+    h.timestamp * 1_000 + mix
+}
+
 /// What a Nitro header carries in `extraData` and `mixHash`, which Nitro nodes
 /// also report as the `sendRoot`, `sendCount` and `l1BlockNumber` JSON fields.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

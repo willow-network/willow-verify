@@ -103,7 +103,7 @@ struct Response<T> {
 pub fn result_of<T: DeserializeOwned>(body: &str, method: &str) -> Result<T, Failure> {
     serde_json::from_str::<Response<T>>(body)
         .map(|r| r.result)
-        .map_err(|e| Failure::new(Kind::MalformedInput, format!("{method} answer: {e}")))
+        .map_err(|e| Failure::new(Kind::MalformedInput, format!("{method} response: {e}")))
 }
 
 /// A checked answer and its shape.
@@ -148,7 +148,7 @@ pub fn check_answer(
         return Err(Failure::new(
             Kind::Rejected,
             format!(
-                "the server answered blocks {}-{}, not the requested {from}-{to}",
+                "the server returned blocks {}-{}, not the requested {from}-{to}",
                 p.from_block, p.to_block
             ),
         ));
@@ -211,7 +211,7 @@ impl Outcome {
     pub fn compare(&self, response: &str) -> Result<Value, Failure> {
         let answer: Value = result_of(response, "eth_getLogs")?;
         let answer = answer.as_array().ok_or_else(|| {
-            Failure::new(Kind::MalformedInput, "eth_getLogs answer is not an array")
+            Failure::new(Kind::MalformedInput, "eth_getLogs response is not an array")
         })?;
         let c = compare(&self.verified.logs, answer);
         Ok(json!({
@@ -238,7 +238,7 @@ pub fn verified_json(r: &Result<Outcome, Failure>) -> Value {
 /// What `Verifier.compare` returns: `{"ok": true, "result"}` or a [`Failure`].
 pub fn compare_json(checked: Option<&Outcome>, response: &str) -> Value {
     let Some(o) = checked else {
-        return Failure::new(Kind::Internal, "compare called without a verified answer").json();
+        return Failure::new(Kind::Internal, "compare called without a verified response").json();
     };
     match o.compare(response) {
         Ok(result) => json!({"ok": true, "result": result}),

@@ -92,10 +92,22 @@ pub const OP_STACK_CHAIN_IDS: [u64; 4] = [8453, 10, 130, 57073];
 /// Chain. Byte-identical to the guest's `logset_core::receipt::NITRO_CHAIN_IDS`.
 pub const NITRO_CHAIN_IDS: [u64; 2] = [42161, 4663];
 
+/// OP-stack chains the log store serves but no guest proves (they have no
+/// profile here): Soneium, Zora, World Chain, OP Sepolia, Base Sepolia,
+/// Unichain Sepolia, Ink Sepolia. Their blocks are checked like the four
+/// above; the guest's lists, and so its program, stay as they are.
+pub const SERVED_OP_STACK_CHAIN_IDS: [u64; 7] =
+    [1868, 7_777_777, 480, 11_155_420, 84_532, 1301, 763_373];
+/// Nitro chains served but not proven: Arbitrum Sepolia, Robinhood Chain testnet.
+pub const SERVED_NITRO_CHAIN_IDS: [u64; 2] = [421_614, 46_630];
+
+/// The receipt types `chain_id`'s blocks may hold: the proven chains' gates
+/// (the guest's lists) and the served-only chains'.
 pub fn receipt_gate(chain_id: u64) -> ReceiptGate {
     ReceiptGate {
-        deposits: OP_STACK_CHAIN_IDS.contains(&chain_id),
-        nitro: NITRO_CHAIN_IDS.contains(&chain_id),
+        deposits: OP_STACK_CHAIN_IDS.contains(&chain_id)
+            || SERVED_OP_STACK_CHAIN_IDS.contains(&chain_id),
+        nitro: NITRO_CHAIN_IDS.contains(&chain_id) || SERVED_NITRO_CHAIN_IDS.contains(&chain_id),
     }
 }
 

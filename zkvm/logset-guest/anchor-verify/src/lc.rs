@@ -390,7 +390,7 @@ fn check_version(name: &str, slot: u64) -> Result<ForkVersion, Failure> {
     let fork = fork_of(slot)?;
     if fork_name(fork) != name {
         return Err(rejected(format!(
-            "a {name} answer for slot {slot}, which is {}",
+            "a {name} response for slot {slot}, which is {}",
             fork_name(fork)
         )));
     }
