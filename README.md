@@ -40,7 +40,7 @@ You need:
 - rustup. `rust-toolchain.toml` pins the compiler: `nightly-2026-04-12` (rustc 1.97.0-nightly, commit bf4fbfb7a 2026-04-11).
 - The wasm32 target: `rustup target add wasm32-unknown-unknown --toolchain nightly-2026-04-12`
 - wasm-bindgen-cli 0.2.129: `cargo install wasm-bindgen-cli --version 0.2.129 --locked`
-- clang and llvm-ar with the wasm32 target, for the C code (zstd) in OpenVM's verifier: Debian's `clang` and `llvm` packages, or Homebrew's `llvm` on a Mac (Apple's clang has no wasm32 target). `WASM_CC` and `WASM_AR` name others.
+- clang and llvm-ar with the wasm32 target, for the C code (zstd) in OpenVM's verifier: Ubuntu 24.04's `clang-18` and `llvm-18` (18.1.3-1ubuntu1) make the served bytes, since the OpenVM module names the clang that compiled it. Another clang with a wasm32 target builds the page with other bytes: Homebrew's `llvm` on a Mac, for example (Apple's clang has no wasm32 target). `WASM_CC` and `WASM_AR` name others.
 - python3 (3.11 or later), rsync, curl, and shasum.
 - No wasm-opt on your PATH. The served files are built without it, and `build.sh` runs it when it finds it.
 
@@ -52,7 +52,7 @@ web/verify/build.sh
 
 The page lands in `web/verify-dist/`, with `SHA256SUMS.txt` listing every file. Each build reads a fresh Ethereum checkpoint from two independent beacon APIs (`web/verify/checkpoint.py`). `CHECKPOINT=<root>:<slot>` pins one instead.
 
-The build makes the same bytes from any directory. It doesn't make the same bytes on every kind of machine, because cargo hashes the build machine's type into crates with build scripts or proc macros. Willow builds the page on x86-64 Linux, and `web/verify/Dockerfile` is that machine with the pinned toolchain.
+The build makes the same bytes from any directory. It doesn't make the same bytes on every kind of machine, because cargo hashes the build machine's type into crates with build scripts or proc macros. Willow builds the page on x86-64 Ubuntu 24.04 with its clang 18.1.3, and `web/verify/Dockerfile` is that machine with the pinned toolchain.
 
 ## Verify the served page
 
@@ -60,7 +60,7 @@ The build makes the same bytes from any directory. It doesn't make the same byte
 web/verify/reproduce.sh
 ```
 
-It reads the Ethereum checkpoint the served page carries, builds this source with it, then downloads every file `https://api.willow.tech/verify/` serves and verifies that each one is byte for byte the file the build made. On x86-64 Linux with the toolchain above it builds directly. Anywhere else it builds in Docker, in the `Dockerfile`'s image (`DOCKER=1` uses Docker on Linux too). The first Docker run takes several minutes, and longer on Apple silicon, where Docker emulates x86-64.
+It reads the Ethereum checkpoint the served page carries, builds this source with it, then downloads every file `https://api.willow.tech/verify/` serves and verifies that each one is byte for byte the file the build made. On x86-64 Linux with the toolchain above, Ubuntu's clang 18.1.3 included, it builds directly. Anywhere else it builds in Docker, in the `Dockerfile`'s image (`DOCKER=1` uses Docker on Linux too). The first Docker run takes several minutes, and longer on Apple silicon, where Docker emulates x86-64.
 
 The `main` branch is the page Willow serves. Each deploy updates it.
 

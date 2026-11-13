@@ -5,9 +5,9 @@
 #
 # The build pins the Ethereum checkpoint the served page carries (ETH_CHECKPOINT in its app.js),
 # since each build otherwise reads a fresh one. It runs on x86-64 Linux, the machine type Willow
-# builds on (see Dockerfile): directly when this machine is one and has the pinned toolchain and
-# wasm-bindgen 0.2.129 (and clang and llvm-ar for wasm32), else in the Dockerfile's image (DOCKER=1
-# forces that).
+# builds on (see Dockerfile): directly when this machine is one and has the pinned toolchain,
+# wasm-bindgen 0.2.129 and Ubuntu's clang 18.1.3 (with llvm-ar) for wasm32, else in the Dockerfile's
+# image (DOCKER=1 forces that).
 set -euo pipefail
 origin="${1:-https://api.willow.tech}"
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -25,16 +25,21 @@ checkpoint="$(grep -o "ETH_CHECKPOINT = { root: '0x[0-9a-f]*', slot: [0-9]* }" "
 echo "The served page carries Ethereum checkpoint $checkpoint."
 
 host="$(cd "$repo" && rustc -vV 2>/dev/null | sed -n 's/^host: //p' || true)"
-if [ "$host" = x86_64-unknown-linux-gnu ] && [ -z "${DOCKER:-}" ]; then
+# The OpenVM module names the clang that compiled its C code, so another clang makes other bytes.
+cc="$("${WASM_CC:-clang}" --version 2>/dev/null | head -1 || true)"
+if [ "$host" = x86_64-unknown-linux-gnu ] && [ -z "${DOCKER:-}" ] \
+  && [ "$cc" = "Ubuntu clang version 18.1.3 (1ubuntu1)" ]; then
   echo "Building on this machine..."
   CHECKPOINT="$checkpoint" VERIFY_DIST="$work/dist" bash "$here/build.sh" >"$work/build.log" 2>&1 \
     || { tail -40 "$work/build.log" >&2; exit 1; }
 else
   echo "Building in Docker, as x86-64 Linux (the first run takes several minutes)..."
-  docker build -q --platform linux/amd64 -t willow-verify-build "$here" >"$work/build.log" 2>&1 \
+  image="$(docker build -q --platform linux/amd64 -t willow-verify-build "$here" 2>"$work/build.log")" \
     || { tail -40 "$work/build.log" >&2; exit 1; }
+  # One build cache per image, so no build from another image's compilers is reused.
+  image="${image#sha256:}"
   docker run --rm --platform linux/amd64 -v "$repo:/src:ro" -v "$work:/work" \
-    -v willow-verify-cache:/cache -e CARGO_TARGET_DIR=/cache/target -e CHECKPOINT="$checkpoint" \
+    -v "willow-verify-cache-${image:0:12}:/cache" -e CARGO_TARGET_DIR=/cache/target -e CHECKPOINT="$checkpoint" \
     -e VERIFY_DIST=/work/dist -e OWNER="$(id -u):$(id -g)" willow-verify-build \
     sh -c 'bash /src/web/verify/build.sh >/work/build.log 2>&1; s=$?; chown -R "$OWNER" /work; exit $s' \
     || { tail -40 "$work/build.log" >&2; exit 1; }
