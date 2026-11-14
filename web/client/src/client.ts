@@ -1,6 +1,6 @@
 import { Anchors, atLeast, type Anchored, type Level } from './anchor.js';
-import { InlineBackend, isNoVerifier, type Backend } from './backend.js';
-import { BEACON_APIS, chooseCheckpoint, type Checkpoint } from './checkpoint.js';
+import { InlineBackend, isNoVerifier, type AnchorStart, type Backend } from './backend.js';
+import { BEACON_APIS, chooseCheckpoint, chooseStarts, type BnbStart, type Checkpoint } from './checkpoint.js';
 import { WillowRpcError, WillowUnverifiableError, WillowVerificationError } from './errors.js';
 import { hexToBytes, isAddress, isHash, keccakHex, sameHex, slotKey, toNumber, toQuantity } from './hex.js';
 import { Batcher, MAX_BATCH, type Reply } from './http.js';
@@ -27,7 +27,13 @@ import { WorkerBackend } from './worker-rpc.js';
 export type { Level } from './anchor.js';
 
 export interface WillowOptions {
-  /** The chain this client verifies (1, 8453, 10, 130, 57073, 42161, 4663). */
+  /**
+   * The chain this client verifies: Ethereum (1); anchored on Ethereum, Base (8453), OP Mainnet
+   * (10), Unichain (130), Ink (57073), Soneium (1868), Zora (7777777), World Chain (480), Arbitrum
+   * One (42161), Robinhood Chain (4663); anchored on Sepolia, OP Sepolia (11155420), Base Sepolia
+   * (84532), Unichain Sepolia (1301), Ink Sepolia (763373), Arbitrum Sepolia (421614), Robinhood
+   * Chain testnet (46630); anchored on its own validators, BNB Smart Chain (56).
+   */
   chainId: number;
   /** API key; without one, the public path, which serves blocks, transactions, receipts and logs but no state. */
   key?: string;
@@ -49,6 +55,10 @@ export interface WillowOptions {
   checkpoint?: Checkpoint;
   /** Where a newer checkpoint is read once the shipped one is too old. */
   checkpointUrl?: string;
+  /** Sepolia's light client's starting point (the testnets), in place of the shipped one. */
+  sepoliaCheckpoint?: Checkpoint;
+  /** BNB's light client's starting point, an epoch block, in place of the shipped one. */
+  bnbStart?: BnbStart;
   /** Beacon APIs that must confirm a fetched checkpoint; default two in Node, none in browsers. */
   beaconApis?: string[] | false;
   /** Where the light client's committees are kept; default localStorage, or ~/.cache/willow-rpc in Node; false: nowhere. */
@@ -108,7 +118,7 @@ export const FEE_HISTORY_WITH_REWARDS = 16;
 const EMPTY_CODE_HASH = '0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470';
 const NOT_FOUND_TX = 'not found in this store: transaction ';
 const FILTER_IDLE_MS = 5 * 60 * 1000;
-const NITRO = new Set([42161, 4663]);
+const NITRO = new Set([42161, 4663, 421614, 46630]);
 const PROOF_DOWNLOADS = 4;
 
 /** The app's request, as the client tracks it for its event. */
@@ -226,7 +236,7 @@ class Client implements WillowVerifier {
   private readonly anchors: Anchors;
   private readonly flagMode: boolean;
   private readonly now: () => number;
-  private checkpoint: Promise<Checkpoint> | null = null;
+  private checkpoint: Promise<AnchorStart> | null = null;
   private chainCheck: Promise<void> | null = null;
   private memo = new Map<string, Promise<unknown>>();
   private results = new Lru<unknown>(1024, 16 << 20);
@@ -251,14 +261,18 @@ class Client implements WillowVerifier {
     this.lcUrl = lc;
     const fetchImpl = o.fetch ?? globalThis.fetch.bind(globalThis);
     this.batcher = new Batcher({ fetch: fetchImpl, windowMs: o.batchWindowMs ?? 5, maxBatch: MAX_BATCH });
+    const nowSec = () => Math.floor(this.now() / 1000);
     const checkpoint = () =>
-      (this.checkpoint ??= chooseCheckpoint({
-        checkpoint: o.checkpoint,
-        checkpointUrl: o.checkpointUrl,
-        beaconApis: o.beaconApis ?? (isNode() ? BEACON_APIS : false),
-        fetch: fetchImpl,
-        nowSec: () => Math.floor(this.now() / 1000),
-      }));
+      (this.checkpoint ??= Promise.all([
+        chooseCheckpoint({
+          checkpoint: o.checkpoint,
+          checkpointUrl: o.checkpointUrl,
+          beaconApis: o.beaconApis ?? (isNode() ? BEACON_APIS : false),
+          fetch: fetchImpl,
+          nowSec,
+        }),
+        chooseStarts({ sepolia: o.sepoliaCheckpoint, bnb: o.bnbStart, checkpointUrl: o.checkpointUrl, fetch: fetchImpl, nowSec }),
+      ]).then(([c, starts]) => ({ ...c, ...starts })));
     const worker = o.worker ?? (!isNode() && typeof Worker !== 'undefined' && !o.verifiers);
     if (worker && o.verifiers) throw new Error('verifiers are injected into this thread: pass worker: false');
     this.backend = worker ? new WorkerBackend(spawnWorker() as any, checkpoint) : new InlineBackend(o.verifiers ?? packageModules(), checkpoint);
@@ -267,7 +281,10 @@ class Client implements WillowVerifier {
       backend: this.backend,
       rpc: (chainId, method, params) => this.batcher.call(chainId === 1 ? this.lcUrl : chainId === this.chainId ? this.url : withChain(this.url, chainId)!, method, params),
       storage,
-      checkpointRoot: async () => (await checkpoint()).root,
+      checkpointRoot: async (lc) => {
+        const c = await checkpoint();
+        return lc === 'sepolia' ? c.sepolia!.root : lc === 'bnb' ? c.bnb!.hash : c.root;
+      },
       minLevel: o.minLevel ?? 'signed',
       headMaxAgeMs: (c) => o.headMaxAgeMs ?? (c === 1 ? 12_000 : 2_000),
       maxHeadAgeSec: o.maxHeadAgeSec ?? 600,

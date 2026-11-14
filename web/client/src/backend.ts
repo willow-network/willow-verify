@@ -12,7 +12,24 @@ import type {
   StateVerified,
   VerifierModules,
   Anchor,
+  LightClientName,
 } from './verifiers.js';
+import type { BnbStart, Checkpoint } from './checkpoint.js';
+
+/** What the anchor module starts from: Ethereum's checkpoint, and the other light clients' starts. */
+export interface AnchorStart extends Checkpoint {
+  sepolia?: Checkpoint;
+  bnb?: BnbStart;
+}
+
+/** The light client that anchors chain `chainId`: Ethereum's (none named), Sepolia's or BNB's. */
+export function lightClientOf(chainId: number): LightClientName | undefined {
+  if (chainId === 56) return 'bnb';
+  return SEPOLIA_CHAINS.has(chainId) ? 'sepolia' : undefined;
+}
+
+/** The chains that settle on Sepolia (anchor-verify `l2::SEPOLIA_CHAINS`). */
+export const SEPOLIA_CHAINS = new Set([11155420, 84532, 1301, 763373, 421614, 46630]);
 
 export type ItemOutcome = (ItemVerified & { rendered?: BlockRendered }) | ItemFailure;
 
@@ -26,10 +43,14 @@ export interface Backend {
   itemVerify(chainId: number, kind: ItemKind, target: string, response: string, full?: boolean): Promise<ItemOutcome>;
   stateRequest(chainId: number, kind: StateKind, target: string): Promise<Requested | Failure>;
   stateVerify(chainId: number, kind: StateKind, target: string, response: string): Promise<StateVerified | Failure>;
-  anchorRestore(saved: string, now: number): Promise<{ ok: boolean; kind?: string; message?: string }>;
-  anchorBootstrap(response: string, now: number): Promise<{ ok: boolean; kind?: string; message?: string; period?: number }>;
-  anchorUpdates(response: string): Promise<{ ok: boolean; kind?: string; message?: string; period?: number | null }>;
-  /** `Anchor.verify`, and after a pass (with `wantSaved`) the committees to keep. A `need-bootstrap` resets the light client. */
+  /** With `lightClient`, the other light client's (`restoreFor`, `bootstrapFor`, `updatesFor`). */
+  anchorRestore(saved: string, now: number, lightClient?: LightClientName): Promise<{ ok: boolean; kind?: string; message?: string }>;
+  anchorBootstrap(response: string, now: number, lightClient?: LightClientName): Promise<{ ok: boolean; kind?: string; message?: string; period?: number }>;
+  anchorUpdates(response: string, lightClient?: LightClientName): Promise<{ ok: boolean; kind?: string; message?: string; period?: number | null }>;
+  /**
+   * `Anchor.verify`, and after a pass (with `wantSaved`) what to keep of the light client that
+   * anchors the chain. A `need-bootstrap` resets the light client it names.
+   */
   anchorVerify(chainId: number, number: number, hash: string, response: string, now: number, wantSaved?: boolean): Promise<{ result: AnchorVerified | AnchorFailure; saved: string | null }>;
   logsVerify(chainId: number, response: string, filter: string, proofs: Record<string, Uint8Array>): Promise<LogsVerified | Failure>;
   close(): void;
@@ -57,7 +78,7 @@ export class InlineBackend implements Backend {
 
   constructor(
     private readonly modules: VerifierModules,
-    private readonly checkpoint: () => Promise<{ root: string; slot: number }>,
+    private readonly checkpoint: () => Promise<AnchorStart>,
   ) {}
 
   private load<K extends keyof VerifierModules>(name: K): Promise<any> {
@@ -127,27 +148,45 @@ export class InlineBackend implements Backend {
     if (this.anchor) return this.anchor;
     const { Anchor } = await this.load('anchor');
     const cp = await this.checkpoint();
-    this.anchor ??= new Anchor(cp.root, cp.slot);
-    return this.anchor!;
+    if (this.anchor) return this.anchor;
+    const a: Anchor = new Anchor(cp.root, cp.slot);
+    // A build before the other light clients has no `start`: its chains stay unanchored.
+    if (cp.sepolia && a.start) a.start('sepolia', JSON.stringify(cp.sepolia));
+    if (cp.bnb && a.start) a.start('bnb', JSON.stringify({ number: cp.bnb.number, hash: cp.bnb.hash }));
+    this.anchor = a;
+    return a;
   }
 
-  async anchorRestore(saved: string, now: number) {
-    return parse<{ ok: boolean }>((await this.lightClient()).restore(saved, now));
+  private static other(a: Anchor, name: string): Anchor & Required<Pick<Anchor, 'bootstrapFor' | 'updatesFor' | 'restoreFor' | 'savedFor' | 'resetFor'>> {
+    if (!a.bootstrapFor || !a.updatesFor || !a.restoreFor || !a.savedFor || !a.resetFor) throw new NoVerifierError('anchor', `this build has no ${name} light client`);
+    return a as any;
   }
 
-  async anchorBootstrap(response: string, now: number) {
-    return parse<{ ok: boolean }>((await this.lightClient()).bootstrap(response, now));
+  async anchorRestore(saved: string, now: number, lightClient?: LightClientName) {
+    const a = await this.lightClient();
+    return parse<{ ok: boolean }>(lightClient ? InlineBackend.other(a, lightClient).restoreFor(lightClient, saved, now) : a.restore(saved, now));
   }
 
-  async anchorUpdates(response: string) {
-    return parse<{ ok: boolean }>((await this.lightClient()).updates(response));
+  async anchorBootstrap(response: string, now: number, lightClient?: LightClientName) {
+    const a = await this.lightClient();
+    return parse<{ ok: boolean }>(lightClient ? InlineBackend.other(a, lightClient).bootstrapFor(lightClient, response, now) : a.bootstrap(response, now));
+  }
+
+  async anchorUpdates(response: string, lightClient?: LightClientName) {
+    const a = await this.lightClient();
+    return parse<{ ok: boolean }>(lightClient ? InlineBackend.other(a, lightClient).updatesFor(lightClient, response) : a.updates(response));
   }
 
   async anchorVerify(chainId: number, number: number, hash: string, response: string, now: number, wantSaved = true) {
     const a = await this.lightClient();
     const result = parse<AnchorVerified | AnchorFailure>(a.verify(chainId, number, hash, response, now));
-    if (!result.ok && result.kind === 'need-bootstrap') a.reset();
-    return { result, saved: result.ok && wantSaved ? a.saved() : null };
+    if (!result.ok && result.kind === 'need-bootstrap') {
+      if (result.lightClient) a.resetFor?.(result.lightClient);
+      else a.reset();
+    }
+    const lc = lightClientOf(chainId);
+    const saved = !result.ok || !wantSaved ? null : lc ? (a.savedFor?.(lc) ?? null) : a.saved();
+    return { result, saved };
   }
 
   async logsVerify(chainId: number, response: string, filter: string, proofs: Record<string, Uint8Array>) {

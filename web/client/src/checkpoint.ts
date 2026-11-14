@@ -73,3 +73,75 @@ export async function chooseCheckpoint(o: CheckpointOptions): Promise<Checkpoint
   }
   return { root: c.root, slot: c.slot };
 }
+
+/** BNB Smart Chain's light client starts at an epoch block; `time` is its timestamp (seconds). */
+export interface BnbStart {
+  number: number;
+  hash: string;
+  time: number;
+}
+
+/** Where the other light clients start: Sepolia's (the testnets) and BNB's. */
+export interface Starts {
+  sepolia: Checkpoint;
+  bnb: BnbStart;
+}
+
+/**
+ * The package's starts besides Ethereum's, rewritten by the same build: Sepolia's slot 11,575,968
+ * (2026-11-14, after Gloas; the same root at publicnode and ChainSafe) and BNB's epoch block
+ * 133,510,000 (2026-11-14, the same hash at three operators).
+ */
+export const SHIPPED_STARTS: Starts = {
+  sepolia: { root: '0x35f9d71dbf378dce8387786beaeb03b7496bb245a2d88692a76fd38df40923fd', slot: 11575968 },
+  bnb: { number: 133510000, hash: '0x51e9a0b4ab8fe7bfa6745a14c99860342f866d4b341828092356db2f8748a35f', time: 1794644124 },
+};
+
+const SEPOLIA_GENESIS_TIME = 1_655_733_600;
+/** The verifier refuses a BNB start older than BNB's 7-day unbonding (anchor-verify bnb.rs). */
+export const MAX_BNB_START_AGE_SECS = 7 * 24 * 3600;
+/** A shipped BNB start older than this is replaced by `checkpoint.json`'s, when it holds a newer one. */
+export const BNB_REFRESH_SECS = 24 * 3600;
+
+const isBnbStart = (b: unknown): b is BnbStart =>
+  !!b &&
+  typeof b === 'object' &&
+  isHash((b as BnbStart).hash) &&
+  Number.isSafeInteger((b as BnbStart).number) &&
+  (b as BnbStart).number % 1000 === 0 &&
+  Number.isSafeInteger((b as BnbStart).time);
+
+export interface StartsOptions {
+  sepolia?: Checkpoint;
+  bnb?: BnbStart;
+  checkpointUrl?: string;
+  fetch: typeof fetch;
+  nowSec: () => number;
+}
+
+/**
+ * The other light clients' starts: the ones passed in; else the shipped ones; else, once one is
+ * older than its verifier accepts (a day's margin), `checkpoint.json`'s `sepolia` or `bnb` when it
+ * holds a newer one. A start that stays too old only fails the chains it anchors.
+ */
+export async function chooseStarts(o: StartsOptions): Promise<Starts> {
+  const now = o.nowSec();
+  const sepoliaOld = (c: Checkpoint) => now - (SEPOLIA_GENESIS_TIME + 12 * c.slot) >= MAX_START_AGE_SECS - 24 * 3600;
+  // BNB's verifier takes 7 days, but a cold client walks every epoch since its start (about 2 s a
+  // day): a newer start is taken once the shipped one is a day old.
+  const bnbOld = (b: BnbStart) => now - b.time >= BNB_REFRESH_SECS;
+  let sepolia = o.sepolia ?? SHIPPED_STARTS.sepolia;
+  let bnb = o.bnb ?? SHIPPED_STARTS.bnb;
+  if ((!o.sepolia && sepoliaOld(sepolia)) || (!o.bnb && bnbOld(bnb))) {
+    let c: any = null;
+    try {
+      const r = await o.fetch(o.checkpointUrl ?? CHECKPOINT_URL, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(30_000) });
+      c = await r.json();
+    } catch {
+      c = null;
+    }
+    if (!o.sepolia && isCheckpoint(c?.sepolia) && c.sepolia.slot > sepolia.slot) sepolia = { root: c.sepolia.root, slot: c.sepolia.slot };
+    if (!o.bnb && isBnbStart(c?.bnb) && c.bnb.number > bnb.number) bnb = { number: c.bnb.number, hash: c.bnb.hash, time: c.bnb.time };
+  }
+  return { sepolia, bnb };
+}

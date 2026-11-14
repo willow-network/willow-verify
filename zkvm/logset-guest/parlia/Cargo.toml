@@ -1,0 +1,27 @@
+[package]
+name = "parlia-verify"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# BNB Smart Chain blocks checked against its validators (Parlia): the header and its hash, the
+# producer's seal, the validator set followed from a pinned checkpoint through each epoch, and
+# the fast-finality vote attestations (2/3+ BLS). No I/O. Host, wasm32 and zkVM guest alike:
+# willow-bnb-heads gates the log store with it; the browser verifier and a range-proof guest
+# are meant to run the same code. Its own workspace.
+[workspace]
+
+[dependencies]
+alloy-primitives = { version = "1", default-features = false, features = ["std", "k256", "rlp"] }
+alloy-rlp = "0.3"
+# The curve crate anchor-verify checks Ethereum's sync committee with (builds for wasm32).
+bls12_381 = { version = "0.8.0", features = ["experimental"] }
+# bls12_381 0.8's hash-to-curve speaks digest 0.9.
+sha2 = "0.9"
+hex = "0.4"
+serde_json = "1"
+
+[dev-dependencies]
+flate2 = "1"
+k256 = { version = "0.13", features = ["ecdsa"] }

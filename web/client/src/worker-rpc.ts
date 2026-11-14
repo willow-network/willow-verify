@@ -1,4 +1,4 @@
-import type { Backend } from './backend.js';
+import type { AnchorStart, Backend } from './backend.js';
 
 /** Either end of a worker: a Web Worker, its global scope, or a MessagePort (Node's too). */
 export interface Port {
@@ -31,8 +31,8 @@ function listen(port: Port, f: (data: any) => void): void {
  * is one object), as web/verify/worker.js does. The checkpoint comes in an `init` call before the
  * first anchor call; only the light client needs it.
  */
-export function serveBackend(port: Port, make: (checkpoint: () => Promise<{ root: string; slot: number }>) => Backend): void {
-  let checkpoint: { root: string; slot: number } | null = null;
+export function serveBackend(port: Port, make: (checkpoint: () => Promise<AnchorStart>) => Backend): void {
+  let checkpoint: AnchorStart | null = null;
   const backend = make(async () => {
     if (!checkpoint) throw new Error('the worker was not given its checkpoint');
     return checkpoint;
@@ -43,7 +43,7 @@ export function serveBackend(port: Port, make: (checkpoint: () => Promise<{ root
       let out: Done;
       try {
         if (m.op === 'init') {
-          checkpoint ??= m.args[0] as { root: string; slot: number };
+          checkpoint ??= m.args[0] as AnchorStart;
           out = { id: m.id, ok: true, value: null };
         } else {
           const value = await (backend[m.op] as (...a: unknown[]) => Promise<unknown>)(...m.args);
@@ -65,7 +65,7 @@ export class WorkerBackend implements Backend {
 
   constructor(
     private readonly port: Port,
-    private readonly checkpoint: () => Promise<{ root: string; slot: number }>,
+    private readonly checkpoint: () => Promise<AnchorStart>,
   ) {
     listen(port, (d: Done) => {
       const w = this.waiting.get(d.id);

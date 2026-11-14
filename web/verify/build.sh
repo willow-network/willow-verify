@@ -47,7 +47,7 @@ SOURCES=(rust-toolchain.toml crates/network/src/beacon crates/receipts-trie zkvm
   zkvm/beacon-cl-guest/core zkvm/window-anchor-guest/core zkvm/logset-guest/agg-core
   zkvm/logset-guest/anchor-verify zkvm/logset-guest/anchor-wasm zkvm/logset-guest/blockcheck
   zkvm/logset-guest/blockproof zkvm/logset-guest/chains zkvm/logset-guest/core
-  zkvm/logset-guest/fixtures zkvm/logset-guest/items-wasm zkvm/logset-guest/query
+  zkvm/logset-guest/fixtures zkvm/logset-guest/items-wasm zkvm/logset-guest/parlia zkvm/logset-guest/query
   zkvm/logset-guest/query-verify zkvm/logset-guest/query-wasm zkvm/logset-guest/state-verify
   zkvm/logset-guest/state-wasm zkvm/logset-guest/vkeys
   zkvm/logset-guest-openvm/verify zkvm/logset-guest-openvm/verify-wasm

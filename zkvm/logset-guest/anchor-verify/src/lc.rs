@@ -1,10 +1,13 @@
 //! Ethereum's light client, as the beacon API serves it: a bootstrap at the checkpoint the page
 //! pins, one update per sync-committee period after it, and finality updates. Header and committee
 //! roots, signing domains, gindices and the fork schedule are the SP1 anchor guest's (`anchor-core`).
+//! The same client follows Sepolia ([`Network::Sepolia`]) from Gloas, with the consensus specs'
+//! Gloas light-client gindices; a Gloas header names only its execution block's hash, so Willow
+//! adds that block's header (`execution_header`), which must hash to it.
 
 use crate::bls::{fast_aggregate_verify, BlsFailure};
 use crate::{Failure, Kind};
-use alloy_primitives::U256;
+use alloy_primitives::{keccak256, U256};
 use anchor_core::gindex::{finalized_root_gindex, next_sync_committee_gindex};
 use anchor_core::header::{
     beacon_block_header_root, bit_set, compute_domain, compute_signing_root,
@@ -47,6 +50,119 @@ const fn nib(c: u8) -> u8 {
         b'0'..=b'9' => c - b'0',
         b'a'..=b'f' => c - b'a' + 10,
         _ => panic!("not lowercase hex"),
+    }
+}
+
+/// The Ethereum network a light client follows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Network {
+    #[default]
+    Mainnet,
+    Sepolia,
+}
+
+/// Sepolia from Gloas (epoch 353,024, 2026-10-06): its genesis, its Gloas fork version, and the
+/// gindices of consensus-specs `gloas/light-client/sync-protocol.md` (checked on Sepolia's data).
+pub mod sepolia {
+    use super::{hex32, Bytes32};
+
+    pub const GENESIS_VALIDATORS_ROOT: Bytes32 =
+        hex32("d8ea171f3c94aea21ebc42a1ed61052acf3f9209c00e4efbaaddac09ed9b8078");
+    pub const GENESIS_TIME: u64 = 1_655_733_600;
+    pub const GLOAS_SLOT: u64 = 353_024 * 32;
+    pub const GLOAS_VERSION: [u8; 4] = [0x90, 0x00, 0x00, 0x76];
+    pub const FINALIZED_ROOT_GINDEX: u64 = 735;
+    pub const CURRENT_SYNC_COMMITTEE_GINDEX: u64 = 2945;
+    pub const NEXT_SYNC_COMMITTEE_GINDEX: u64 = 2946;
+    /// `signed_execution_payload_bid.message.parent_block_hash` under the body root.
+    pub const EXECUTION_BLOCK_HASH_GINDEX: u64 = 2856;
+    /// The pin built in: slot 11,575,968's block root (2026-11-14), the same at publicnode and
+    /// ChainSafe's lodestar.
+    pub const PINNED_ROOT: Bytes32 =
+        hex32("35f9d71dbf378dce8387786beaeb03b7496bb245a2d88692a76fd38df40923fd");
+    pub const PINNED_SLOT: u64 = 11_575_968;
+}
+
+/// How a network's light-client data at a slot is checked: its fork's name and version, its
+/// gindices, and, on mainnet, the fork (whose header carries the full execution payload header).
+#[derive(Clone, Copy)]
+struct Rules {
+    name: &'static str,
+    version: [u8; 4],
+    current_committee: u64,
+    next_committee: u64,
+    finalized_root: u64,
+    fork: Option<ForkVersion>,
+}
+
+impl Network {
+    pub fn genesis_time(self) -> u64 {
+        match self {
+            Network::Mainnet => GENESIS_TIME,
+            Network::Sepolia => sepolia::GENESIS_TIME,
+        }
+    }
+
+    fn genesis_validators_root(self) -> &'static Bytes32 {
+        match self {
+            Network::Mainnet => &GENESIS_VALIDATORS_ROOT,
+            Network::Sepolia => &sepolia::GENESIS_VALIDATORS_ROOT,
+        }
+    }
+
+    pub fn slot_time(self, slot: u64) -> u64 {
+        self.genesis_time() + slot * SECONDS_PER_SLOT
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Network::Mainnet => "Ethereum",
+            Network::Sepolia => "Sepolia",
+        }
+    }
+
+    /// The forks whose light-client data this client reads.
+    fn known(self) -> &'static [&'static str] {
+        match self {
+            Network::Mainnet => &["capella", "deneb", "electra", "fulu"],
+            Network::Sepolia => &["gloas"],
+        }
+    }
+
+    /// The `lightClient` a need-* failure names (none for Ethereum's).
+    pub fn light_client(self) -> Option<&'static str> {
+        match self {
+            Network::Mainnet => None,
+            Network::Sepolia => Some("sepolia"),
+        }
+    }
+
+    fn rules(self, slot: u64) -> Result<Rules, Failure> {
+        match self {
+            Network::Mainnet => {
+                let fork = fork_of(slot)?;
+                Ok(Rules {
+                    name: fork_name(fork),
+                    version: fork_version_bytes(fork),
+                    current_committee: current_sync_committee_gindex(fork),
+                    next_committee: next_sync_committee_gindex(fork),
+                    finalized_root: finalized_root_gindex(fork),
+                    fork: Some(fork),
+                })
+            }
+            Network::Sepolia if slot < sepolia::GLOAS_SLOT => Err(Failure::new(
+                Kind::Unreachable,
+                format!("Sepolia slot {slot} is before Gloas, where this light client starts"),
+            )),
+            Network::Sepolia => Ok(Rules {
+                name: "gloas",
+                version: sepolia::GLOAS_VERSION,
+                current_committee: sepolia::CURRENT_SYNC_COMMITTEE_GINDEX,
+                next_committee: sepolia::NEXT_SYNC_COMMITTEE_GINDEX,
+                finalized_root: sepolia::FINALIZED_ROOT_GINDEX,
+                fork: None,
+            }),
+        }
     }
 }
 
@@ -300,9 +416,14 @@ fn fork_of(slot: u64) -> Result<ForkVersion, Failure> {
 }
 
 impl LcHeader {
-    fn parse(v: &Value) -> Result<Self, Failure> {
+    fn parse(net: Network, v: &Value) -> Result<Self, Failure> {
         let beacon = Header::parse(field(v, "beacon")?)?;
-        let fork = fork_of(beacon.slot)?;
+        let Some(fork) = net.rules(beacon.slot)?.fork else {
+            return Ok(LcHeader {
+                beacon,
+                execution: gloas_execution(v, &beacon)?,
+            });
+        };
         let (root, execution) = execution_root(fork, field(v, "execution")?)?;
         let b = branch(v, "execution_branch", 4)?;
         if !verify_branch(&root, &b, EXECUTION_PAYLOAD_GINDEX, &beacon.body_root) {
@@ -318,6 +439,57 @@ impl LcHeader {
     fn beacon_only(v: &Value) -> Result<Header, Failure> {
         Header::parse(field(v, "beacon")?)
     }
+}
+
+/// A Gloas header's execution block: its hash under the body root (the bid's parent block hash), and
+/// its fields from `execution_header`, the block header's RLP, which must hash to it.
+fn gloas_execution(v: &Value, beacon: &Header) -> Result<Execution, Failure> {
+    let hash: Bytes32 = fixed(v, "execution_block_hash")?;
+    let g = sepolia::EXECUTION_BLOCK_HASH_GINDEX;
+    let b = branch(
+        v,
+        "execution_branch",
+        beacon_cl_core::fork::depth_for_gindex(g),
+    )?;
+    if !verify_branch(&hash, &b, g, &beacon.body_root) {
+        return Err(rejected(format!(
+            "the execution block of slot {} is not under its body root",
+            beacon.slot
+        )));
+    }
+    let rlp = bytes_of(text(v, "execution_header")?, "execution_header")?;
+    if keccak256(&rlp).0 != hash {
+        return Err(rejected(format!(
+            "the execution header sent for slot {} is not its block's",
+            beacon.slot
+        )));
+    }
+    execution_from_rlp(&rlp)
+}
+
+/// The fields of an execution block header a call runs with, from its RLP.
+pub fn execution_from_rlp(rlp: &[u8]) -> Result<Execution, Failure> {
+    let f = crate::l2::rlp_items(rlp)?;
+    if f.len() < 16 {
+        return Err(bad("an execution header with too few fields"));
+    }
+    let b32 = |i: usize, what: &str| -> Result<Bytes32, Failure> {
+        f[i].try_into()
+            .map_err(|_| bad(format!("{what} is not 32 bytes")))
+    };
+    if f[15].len() > 32 || f[15].first() == Some(&0) {
+        return Err(bad("baseFeePerGas is not a canonical uint256"));
+    }
+    Ok(Execution {
+        number: crate::l2::uint(f[8], "number")?,
+        hash: keccak256(rlp).0,
+        state_root: b32(3, "stateRoot")?,
+        timestamp: crate::l2::uint(f[11], "timestamp")?,
+        gas_limit: crate::l2::uint(f[9], "gasLimit")?,
+        base_fee: U256::from_be_slice(f[15]),
+        prev_randao: b32(13, "mixHash")?,
+        fee_recipient: f[2].try_into().map_err(|_| bad("miner is not 20 bytes"))?,
+    })
 }
 
 /// A sync committee: 512 keys and their aggregate.
@@ -365,6 +537,7 @@ pub struct Finality {
 /// The light client's state: the committees it verified, by period.
 #[derive(Clone)]
 pub struct LightClient {
+    pub net: Network,
     pub checkpoint_root: Bytes32,
     pub checkpoint_slot: u64,
     pub committees: BTreeMap<u64, Committee>,
@@ -374,27 +547,29 @@ pub struct LightClient {
 }
 
 /// The `{version, data}` a beacon API sends, with a fork this page knows.
-fn versioned(v: &Value) -> Result<(&'static str, &Value), Failure> {
+fn versioned(net: Network, v: &Value) -> Result<(&'static str, &Value), Failure> {
     let version = text(v, "version")?;
-    let known = ["capella", "deneb", "electra", "fulu"];
-    let Some(name) = known.iter().find(|k| **k == version) else {
+    let Some(name) = net.known().iter().find(|k| **k == version) else {
         return Err(Failure::new(
             Kind::UnknownFork,
-            "Ethereum's light client data is from an upgrade newer than this page",
+            format!(
+                "{}'s light client data is from an upgrade newer than this page",
+                net.name()
+            ),
         ));
     };
     Ok((name, field(v, "data")?))
 }
 
-fn check_version(name: &str, slot: u64) -> Result<ForkVersion, Failure> {
-    let fork = fork_of(slot)?;
-    if fork_name(fork) != name {
+fn check_version(net: Network, name: &str, slot: u64) -> Result<Rules, Failure> {
+    let r = net.rules(slot)?;
+    if r.name != name {
         return Err(rejected(format!(
             "a {name} response for slot {slot}, which is {}",
-            fork_name(fork)
+            r.name
         )));
     }
-    Ok(fork)
+    Ok(r)
 }
 
 /// The sync aggregate: participation bits and signature.
@@ -408,6 +583,7 @@ fn aggregate(v: &Value) -> Result<([u8; 64], [u8; 96]), Failure> {
 
 /// `committee`'s signature over `attested` at `signature_slot`: at least 342 of 512 signers.
 fn verify_signature(
+    net: Network,
     committee: &Committee,
     attested: &Header,
     bits: &[u8; 64],
@@ -422,11 +598,11 @@ fn verify_signature(
             "{signers} of 512 validators signed, fewer than the {MIN_PARTICIPANTS} needed"
         )));
     }
-    let fork = fork_of(signature_slot.saturating_sub(1))?;
+    let r = net.rules(signature_slot.saturating_sub(1))?;
     let domain = compute_domain(
         DOMAIN_SYNC_COMMITTEE,
-        fork_version_bytes(fork),
-        &GENESIS_VALIDATORS_ROOT,
+        r.version,
+        net.genesis_validators_root(),
     );
     let signing_root = compute_signing_root(&attested.root(), &domain);
     fast_aggregate_verify(&committee.pubkeys[..], bits, signature, &signing_root).map_err(|e| {
@@ -444,7 +620,13 @@ fn verify_signature(
 
 impl LightClient {
     pub fn new(checkpoint_root: Bytes32, checkpoint_slot: u64) -> Self {
+        Self::on(Network::Mainnet, checkpoint_root, checkpoint_slot)
+    }
+
+    /// A light client of `net` from its checkpoint.
+    pub fn on(net: Network, checkpoint_root: Bytes32, checkpoint_slot: u64) -> Self {
         LightClient {
+            net,
             checkpoint_root,
             checkpoint_slot,
             committees: BTreeMap::new(),
@@ -454,10 +636,13 @@ impl LightClient {
 
     /// Refuses a checkpoint older than [`MAX_START_AGE_SECS`] at `now`.
     pub fn check_age(&self, now: u64) -> Result<(), Failure> {
-        if now.saturating_sub(slot_time(self.checkpoint_slot)) > MAX_START_AGE_SECS {
+        if now.saturating_sub(self.net.slot_time(self.checkpoint_slot)) > MAX_START_AGE_SECS {
             return Err(Failure::new(
                 Kind::StaleCheckpoint,
-                "this page's starting point on Ethereum is more than 30 days old",
+                format!(
+                    "this page's starting point on {} is more than 30 days old",
+                    self.net.name()
+                ),
             ));
         }
         Ok(())
@@ -466,14 +651,14 @@ impl LightClient {
     /// The bootstrap's result (`{version, data}`): its header must be the checkpoint (root and
     /// slot), its committee under the header's state root. Returns the committee's period.
     pub fn bootstrap(&mut self, v: &Value) -> Result<u64, Failure> {
-        let (name, d) = versioned(v)?;
+        let (name, d) = versioned(self.net, v)?;
         let header = Header::parse(field(field(d, "header")?, "beacon")?)?;
         if header.root() != self.checkpoint_root || header.slot != self.checkpoint_slot {
             return Err(rejected("the bootstrap is not for this page's checkpoint"));
         }
-        let fork = check_version(name, header.slot)?;
+        let rules = check_version(self.net, name, header.slot)?;
         let committee = Committee::parse(field(d, "current_sync_committee")?)?;
-        let g = current_sync_committee_gindex(fork);
+        let g = rules.current_committee;
         let b = branch(
             d,
             "current_sync_committee_branch",
@@ -494,7 +679,7 @@ impl LightClient {
     /// One period's update: signed by the committee of its period, it gives the next one.
     /// Returns the period learned, or `None` when it was known already.
     pub fn apply_update(&mut self, v: &Value) -> Result<Option<u64>, Failure> {
-        let (_, d) = versioned(v)?;
+        let (_, d) = versioned(self.net, v)?;
         let attested = Header::parse(field(field(d, "attested_header")?, "beacon")?)?;
         if self.committees.contains_key(&(period(attested.slot) + 1)) {
             return Ok(None);
@@ -510,9 +695,9 @@ impl LightClient {
     /// An update verified against the committee of its period, which must be known: its period
     /// and the next committee it hands over.
     pub fn check_update(&self, v: &Value) -> Result<(u64, Committee), Failure> {
-        let (name, d) = versioned(v)?;
+        let (name, d) = versioned(self.net, v)?;
         let attested = Header::parse(field(field(d, "attested_header")?, "beacon")?)?;
-        let fork = check_version(name, attested.slot)?;
+        let rules = check_version(self.net, name, attested.slot)?;
         let signature_slot = dec(d, "signature_slot")?;
         let p = period(attested.slot);
         if signature_slot <= attested.slot {
@@ -533,9 +718,16 @@ impl LightClient {
             )
         })?;
         let (bits, signature) = aggregate(d)?;
-        verify_signature(committee, &attested, &bits, &signature, signature_slot)?;
+        verify_signature(
+            self.net,
+            committee,
+            &attested,
+            &bits,
+            &signature,
+            signature_slot,
+        )?;
         let next = Committee::parse(field(d, "next_sync_committee")?)?;
-        let g = next_sync_committee_gindex(fork);
+        let g = rules.next_committee;
         let b = branch(
             d,
             "next_sync_committee_branch",
@@ -549,7 +741,7 @@ impl LightClient {
         }
         let finalized = LcHeader::beacon_only(field(d, "finalized_header")?)?;
         if !finalized.is_zero() {
-            let g = finalized_root_gindex(fork);
+            let g = rules.finalized_root;
             let fb = branch(
                 d,
                 "finality_branch",
@@ -569,7 +761,13 @@ impl LightClient {
     /// What is missing to check a signature from `period` (at `now`, in seconds), if anything.
     pub fn need(&self, sig_period: u64, now: u64) -> Result<(), Failure> {
         // Nothing is signed in a period that has not begun.
-        let now_period = period(now.saturating_sub(GENESIS_TIME) / SECONDS_PER_SLOT);
+        let now_period = period(now.saturating_sub(self.net.genesis_time()) / SECONDS_PER_SLOT);
+        let named = |mut v: serde_json::Value| {
+            if let (Some(lc), Some(o)) = (self.net.light_client(), v.as_object_mut()) {
+                o.insert("lightClient".into(), lc.into());
+            }
+            v
+        };
         if sig_period > now_period + 1 {
             return Err(rejected(format!(
                 "signed in period {sig_period}, which has not begun"
@@ -579,11 +777,18 @@ impl LightClient {
             self.committees.keys().next(),
             self.committees.keys().next_back(),
         ) else {
-            return Err(Failure::new(Kind::NeedBootstrap, "no committee yet"));
+            let f = Failure::new(Kind::NeedBootstrap, "no committee yet");
+            return Err(match self.net.light_client() {
+                Some(lc) => f.with(serde_json::json!({"lightClient": lc})),
+                None => f,
+            });
         };
         if sig_period > hi {
-            return Err(Failure::new(Kind::NeedUpdates, "updates needed")
-                .with(serde_json::json!({"from": hi, "count": sig_period - hi})));
+            return Err(
+                Failure::new(Kind::NeedUpdates, "updates needed").with(named(
+                    serde_json::json!({"from": hi, "count": sig_period - hi}),
+                )),
+            );
         }
         if sig_period < lo {
             return Err(Failure::new(
@@ -597,13 +802,13 @@ impl LightClient {
     /// A finality update (`{version, data}`), verified: signature, finality branch, and both
     /// headers' execution blocks.
     pub fn finality(&self, v: &Value, now: u64) -> Result<Finality, Failure> {
-        let (name, d) = versioned(v)?;
+        let (name, d) = versioned(self.net, v)?;
         let signature_slot = dec(d, "signature_slot")?;
         let sig_period = period(signature_slot);
         self.need(sig_period, now)?;
-        let attested = LcHeader::parse(field(d, "attested_header")?)?;
-        let fork = check_version(name, attested.beacon.slot)?;
-        let finalized = LcHeader::parse(field(d, "finalized_header")?)?;
+        let attested = LcHeader::parse(self.net, field(d, "attested_header")?)?;
+        let rules = check_version(self.net, name, attested.beacon.slot)?;
+        let finalized = LcHeader::parse(self.net, field(d, "finalized_header")?)?;
         if signature_slot <= attested.beacon.slot
             || finalized.beacon.slot > attested.beacon.slot
             || finalized.beacon.is_zero()
@@ -613,13 +818,14 @@ impl LightClient {
         let (bits, signature) = aggregate(d)?;
         let committee = &self.committees[&sig_period];
         let signers = verify_signature(
+            self.net,
             committee,
             &attested.beacon,
             &bits,
             &signature,
             signature_slot,
         )?;
-        let g = finalized_root_gindex(fork);
+        let g = rules.finalized_root;
         let fb = branch(
             d,
             "finality_branch",

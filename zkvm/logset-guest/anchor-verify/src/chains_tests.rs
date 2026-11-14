@@ -36,6 +36,7 @@ fn fixtures(chain: u64) -> Vec<(String, Value)> {
     v
 }
 
+/// Both light clients synced from the saved data: Ethereum's, and Sepolia's when saved.
 fn synced(now: f64) -> Anchor {
     let c = read("checkpoint.json");
     let mut a = Anchor::new(c["root"].as_str().unwrap(), c["slot"].as_f64().unwrap());
@@ -43,7 +44,19 @@ fn synced(now: f64) -> Anchor {
     assert_eq!(r["ok"], true, "{r}");
     let r = parse(&a.updates(&body(&read("updates.json"))));
     assert_eq!(r["ok"], true, "{r}");
+    if dir().join("sepolia-checkpoint.json").exists() {
+        sync_sepolia(&mut a, now);
+    }
     a
+}
+
+fn sync_sepolia(a: &mut Anchor, now: f64) {
+    let r = parse(&a.start("sepolia", &read("sepolia-checkpoint.json").to_string()));
+    assert_eq!(r["ok"], true, "{r}");
+    let r = parse(&a.bootstrap_for("sepolia", &body(&read("sepolia-bootstrap.json")), now));
+    assert_eq!(r["ok"], true, "{r}");
+    let r = parse(&a.updates_for("sepolia", &body(&read("sepolia-updates.json"))));
+    assert_eq!(r["ok"], true, "{r}");
 }
 
 fn verify(chain: u64, f: &Value, result: &Value, hash: &str) -> Value {
@@ -139,4 +152,141 @@ fn world_chain_blocks_anchor_on_ethereum() {
         &[8453, 7777777, 1868],
         &["committed", "final", "signed"],
     );
+}
+
+#[test]
+fn op_sepolia_blocks_anchor_on_sepolia() {
+    check(11155420, &[10, 1301, 763373], LEVELS_OP_SEPOLIA);
+}
+
+#[test]
+fn base_sepolia_blocks_anchor_on_sepolia() {
+    check(84532, &[8453, 11155420], LEVELS_BASE_SEPOLIA);
+}
+
+#[test]
+fn unichain_sepolia_blocks_anchor_on_sepolia() {
+    check(1301, &[130, 11155420, 763373], LEVELS_UNICHAIN_SEPOLIA);
+}
+
+#[test]
+fn ink_sepolia_blocks_anchor_on_sepolia() {
+    check(763373, &[57073, 11155420, 1301], LEVELS_INK_SEPOLIA);
+}
+
+#[test]
+fn arbitrum_sepolia_blocks_anchor_on_sepolia() {
+    check(421614, &[42161, 46630], LEVELS_ARBITRUM_SEPOLIA);
+}
+
+#[test]
+fn robinhood_testnet_blocks_anchor_on_sepolia() {
+    check(46630, &[4663, 421614], LEVELS_ROBINHOOD_TESTNET);
+}
+
+/// The levels saved for each testnet (2026-11-14): its claims where a free RPC serves the state, and
+/// its sequencer's newest block.
+const LEVELS_OP_SEPOLIA: &[&str] = &["committed", "signed"];
+const LEVELS_BASE_SEPOLIA: &[&str] = &["committed", "signed"];
+const LEVELS_UNICHAIN_SEPOLIA: &[&str] = &["committed", "signed"];
+const LEVELS_INK_SEPOLIA: &[&str] = &["committed", "signed"];
+const LEVELS_ARBITRUM_SEPOLIA: &[&str] = &["committed", "signed"];
+const LEVELS_ROBINHOOD_TESTNET: &[&str] = &["committed", "signed"];
+
+fn fin(r: &mut Value) -> &mut Value {
+    &mut r["update"]["data"]["finalized_header"]
+}
+
+/// A Sepolia anchor's finality update, tampered where only Sepolia's light client reads it.
+#[test]
+fn sepolia_finality_updates_are_checked_as_gloas_data() {
+    let (name, f) = fixtures(1301)
+        .into_iter()
+        .next()
+        .expect("a Unichain Sepolia anchor");
+    let now = f["savedAt"].as_f64().unwrap();
+    let n = f["block"].as_u64().unwrap() as f64;
+    let hash = f["hash"].as_str().unwrap();
+    let run = |result: &Value| parse(&synced(now).verify(1301, n, hash, &body(result), now));
+    let kind = |v: &Value| v["kind"].as_str().unwrap_or("").to_string();
+    assert_eq!(run(&f["result"])["ok"], true, "{name}");
+    // The execution header with a byte changed: not the block the beacon block names.
+    let mut r = f["result"].clone();
+    let h = fin(&mut r);
+    let x = h["execution_header"].as_str().unwrap().to_string();
+    h["execution_header"] = json!(format!(
+        "{}{}",
+        &x[..x.len() - 1],
+        if x.ends_with('0') { "1" } else { "0" }
+    ));
+    assert_eq!(kind(&run(&r)), "rejected", "{name}");
+    // No execution header.
+    let mut r = f["result"].clone();
+    fin(&mut r)
+        .as_object_mut()
+        .unwrap()
+        .remove("execution_header");
+    assert_eq!(kind(&run(&r)), "malformed-input", "{name}");
+    // A node of the block hash's branch changed.
+    let mut r = f["result"].clone();
+    fin(&mut r)["execution_branch"][3] = json!(format!("0x{}", "22".repeat(32)));
+    assert_eq!(kind(&run(&r)), "rejected", "{name}");
+    // Named as a fork Sepolia's light client does not read.
+    let mut r = f["result"].clone();
+    r["update"]["version"] = json!("fulu");
+    assert_eq!(kind(&run(&r)), "unknown-fork", "{name}");
+    // Ethereum's light client knows no Gloas: the same update is not Ethereum's.
+    let mut a = synced(now);
+    let r = parse(&a.verify(1301, n, hash, &body(&f["result"]), now));
+    assert_eq!(r["ok"], true);
+    let c = read("checkpoint.json");
+    let mut m = Anchor::new(c["root"].as_str().unwrap(), c["slot"].as_f64().unwrap());
+    parse(&m.bootstrap(&body(&read("bootstrap.json")), now));
+    parse(&m.updates(&body(&read("updates.json"))));
+    let r = parse(&m.verify(1, n, hash, &body(&f["result"]), now));
+    assert_ne!(r["ok"], true, "{r}");
+}
+
+#[test]
+fn sepolias_light_client_asks_for_its_own_data_and_ages() {
+    let (_, f) = fixtures(1301)
+        .into_iter()
+        .next()
+        .expect("a Unichain Sepolia anchor");
+    let now = f["savedAt"].as_f64().unwrap();
+    let n = f["block"].as_u64().unwrap() as f64;
+    let hash = f["hash"].as_str().unwrap();
+    // Ethereum's light client synced, Sepolia's not: Sepolia's bootstrap is asked for.
+    let c = read("checkpoint.json");
+    let mut a = Anchor::new(c["root"].as_str().unwrap(), c["slot"].as_f64().unwrap());
+    parse(&a.bootstrap(&body(&read("bootstrap.json")), now));
+    parse(&a.updates(&body(&read("updates.json"))));
+    parse(&a.start("sepolia", &read("sepolia-checkpoint.json").to_string()));
+    let r = parse(&a.verify(1301, n, hash, &body(&f["result"]), now));
+    assert_eq!(
+        (r["kind"].as_str(), r["lightClient"].as_str()),
+        (Some("need-bootstrap"), Some("sepolia")),
+        "{r}"
+    );
+    // Ethereum's bootstrap is not Sepolia's.
+    let r = parse(&a.bootstrap_for("sepolia", &body(&read("bootstrap.json")), now));
+    assert_ne!(r["ok"], true, "{r}");
+    // Kept and restored.
+    sync_sepolia(&mut a, now);
+    let saved = a.saved_for("sepolia");
+    let mut b = Anchor::new(c["root"].as_str().unwrap(), c["slot"].as_f64().unwrap());
+    parse(&b.bootstrap(&body(&read("bootstrap.json")), now));
+    parse(&b.updates(&body(&read("updates.json"))));
+    parse(&b.start("sepolia", &read("sepolia-checkpoint.json").to_string()));
+    assert_eq!(parse(&b.restore_for("sepolia", &saved, now))["ok"], true);
+    assert_eq!(
+        parse(&b.verify(1301, n, hash, &body(&f["result"]), now))["ok"],
+        true
+    );
+    // A start more than 30 days old.
+    let later = now + 31.0 * 86_400.0;
+    let mut d = Anchor::new(c["root"].as_str().unwrap(), c["slot"].as_f64().unwrap());
+    parse(&d.start("sepolia", &read("sepolia-checkpoint.json").to_string()));
+    let r = parse(&d.bootstrap_for("sepolia", &body(&read("sepolia-bootstrap.json")), later));
+    assert_eq!(r["kind"], "stale-checkpoint", "{r}");
 }

@@ -194,6 +194,7 @@ dependencies = [
  "beacon-cl-core",
  "bls12_381",
  "hex",
+ "parlia-verify",
  "revm",
  "serde_json",
  "sha2 0.9.9",
@@ -1979,6 +1980,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "parlia-verify"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rlp",
+ "bls12_381",
+ "hex",
+ "serde_json",
+ "sha2 0.9.9",
 ]
 
 [[package]]

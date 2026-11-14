@@ -19,6 +19,39 @@ pub enum BlsFailure {
     VerificationFailed,
 }
 
+/// A compressed public key, checked: on the curve, in the subgroup, not the identity.
+pub fn public_key(pk: &[u8; 48]) -> Option<G1Affine> {
+    Option::<G1Affine>::from(G1Affine::from_compressed(pk)).filter(|p| !bool::from(p.is_identity()))
+}
+
+/// [`fast_aggregate_verify`] over keys already checked by [`public_key`].
+pub fn aggregate_verify_points(
+    keys: &[G1Affine],
+    signature: &[u8; 96],
+    message: &[u8; 32],
+) -> Result<(), BlsFailure> {
+    let agg = G1Affine::from(
+        keys.iter()
+            .fold(G1Projective::identity(), |a, k| a + G1Projective::from(k)),
+    );
+    if keys.is_empty() || bool::from(agg.is_identity()) {
+        return Err(BlsFailure::AggregateIsIdentity);
+    }
+    let sig = Option::<G2Affine>::from(G2Affine::from_compressed(signature))
+        .ok_or(BlsFailure::InvalidSignature)?;
+    let msg = G2Affine::from(
+        <G2Projective as HashToCurve<ExpandMsgXmd<sha2::Sha256>>>::hash_to_curve(message, DST),
+    );
+    let neg_g1 = G1Affine::from(-G1Projective::generator());
+    let ok = multi_miller_loop(&[
+        (&neg_g1, &G2Prepared::from(sig)),
+        (&agg, &G2Prepared::from(msg)),
+    ])
+    .final_exponentiation()
+        == Gt::identity();
+    ok.then_some(()).ok_or(BlsFailure::VerificationFailed)
+}
+
 /// Verifies `signature` over `signing_root` by the keys whose bit is set; returns how many.
 pub fn fast_aggregate_verify(
     pubkeys: &[[u8; 48]],

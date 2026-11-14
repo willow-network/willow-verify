@@ -27,8 +27,10 @@ pub struct OpChain {
 /// 2026-10-29, block 26,299,517), and on Base the creator of its type-621 games (2026-10-19). On
 /// 2026-11-14 OP Mainnet, Unichain and Ink respected type 9, its games made by the same proposers.
 /// Soneium (type 5) and Zora and World Chain (type 1, output roots): the proposer `gameArgs` names
-/// for the respected type, the creator of each one's newest games (2026-11-14).
-pub const OP_CHAINS: [OpChain; 7] = [
+/// for the respected type, the creator of each one's newest games (2026-11-14). The Sepolia testnets'
+/// registries are on Sepolia; their type-9 games name no proposer, so the creator of their newest
+/// games is pinned (Base Sepolia: of its type-621 games), 2026-11-14.
+pub const OP_CHAINS: [OpChain; 11] = [
     OpChain {
         chain_id: 8453,
         name: "Base",
@@ -78,7 +80,42 @@ pub const OP_CHAINS: [OpChain; 7] = [
         proposers: &[address!("2307278fC8aB0005974A6DeD2FA6d1187333a223")],
         super_root: false,
     },
+    OpChain {
+        chain_id: 11155420,
+        name: "OP Sepolia",
+        registry: address!("a1Cec548926eb5d69aa3B7B57d371EdBdD03e64b"),
+        proposers: &[address!("9884C33C65111DA7Bbed0e63cD2392F503b135F5")],
+        super_root: true,
+    },
+    OpChain {
+        chain_id: 84532,
+        name: "Base Sepolia",
+        registry: address!("2fF5cC82dBf333Ea30D8ee462178ab1707315355"),
+        proposers: &[address!("db84125F2F4229c81c579F41BC129C71B174Eb58")],
+        super_root: false,
+    },
+    OpChain {
+        chain_id: 1301,
+        name: "Unichain Sepolia",
+        registry: address!("Bb6cA820978442750B682663efA851AD4131127b"),
+        proposers: &[address!("97E74f93DF7Fb8eb2542d0Cc42DFB21AaBB40800")],
+        super_root: true,
+    },
+    OpChain {
+        chain_id: 763373,
+        name: "Ink Sepolia",
+        registry: address!("299D7Ea9f0B584cfaF2a5341D151B44967594cA9"),
+        proposers: &[address!("2282d49d805333D8cd6ddda52B32aC07d6e4e51B")],
+        super_root: true,
+    },
 ];
+
+/// The chains whose claims and sequencer keys are on Sepolia: Sepolia's light client anchors them.
+pub const SEPOLIA_CHAINS: [u64; 6] = [11_155_420, 84_532, 1_301, 763_373, 421_614, 46_630];
+
+pub fn on_sepolia(chain_id: u64) -> bool {
+    SEPOLIA_CHAINS.contains(&chain_id)
+}
 
 /// Ethereum state older than this says nothing about a game: a guardian can blacklist one, and a
 /// claim can be lost, after it.
@@ -114,7 +151,7 @@ pub struct L2Header {
 }
 
 /// The RLP items of a list, as byte strings (nested lists are refused: headers have none).
-fn rlp_items(mut b: &[u8]) -> Result<Vec<&[u8]>, Failure> {
+pub(crate) fn rlp_items(mut b: &[u8]) -> Result<Vec<&[u8]>, Failure> {
     let h = alloy_rlp::Header::decode(&mut b).map_err(|_| bad("a header is not RLP"))?;
     if !h.list || h.payload_length != b.len() {
         return Err(bad("a header is not one RLP list"));
@@ -136,7 +173,7 @@ fn b32(item: &[u8], what: &str) -> Result<[u8; 32], Failure> {
         .map_err(|_| bad(format!("{what} is not 32 bytes")))
 }
 
-fn uint(item: &[u8], what: &str) -> Result<u64, Failure> {
+pub(crate) fn uint(item: &[u8], what: &str) -> Result<u64, Failure> {
     if item.len() > 8 || item.first() == Some(&0) {
         return Err(bad(format!("{what} is not a canonical uint64")));
     }
@@ -499,8 +536,9 @@ pub struct NitroChain {
 }
 
 /// Robinhood Chain settles on Ethereum itself: its Rollup, SequencerInbox and Bridge are
-/// Ethereum contracts.
-pub const NITRO_CHAINS: [NitroChain; 2] = [
+/// Ethereum contracts. The testnets' Rollups are on Sepolia (`rollup()` of their SequencerInboxes,
+/// 2026-11-14); their history contract is Arbitrum One's.
+pub const NITRO_CHAINS: [NitroChain; 4] = [
     NitroChain {
         chain_id: 42161,
         name: "Arbitrum One",
@@ -510,6 +548,16 @@ pub const NITRO_CHAINS: [NitroChain; 2] = [
         chain_id: 4663,
         name: "Robinhood Chain",
         rollup: address!("23A19d23e89166adedbDcB432518AB01e4272D94"),
+    },
+    NitroChain {
+        chain_id: 421614,
+        name: "Arbitrum Sepolia",
+        rollup: address!("042B2E6C5E99d4c521bd49beeD5E99651D9B0Cf4"),
+    },
+    NitroChain {
+        chain_id: 46630,
+        name: "Robinhood Chain testnet",
+        rollup: address!("dc5F8E399DBd8a9F5F87AeC4C23Beb12431b386D"),
     },
 ];
 

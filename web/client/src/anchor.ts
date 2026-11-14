@@ -1,10 +1,10 @@
-import { isNoVerifier, type Backend } from './backend.js';
+import { isNoVerifier, lightClientOf, type Backend } from './backend.js';
 import { WillowUnverifiableError, WillowVerificationError } from './errors.js';
 import { isHash, toNumber, toQuantity, ZERO_HASH } from './hex.js';
 import type { Reply } from './http.js';
 import { Lru } from './lru.js';
 import { LIGHT_CLIENT_KEY, type KeyValueStorage } from './storage.js';
-import type { AnchorFailure, AnchorVerified } from './verifiers.js';
+import type { AnchorFailure, AnchorVerified, LightClientName } from './verifiers.js';
 
 export type Level = 'signed' | 'committed' | 'final';
 const RANK: Record<Level, number> = { signed: 0, committed: 1, final: 2 };
@@ -28,7 +28,8 @@ export interface AnchorsOptions {
   /** JSON-RPC on chain `chainId`'s route (1: the light client's). */
   rpc: (chainId: number, method: string, params: unknown[]) => Promise<Reply>;
   storage: KeyValueStorage | null;
-  checkpointRoot: () => Promise<string>;
+  /** What a light client's bootstrap is asked for: Ethereum's checkpoint root, Sepolia's, or BNB's start hash. */
+  checkpointRoot: (lightClient?: LightClientName) => Promise<string>;
   minLevel: Level;
   headMaxAgeMs: (chainId: number) => number;
   /** How old the newest block may be (appendix D rules 1 and 2). */
@@ -38,8 +39,15 @@ export interface AnchorsOptions {
   waitingMs?: number;
 }
 
-/** Light-client updates asked for at once (one per period; anchor-verify lc.rs `MAX_UPDATES`). */
+/** Light-client updates asked for at once (one per period; anchor-verify lc.rs `MAX_UPDATES`; BNB: one per epoch, bnb.rs). */
 const UPDATES_PER_ASK = 16;
+const BNB_UPDATES_PER_ASK = 64;
+/** BNB's signed level: one validator's seal, counted at most 10 minutes (anchor-verify bnb.rs). */
+const BNB_SIGNED_SECS = 600;
+/** Where each light client's kept data goes: Ethereum's at the key it always had. */
+const keyOf = (lc?: LightClientName) => (lc ? `${LIGHT_CLIENT_KEY}:${lc}` : LIGHT_CLIENT_KEY);
+/** Chains whose newest block is final, not signed (BNB's `latest` is its newest finalized block). */
+const LATEST_IS_FINAL = new Set([56]);
 /** Catch-up rounds per anchor, as the page's confirmOnEthereum. */
 const CATCH_UP_ROUNDS = 3;
 const WAITING_RETRIES = 3;
@@ -72,8 +80,8 @@ function ran<T>(p: Promise<T>, method?: string): Promise<T> {
  */
 export class Anchors {
   private restored: Promise<void> | null = null;
-  // The committees last kept: they change only when the light client catches up.
-  private kept: string | null = null;
+  // What each light client last kept (by keyOf): it changes only when that client catches up.
+  private kept = new Map<string, string>();
   // One verify (and its catch-up) at a time: catch-up resets and advances the one light client.
   private lock: Promise<unknown> = Promise.resolve();
   private cache = new Lru<Anchored>(8192);
@@ -87,30 +95,36 @@ export class Anchors {
 
   private restore(): Promise<void> {
     this.restored ??= (async () => {
-      const saved = await Promise.resolve(this.o.storage?.get(LIGHT_CLIENT_KEY)).catch(() => null);
-      // Kept committees are verified again from the checkpoint; a failure only means starting over.
-      if (saved) await this.o.backend.anchorRestore(saved, this.nowSec()).catch(() => undefined);
+      for (const lc of [undefined, 'sepolia', 'bnb'] as const) {
+        const saved = await Promise.resolve(this.o.storage?.get(keyOf(lc))).catch(() => null);
+        // Kept data is verified again from the start; a failure only means starting over.
+        if (saved) await this.o.backend.anchorRestore(saved, this.nowSec(), lc).catch(() => undefined);
+      }
     })();
     return this.restored;
   }
 
-  private async bootstrap(method?: string): Promise<void> {
-    const root = await this.o.checkpointRoot();
-    const reply = await this.o.rpc(1, 'willow_lightClientBootstrap', [root]);
+  /**
+   * The light client's bootstrap: Ethereum's on chain 1's route, another's on the verified chain's
+   * own route (where Willow serves that light client's data).
+   */
+  private async bootstrap(chainId: number, lc: LightClientName | undefined, method?: string): Promise<void> {
+    const root = await this.o.checkpointRoot(lc);
+    const reply = await this.o.rpc(lc ? chainId : 1, 'willow_lightClientBootstrap', [root]);
     if (reply.value.error) throw this.refused(reply, 'willow_lightClientBootstrap', method);
-    const r = await ran(this.o.backend.anchorBootstrap(reply.text, this.nowSec()), method);
+    const r = await ran(this.o.backend.anchorBootstrap(reply.text, this.nowSec(), lc), method);
     if (!r.ok) throw anchorFailure(r as AnchorFailure, method);
   }
 
-  private async updates(from: number, count: number, method?: string): Promise<void> {
+  private async updates(chainId: number, lc: LightClientName | undefined, from: number, count: number, method?: string): Promise<void> {
     if (!Number.isSafeInteger(from) || !Number.isSafeInteger(count) || from < 0 || count < 1) {
       throw new WillowVerificationError('internal', `the light client asked for periods ${from} (${count})`, method);
     }
     for (let left = count; left > 0; ) {
-      const k = Math.min(left, UPDATES_PER_ASK);
-      const reply = await this.o.rpc(1, 'willow_lightClientUpdates', [from, k]);
+      const k = Math.min(left, lc === 'bnb' ? BNB_UPDATES_PER_ASK : UPDATES_PER_ASK);
+      const reply = await this.o.rpc(lc ? chainId : 1, 'willow_lightClientUpdates', [from, k]);
       if (reply.value.error) throw this.refused(reply, 'willow_lightClientUpdates', method);
-      const r = await ran(this.o.backend.anchorUpdates(reply.text), method);
+      const r = await ran(this.o.backend.anchorUpdates(reply.text, lc), method);
       if (!r.ok) throw anchorFailure(r as AnchorFailure, method);
       if (r.period == null) throw new WillowUnverifiableError('anchor-unreachable', `Willow sent no light-client update for period ${from}`, method);
       from += k;
@@ -128,13 +142,14 @@ export class Anchors {
     const run = async (): Promise<AnchorVerified> => {
       await this.restore();
       let caughtUp = false;
+      const key = keyOf(lightClientOf(chainId));
       for (let round = 0; ; round++) {
-        const wantSaved = !!this.o.storage && (caughtUp || this.kept === null);
+        const wantSaved = !!this.o.storage && (caughtUp || !this.kept.has(key));
         const { result: r, saved } = await ran(this.o.backend.anchorVerify(chainId, number, hash, body, this.nowSec(), wantSaved), method);
         if (r.ok) {
-          if (saved && saved !== 'null' && saved !== this.kept) {
-            this.kept = saved;
-            void Promise.resolve(this.o.storage?.set(LIGHT_CLIENT_KEY, saved)).catch(() => undefined);
+          if (saved && saved !== 'null' && saved !== this.kept.get(key)) {
+            this.kept.set(key, saved);
+            void Promise.resolve(this.o.storage?.set(key, saved)).catch(() => undefined);
           }
           return r;
         }
@@ -142,8 +157,9 @@ export class Anchors {
         if (round >= CATCH_UP_ROUNDS) {
           throw new WillowUnverifiableError('anchor-unreachable', "Willow's light-client data did not reach the validators who signed this block", method);
         }
-        if (r.kind === 'need-bootstrap') await this.bootstrap(method);
-        else await this.updates(r.from as number, r.count as number, method);
+        const lc = r.lightClient;
+        if (r.kind === 'need-bootstrap') await this.bootstrap(chainId, lc, method);
+        else await this.updates(chainId, lc, r.from as number, r.count as number, method);
         caughtUp = true;
       }
     };
@@ -169,6 +185,7 @@ export class Anchors {
     if (r.level === 'final') return Infinity;
     if (r.level === 'committed') return now + this.o.headMaxAgeMs(chainId);
     if (chainId === 1) return r.headTime !== undefined ? (r.headTime + ETHEREUM_SIGNED_SECS) * 1000 : now + this.o.headMaxAgeMs(chainId);
+    if (r.path === 'parlia') return r.anchorTime !== undefined ? (r.anchorTime + BNB_SIGNED_SECS) * 1000 : now + this.o.headMaxAgeMs(chainId);
     return r.anchorTime !== undefined ? (r.anchorTime + L2_SIGNED_SECS) * 1000 : now + this.o.headMaxAgeMs(chainId);
   }
 
@@ -201,7 +218,7 @@ export class Anchors {
     // Ethereum's newest block at "final" is its finalized one; an L2 has no tag for a newer
     // block above "signed".
     const tag = which === 'latest' && chainId === 1 && this.o.minLevel !== 'signed' ? 'finalized' : which;
-    if (which === 'latest' && chainId !== 1 && this.o.minLevel !== 'signed') {
+    if (which === 'latest' && chainId !== 1 && !LATEST_IS_FINAL.has(chainId) && this.o.minLevel !== 'signed') {
       return Promise.reject(new WillowUnverifiableError('anchor-level', `chain ${chainId} has no newest block anchored at ${this.o.minLevel}; name a block`, method));
     }
     const key = `${chainId}:${which}`;
@@ -234,8 +251,9 @@ export class Anchors {
       }
       time = r.headTime;
     } else {
-      // Rule 1: an L2's newest block is the newest its sequencer signed, aged by its own timestamp.
-      time = r.path === 'sequencer' ? r.anchorTime : undefined;
+      // Rule 1: an L2's newest block is the newest its sequencer signed, aged by its own timestamp;
+      // BNB's is its newest finalized block, aged the same way.
+      time = r.path === 'sequencer' || r.path === 'parlia' ? r.anchorTime : undefined;
     }
     if (time === undefined) throw new WillowUnverifiableError('anchor-stale-head', `the anchor for "${tag}" on chain ${chainId} gives no time to bound its age`, method);
     const age = this.nowSec() - time;

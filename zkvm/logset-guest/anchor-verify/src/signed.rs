@@ -31,8 +31,9 @@ pub struct Sequenced {
     pub key: KeyOn,
 }
 
-/// Soneium, Zora and World Chain: their SystemConfigs as `willow-l2-heads` reads them (2026-11-12).
-pub const SEQUENCED: [Sequenced; 9] = [
+/// Soneium, Zora and World Chain, and the Sepolia testnets (keys on Sepolia): their SystemConfigs
+/// and SequencerInboxes as `willow-l2-heads` reads them (2026-11-12).
+pub const SEQUENCED: [Sequenced; 15] = [
     Sequenced {
         chain_id: 8453,
         name: "Base",
@@ -83,6 +84,42 @@ pub const SEQUENCED: [Sequenced; 9] = [
         chain_id: 480,
         name: "World Chain",
         key: KeyOn::SystemConfig(address!("6ab0777fD0e609CE58F939a7F70Fe41F5Aa6300A")),
+    },
+    Sequenced {
+        chain_id: 11155420,
+        name: "OP Sepolia",
+        key: KeyOn::SystemConfig(address!("034edD2A225f7f429A63E0f1D2084B9E0A93b538")),
+    },
+    Sequenced {
+        chain_id: 84532,
+        name: "Base Sepolia",
+        key: KeyOn::SystemConfig(address!("f272670eb55e895584501d564AfEB048bEd26194")),
+    },
+    Sequenced {
+        chain_id: 1301,
+        name: "Unichain Sepolia",
+        key: KeyOn::SystemConfig(address!("aeE94b9aB7752D3F7704bDE212c0C6A0b701571D")),
+    },
+    Sequenced {
+        chain_id: 763373,
+        name: "Ink Sepolia",
+        key: KeyOn::SystemConfig(address!("05C993e60179f28bF649a2Bb5b00b5F4283bD525")),
+    },
+    Sequenced {
+        chain_id: 421614,
+        name: "Arbitrum Sepolia",
+        key: KeyOn::SequencerInbox {
+            inbox: address!("6c97864CE4bEf387dE0b3310A44230f7E3F1be0D"),
+            first_block: 0,
+        },
+    },
+    Sequenced {
+        chain_id: 46630,
+        name: "Robinhood Chain testnet",
+        key: KeyOn::SequencerInbox {
+            inbox: address!("A0D9dB3DC9791D54b5183C1C1866eFe1eCA7D414"),
+            first_block: 0,
+        },
     },
 ];
 

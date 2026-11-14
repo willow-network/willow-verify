@@ -18,6 +18,7 @@
 
 pub mod bellatrix;
 mod bls;
+pub mod bnb;
 pub mod call;
 pub mod history;
 pub mod l2;
@@ -345,9 +346,31 @@ fn hash_arg(s: &str) -> Option<[u8; 32]> {
 
 /// The light client and its checks as JSON in, JSON out: `Anchor::new(checkpointRoot,
 /// checkpointSlot)`, then `restore`, `bootstrap`, `updates` and `verify` as the page fetches what
-/// `verify` says it needs.
+/// `verify` says it needs. The other light clients (`"sepolia"` for the chains that settle on
+/// Sepolia, `"bnb"` for BNB Smart Chain) start at the pins built in, or where `start` says, and
+/// take their data through the `*_for` methods.
 pub struct Anchor {
     lc: Option<LightClient>,
+    sepolia: LightClient,
+    bnb: bnb::Bnb,
+}
+
+/// The light clients besides Ethereum's, by the name a need-* failure gives as `lightClient`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Other {
+    Sepolia,
+    Bnb,
+}
+
+fn other(name: &str) -> Result<Other, Failure> {
+    match name {
+        "sepolia" => Ok(Other::Sepolia),
+        "bnb" => Ok(Other::Bnb),
+        _ => Err(Failure::new(
+            Kind::Internal,
+            format!("no light client {name:?} here"),
+        )),
+    }
 }
 
 fn out(r: Result<Value, Failure>) -> String {
@@ -365,6 +388,134 @@ impl Anchor {
             lc: hash_arg(checkpoint_root)
                 .zip(slot)
                 .map(|(r, s)| LightClient::new(r, s)),
+            sepolia: LightClient::on(
+                lc::Network::Sepolia,
+                lc::sepolia::PINNED_ROOT,
+                lc::sepolia::PINNED_SLOT,
+            ),
+            bnb: bnb::Bnb::default(),
+        }
+    }
+
+    /// Where light client `name` starts, in place of the pin built in (`"sepolia"`: `{root,
+    /// slot}`, a finalized block root; `"bnb"`: `{number, hash}`, an epoch block); forgets what it
+    /// had verified.
+    pub fn start(&mut self, name: &str, start: &str) -> String {
+        out((|| {
+            let v: Value = serde_json::from_str(start)
+                .map_err(|e| Failure::new(Kind::Internal, format!("the start: {e}")))?;
+            match other(name)? {
+                Other::Sepolia => {
+                    let root = v.get("root").and_then(Value::as_str).and_then(hash_arg);
+                    let slot = v.get("slot").and_then(Value::as_u64);
+                    let (Some(root), Some(slot)) = (root, slot) else {
+                        return Err(Failure::new(
+                            Kind::Internal,
+                            "a Sepolia start is {root, slot} of a finalized block",
+                        ));
+                    };
+                    self.sepolia = LightClient::on(lc::Network::Sepolia, root, slot);
+                }
+                Other::Bnb => {
+                    let s = bnb::start_of(&v).ok_or_else(|| {
+                        Failure::new(
+                            Kind::Internal,
+                            "a BNB start is {number, hash} of an epoch block",
+                        )
+                    })?;
+                    self.bnb = bnb::Bnb::new(s);
+                }
+            }
+            Ok(json!({"ok": true}))
+        })())
+    }
+
+    /// `bootstrap` for light client `name`.
+    pub fn bootstrap_for(&mut self, name: &str, response: &str, now: f64) -> String {
+        out((|| {
+            let v = result_of(response, "willow_lightClientBootstrap")?;
+            let p = match other(name)? {
+                Other::Sepolia => {
+                    self.sepolia.check_age(now as u64)?;
+                    self.sepolia.bootstrap(&v)?
+                }
+                Other::Bnb => self.bnb.bootstrap(&v, now as u64)?,
+            };
+            Ok(json!({"ok": true, "period": p}))
+        })())
+    }
+
+    /// `updates` for light client `name`: each verified and applied in order.
+    pub fn updates_for(&mut self, name: &str, response: &str) -> String {
+        out((|| {
+            let v = result_of(response, "willow_lightClientUpdates")?;
+            let o = other(name)?;
+            let max = match o {
+                Other::Sepolia => lc::MAX_UPDATES,
+                Other::Bnb => bnb::MAX_UPDATES,
+            };
+            let list = v.as_array().filter(|l| l.len() <= max).ok_or_else(|| {
+                Failure::new(
+                    Kind::MalformedInput,
+                    format!("updates are not a list of at most {max}"),
+                )
+            })?;
+            let mut newest = None;
+            for u in list {
+                newest = match o {
+                    Other::Sepolia => self.sepolia.apply_update(u)?,
+                    Other::Bnb => self.bnb.apply_update(u)?,
+                }
+                .or(newest);
+            }
+            Ok(json!({"ok": true, "period": newest}))
+        })())
+    }
+
+    /// `restore` for light client `name`.
+    pub fn restore_for(&mut self, name: &str, saved: &str, now: f64) -> String {
+        out((|| {
+            let v: Value = serde_json::from_str(saved).map_err(|e| {
+                Failure::new(Kind::MalformedInput, format!("the kept light client: {e}"))
+            })?;
+            let p = match other(name)? {
+                Other::Sepolia => self
+                    .sepolia
+                    .restore(&v, now as u64)
+                    .inspect_err(|_| self.sepolia.reset())?,
+                Other::Bnb => self
+                    .bnb
+                    .restore(&v, now as u64)
+                    .inspect_err(|_| self.bnb.reset())?,
+            };
+            Ok(json!({"ok": true, "period": p}))
+        })())
+    }
+
+    /// `saved` for light client `name`.
+    pub fn saved_for(&self, name: &str) -> String {
+        match other(name) {
+            Ok(Other::Sepolia) => self.sepolia.saved().to_string(),
+            Ok(Other::Bnb) => self.bnb.saved().to_string(),
+            Err(_) => "null".into(),
+        }
+    }
+
+    /// `reset` for light client `name`.
+    pub fn reset_for(&mut self, name: &str) {
+        match other(name) {
+            Ok(Other::Sepolia) => self.sepolia.reset(),
+            Ok(Other::Bnb) => self.bnb.reset(),
+            Err(_) => {}
+        }
+    }
+
+    /// The light client of the L1 chain `chain_id` settles on.
+    fn l1_client(&mut self, chain_id: u64) -> Result<&mut LightClient, Failure> {
+        if l2::on_sepolia(chain_id) {
+            Ok(&mut self.sepolia)
+        } else {
+            self.client()
         }
     }
 
@@ -438,9 +589,23 @@ impl Anchor {
             let want = hash_arg(hash)
                 .ok_or_else(|| Failure::new(Kind::Internal, "the block hash is not 32 bytes"))?;
             let v = result_of(response, "willow_getBlockAnchor")?;
+            if u64::from(chain_id) == bnb::CHAIN_ID {
+                let c = self.bnb.confirm(number as u64, &v, now as u64)?;
+                return Ok(json!({
+                    "ok": true,
+                    "level": c.level,
+                    "path": "parlia",
+                    "hash": format!("{}", B256::from(c.hash)),
+                    "matches": c.hash == want,
+                    "anchorBlock": c.anchor_block,
+                    "anchorTime": c.time,
+                    "signers": c.signers,
+                    "of": c.of,
+                }));
+            }
             if chain_id != 1 && v.get("signed").is_some() {
                 let c = signed::confirm_signed(
-                    self.client()?,
+                    self.l1_client(chain_id.into())?,
                     chain_id.into(),
                     number as u64,
                     &v,
@@ -463,7 +628,7 @@ impl Anchor {
                 .any(|c| c.chain_id == u64::from(chain_id))
             {
                 let c = l2::confirm_nitro(
-                    self.client()?,
+                    self.l1_client(chain_id.into())?,
                     chain_id.into(),
                     number as u64,
                     &v,
@@ -482,7 +647,7 @@ impl Anchor {
             }
             if chain_id != 1 {
                 let c = l2::confirm_op(
-                    self.client()?,
+                    self.l1_client(chain_id.into())?,
                     chain_id.into(),
                     number as u64,
                     &v,
@@ -540,6 +705,8 @@ impl Anchor {
     }
 }
 
+#[cfg(test)]
+mod bnb_tests;
 #[cfg(test)]
 mod chains_tests;
 #[cfg(test)]

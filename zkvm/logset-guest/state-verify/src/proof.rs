@@ -212,6 +212,59 @@ pub fn verify_many(
         .collect()
 }
 
+/// `given` (a proof that verified as `p` against `state_root`) with each list of nodes cut to the
+/// fewest, from its first, that still prove the same: where a key's walk leaves the trie at an
+/// extension node, reth's `eth_getMultiProof` adds that node's child after it, while
+/// `eth_getProof` (reth's and geth's) ends at the extension. A list no shorter part of proves it
+/// is kept whole, so the answer verifies as `given` does.
+pub fn shortest(state_root: B256, p: &Proven, given: &Value) -> Value {
+    let mut out = given.clone();
+    let account = p.exists.then(|| {
+        alloy_rlp::encode(TrieAccount {
+            nonce: p.nonce,
+            balance: p.balance,
+            storage_root: p.storage_root,
+            code_hash: p.code_hash,
+        })
+    });
+    if let Some(list) = out.get_mut("accountProof") {
+        cut(
+            list,
+            state_root,
+            Nibbles::unpack(keccak256(p.address)),
+            account,
+        );
+    }
+    for (i, (slot, value)) in p.slots.iter().enumerate() {
+        let list = out
+            .get_mut("storageProof")
+            .and_then(|s| s.get_mut(i))
+            .and_then(|s| s.get_mut("proof"));
+        if let Some(list) = list {
+            let value = (!value.is_zero()).then(|| alloy_rlp::encode(value));
+            cut(
+                list,
+                p.storage_root,
+                Nibbles::unpack(keccak256(slot)),
+                value,
+            );
+        }
+    }
+    out
+}
+
+/// `list` (a proof's nodes) cut to the fewest from its first that prove `value` at `key`.
+fn cut(list: &mut Value, root: B256, key: Nibbles, value: Option<Vec<u8>>) {
+    let Ok(all) = nodes(list) else {
+        return;
+    };
+    let fewest =
+        (1..all.len()).find(|&n| verify_proof(root, key, value.clone(), &all[..n]).is_ok());
+    if let (Some(n), Some(list)) = (fewest, list.as_array_mut()) {
+        list.truncate(n);
+    }
+}
+
 /// `code` is the code an account's proven code hash names.
 pub fn code_matches(account: &Proven, code: &[u8]) -> bool {
     match account.has_code() {

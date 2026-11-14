@@ -15,6 +15,8 @@ publish = false
 # Without its `bls` feature: its curve crate is the SP1 fork, which does not build for wasm32.
 anchor-core = { path = "../../anchor-guest/core", default-features = false }
 window-anchor-core = { path = "../../window-anchor-guest/core" }
+# BNB Smart Chain's headers, seals and votes, for its light client (bnb.rs).
+parlia-verify = { path = "../parlia" }
 beacon-cl-core = { path = "../../beacon-cl-guest/core" }
 alloy-primitives = { version = "1", features = ["k256"] }
 base64 = "0.22"
@@ -27,3 +29,7 @@ serde_json = "1"
 hex = "0.4"
 # Verified calls on Ethereum (call.rs): the EVM over proven state, pure Rust (k256 for ecrecover).
 revm = { version = "29.0.1", default-features = false, features = ["std", "optional_balance_check", "optional_block_gas_limit", "optional_eip3607", "optional_no_base_fee"] }
+
+[dev-dependencies]
+# parlia-verify's saved BNB headers.
+flate2 = "1"

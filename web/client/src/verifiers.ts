@@ -357,7 +357,15 @@ export interface AnchorFailure extends Failure<AnchorFailureKind> {
   /** `need-updates`: the first period and how many. */
   from?: number;
   count?: number;
+  /**
+   * `need-bootstrap` and `need-updates` of another light client than Ethereum's (#993, #994): its
+   * data is fetched on the verified chain's own route, with the `*For` methods.
+   */
+  lightClient?: LightClientName;
 }
+
+/** The anchor's light clients besides Ethereum's: Sepolia's (the testnets) and BNB's validators. */
+export type LightClientName = 'sepolia' | 'bnb';
 
 /**
  * A passing `Anchor.verify`, by path (anchor-verify lib.rs `Anchor::verify`):
@@ -371,7 +379,7 @@ export interface AnchorFailure extends Failure<AnchorFailureKind> {
 export interface AnchorVerified {
   ok: true;
   level: 'signed' | 'committed' | 'final';
-  path: 'head' | 'history' | 'beacon' | 'game' | 'assertion' | 'sequencer';
+  path: 'head' | 'history' | 'beacon' | 'game' | 'assertion' | 'sequencer' | 'parlia' | 'accumulator';
   /** Block `number`'s hash, as proven. */
   hash: string;
   /** Whether `hash` is the one passed in. */
@@ -386,6 +394,8 @@ export interface AnchorVerified {
   assertion?: string;
   signer?: string;
   l1Block?: number;
+  /** BNB (`parlia`): the validators who voted, of the set. */
+  of?: number;
 }
 
 /**
@@ -405,6 +415,17 @@ export interface Anchor {
   saved(): string;
   /** Forgets the committees, after a `need-bootstrap`. */
   reset(): void;
+  /**
+   * Additive (#993, #994): the other light clients. `start` sets where one starts (`sepolia`:
+   * `{root, slot}`; `bnb`: `{number, hash}` of an epoch block) in place of the pin built in; the
+   * rest are the methods above for it. A build before them has none.
+   */
+  start?(lightClient: LightClientName, start: string): JsonText;
+  bootstrapFor?(lightClient: LightClientName, response: string, now: number): JsonText;
+  updatesFor?(lightClient: LightClientName, response: string): JsonText;
+  restoreFor?(lightClient: LightClientName, saved: string, now: number): JsonText;
+  savedFor?(lightClient: LightClientName): string;
+  resetFor?(lightClient: LightClientName): void;
   free(): void;
 }
 
