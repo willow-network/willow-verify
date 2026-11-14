@@ -954,6 +954,114 @@ fn every_tampered_part_of_a_nitro_anchor_is_refused() {
     assert_eq!(kind(&r), "stale-head", "{r}");
 }
 
+const RH_DESCENT: &str =
+    include_str!("../../../../web/verify/test/anchor/descent-4663-92797219.json");
+
+/// Robinhood Chain's committed anchor of block 92,797,219, asked for block `92,797,219 - k` with
+/// `descent` (the headers below it, child first).
+fn rh_down(k: u64, descent: &[Value]) -> (u64, Value) {
+    let n = 92797219 - k;
+    let mut a = json_of(RH_COMMITTED);
+    a["blockNumber"] = Value::String(format!("0x{n:x}"));
+    a["descent"] = Value::Array(descent.to_vec());
+    (n, a)
+}
+
+fn hash_of_rlp(h: &Value) -> String {
+    let b = hex::decode(&h.as_str().unwrap()[2..]).unwrap();
+    format!("{}", alloy_primitives::keccak256(b))
+}
+
+#[test]
+fn a_header_descent_anchors_the_blocks_below_the_asserted_one() {
+    let d = json_of(RH_DESCENT);
+    assert_eq!(d["top"], 92797219);
+    let headers = d["descent"].as_array().unwrap().clone();
+    assert_eq!(headers.len(), 48);
+    // The descent's top is the anchor's asserted block.
+    let top = crate::l2::header(json_of(RH_COMMITTED)["headers"][0].as_str().unwrap()).unwrap();
+    assert_eq!(
+        format!("{}", alloy_primitives::B256::from(top.hash)),
+        d["topHash"].as_str().unwrap()
+    );
+    for k in [1u64, 10, 48] {
+        let (n, a) = rh_down(k, &headers[..k as usize]);
+        let want = hash_of_rlp(&headers[k as usize - 1]);
+        let r = verify_l2(4663, n, &want, &a);
+        assert_eq!(
+            (
+                r["ok"].as_bool(),
+                r["level"].as_str(),
+                r["matches"].as_bool()
+            ),
+            (Some(true), Some("committed"), Some(true)),
+            "{n}: {r}"
+        );
+        assert_eq!(r["hash"], want);
+        assert_eq!(r["anchorBlock"], 92797219);
+    }
+    // An empty descent changes nothing about the asserted block itself.
+    let (n, a) = rh_down(0, &[]);
+    let r = verify_l2(4663, n, HASH_RH_92797219, &a);
+    assert_eq!(
+        (r["ok"].as_bool(), r["matches"].as_bool()),
+        (Some(true), Some(true)),
+        "{r}"
+    );
+}
+
+#[test]
+fn every_broken_descent_is_refused() {
+    let headers = json_of(RH_DESCENT)["descent"].as_array().unwrap().clone();
+    let want = hash_of_rlp(&headers[19]);
+    let refused = |name: &str, k: u64, d: Vec<Value>, want_kind: &str| {
+        let (n, a) = rh_down(k, &d);
+        let r = verify_l2(4663, n, &want, &a);
+        assert_eq!(r["ok"].as_bool(), Some(false), "{name}: {r}");
+        assert!(want_kind.split('|').any(|k| k == kind(&r)), "{name}: {r}");
+    };
+    let mut swapped = headers[..20].to_vec();
+    swapped[5] = headers[30].clone();
+    refused(
+        "a header swapped for another block's",
+        20,
+        swapped,
+        "rejected",
+    );
+    let mut reordered = headers[..20].to_vec();
+    reordered.swap(3, 4);
+    refused("two headers reordered", 20, reordered, "rejected");
+    let mut dropped = headers[..21].to_vec();
+    dropped.remove(7);
+    refused("a header dropped", 20, dropped, "rejected");
+    let mut changed = headers[..20].to_vec();
+    changed[12] = Value::String(flip_at(changed[12].as_str().unwrap(), 300));
+    refused("a header changed", 20, changed, "rejected|malformed-input");
+    // Ending one block above the one asked for, with no proof from there.
+    refused(
+        "a descent ending at N + 1",
+        20,
+        headers[..19].to_vec(),
+        "malformed-input",
+    );
+    // Going on below the block asked for.
+    refused("a descent past N", 20, headers[..30].to_vec(), "rejected");
+    // Over the cap: not covered, before a header is read.
+    let over = vec![Value::String("0x00".into()); crate::l2::MAX_DESCENT + 1];
+    refused("a descent over the cap", 20, over, "not-covered");
+    let (n, mut a) = rh_down(20, &headers[..20]);
+    a["descent"] = Value::String("0x00".into());
+    assert_eq!(kind(&verify_l2(4663, n, &want, &a)), "malformed-input");
+    // Robinhood Chain's descent under Arbitrum One's asserted block: it does not link.
+    let mut arb = json_of(ARB_FINAL);
+    let m = crate::l2::header(arb["headers"][0].as_str().unwrap())
+        .unwrap()
+        .number;
+    arb["blockNumber"] = Value::String(format!("0x{:x}", m - 20));
+    arb["descent"] = Value::Array(headers[..20].to_vec());
+    assert_eq!(kind(&verify_l2(42161, m - 20, &want, &arb)), "rejected");
+}
+
 const BASE_SIGNED: &str = include_str!("../../../../web/verify/test/anchor/l2-8453-52840741.json");
 const ARB_SIGNED: &str = include_str!("../../../../web/verify/test/anchor/l2-42161-516491624.json");
 const RH_SIGNED: &str = include_str!("../../../../web/verify/test/anchor/l2-4663-93176007.json");

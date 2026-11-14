@@ -83,14 +83,16 @@ pub fn create_address(sender: &[u8; 20], nonce: u64) -> [u8; 20] {
 /// Blob gas per blob (EIP-4844).
 pub const GAS_PER_BLOB: u64 = 131_072;
 
-/// Ethereum mainnet's blob base fee update fraction by fork activation time:
-/// Cancun, Prague (Pectra), BPO1 and BPO2 (Fusaka's blob-parameter forks).
-/// A store's `blob_schedule` replaces it, so a new fork is a config change.
-const MAINNET_BLOB_FRACTIONS: [(u64, u64); 4] = [
-    (1_710_338_135, 3_338_477),
-    (1_746_612_311, 5_007_716),
-    (1_765_290_071, 8_346_193),
-    (1_767_747_671, 11_684_671),
+/// Ethereum mainnet's blob parameters by fork activation time (geth v1.17.10
+/// `params/chainspecs/mainnet.json` `blobSchedule`): Cancun, Prague (Pectra),
+/// BPO1 and BPO2 (Fusaka's blob-parameter forks), each `(at, target, max,
+/// update fraction)`. A store's `blob_schedule` replaces it, so a new fork is a
+/// config change.
+const MAINNET_BLOBS: [(u64, u64, u64, u64); 4] = [
+    (1_710_338_135, 3, 6, 3_338_477),
+    (1_746_612_311, 6, 9, 5_007_716),
+    (1_765_290_071, 10, 15, 8_346_193),
+    (1_767_747_671, 14, 21, 11_684_671),
 ];
 
 /// BNB Smart Chain's: Cancun's fraction from Cancun (Haber) on, kept through Prague and Osaka
@@ -98,7 +100,8 @@ const MAINNET_BLOB_FRACTIONS: [(u64, u64); 4] = [
 const BSC_BLOB_FRACTIONS: [(u64, u64); 1] = [(1_718_863_500, 3_338_477)];
 
 /// One blob-parameter fork: from `at` (unix seconds) on, blob prices use
-/// `update_fraction` (`BLOB_BASE_FEE_UPDATE_FRACTION`).
+/// `update_fraction` (`BLOB_BASE_FEE_UPDATE_FRACTION`), and a block's blobs
+/// aim at `target` and stop at `max` (EIP-7840's `blobSchedule`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlobFork {
     /// For the reader of the config only.
@@ -106,23 +109,60 @@ pub struct BlobFork {
     pub name: Option<String>,
     pub at: u64,
     pub update_fraction: u64,
+    /// Needed only for fee history and the next block's blob price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<u64>,
+}
+
+/// One fork's blob parameters, as [`BlobSchedule`] holds them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlobParams {
+    pub at: u64,
+    pub update_fraction: u64,
+    pub target: Option<u64>,
+    pub max: Option<u64>,
 }
 
 /// A chain's blob price schedule, oldest fork first; empty on a chain without blobs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct BlobSchedule(Arc<[(u64, u64)]>);
+pub struct BlobSchedule(Arc<[BlobParams]>);
 
 impl BlobSchedule {
     /// Ethereum mainnet's and BNB Smart Chain's built-in tables; no blobs on any other chain.
     pub fn builtin(chain_id: u64) -> Self {
         match chain_id {
-            1 => Self(MAINNET_BLOB_FRACTIONS.into()),
-            56 => Self(BSC_BLOB_FRACTIONS.into()),
+            1 => Self(
+                MAINNET_BLOBS
+                    .iter()
+                    .map(|&(at, target, max, update_fraction)| BlobParams {
+                        at,
+                        update_fraction,
+                        target: Some(target),
+                        max: Some(max),
+                    })
+                    .collect(),
+            ),
+            // Only the update fraction is known here; fee history and the next block's blob
+            // price need a target and max.
+            56 => Self(
+                BSC_BLOB_FRACTIONS
+                    .iter()
+                    .map(|&(at, update_fraction)| BlobParams {
+                        at,
+                        update_fraction,
+                        target: None,
+                        max: None,
+                    })
+                    .collect(),
+            ),
             _ => Self::default(),
         }
     }
 
-    /// `forks` with strictly increasing activation times and nonzero fractions.
+    /// `forks` with strictly increasing activation times, nonzero fractions and
+    /// `0 < target < max` where both are given.
     pub fn new(forks: &[BlobFork]) -> anyhow::Result<Self> {
         for f in forks {
             anyhow::ensure!(
@@ -130,6 +170,13 @@ impl BlobSchedule {
                 "blob_schedule: the fork at {} has update_fraction 0",
                 f.at
             );
+            if let (Some(t), Some(m)) = (f.target, f.max) {
+                anyhow::ensure!(
+                    0 < t && t < m,
+                    "blob_schedule: the fork at {} has target {t} and max {m}",
+                    f.at
+                );
+            }
         }
         for w in forks.windows(2) {
             anyhow::ensure!(
@@ -140,24 +187,38 @@ impl BlobSchedule {
             );
         }
         Ok(Self(
-            forks.iter().map(|f| (f.at, f.update_fraction)).collect(),
+            forks
+                .iter()
+                .map(|f| BlobParams {
+                    at: f.at,
+                    update_fraction: f.update_fraction,
+                    target: f.target,
+                    max: f.max,
+                })
+                .collect(),
         ))
+    }
+
+    /// The fork in force at `timestamp`; `None` before the first.
+    pub fn at(&self, timestamp: u64) -> Option<BlobParams> {
+        self.0.iter().rev().find(|f| timestamp >= f.at).copied()
     }
 
     /// The update fraction in force at `timestamp`; `None` before the first fork.
     pub fn fraction_at(&self, timestamp: u64) -> Option<u64> {
-        self.0
-            .iter()
-            .rev()
-            .find(|(at, _)| timestamp >= *at)
-            .map(|f| f.1)
+        self.at(timestamp).map(|f| f.update_fraction)
     }
 
     /// The blob base fee of a block (`blobGasPrice` of its blob receipts):
     /// `fake_exponential(1, excessBlobGas, fraction)` with the fraction in force
-    /// at `timestamp`; `None` before the first fork.
+    /// at `timestamp`; `None` before the first fork, and for an excess over
+    /// [`MAX_EXCESS_RATIO`] fractions, which no chain reaches and whose series
+    /// would run for as long as a forged header asks.
     pub fn price(&self, timestamp: u64, excess_blob_gas: u64) -> Option<U256> {
         let fraction = self.fraction_at(timestamp)?;
+        if excess_blob_gas / fraction > MAX_EXCESS_RATIO {
+            return None;
+        }
         Some(fake_exponential(
             U256::from(1u8),
             U256::from(excess_blob_gas),
@@ -165,6 +226,10 @@ impl BlobSchedule {
         ))
     }
 }
+
+/// The largest excess blob gas [`BlobSchedule::price`] prices, in update
+/// fractions: a blob base fee of about e^64 wei.
+pub const MAX_EXCESS_RATIO: u64 = 64;
 
 /// EIP-4844's `fake_exponential`.
 pub fn fake_exponential(factor: U256, numerator: U256, denominator: U256) -> U256 {
@@ -210,10 +275,12 @@ mod tests {
             name: None,
             at,
             update_fraction,
+            target: None,
+            max: None,
         };
-        let mut forks: Vec<BlobFork> = MAINNET_BLOB_FRACTIONS
+        let mut forks: Vec<BlobFork> = MAINNET_BLOBS
             .iter()
-            .map(|&(at, f)| fork(at, f))
+            .map(|&(at, _, _, f)| fork(at, f))
             .collect();
         forks.push(fork(1_800_000_000, 2 * 11_684_671));
         let s = BlobSchedule::new(&forks).unwrap();

@@ -189,6 +189,7 @@ pub fn run(
                     txs.as_ref().expect("a block proof's transactions"),
                 ));
             }
+            Subject::Block(_) => unreachable!("no CLI mode asks for a block proof"),
         }
         let mut out = serde_json::Map::new();
         for (what, answer, proven) in answers {

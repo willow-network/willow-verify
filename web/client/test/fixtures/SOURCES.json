@@ -1,0 +1,397 @@
+{
+ "note": "Copied with git show <commit>:<path>; the commit is the one that last changed the path, per notes/verify-every-response-build-2026-11-11.md appendix D.",
+ "files": [
+  {
+   "file": "anchor-tags/bootstrap.json",
+   "interface": "I5",
+   "branch": "feat/eth-anchor-latest-finalized",
+   "commit": "1f8bf9006c7f705a8593b1cdb561651c041a60ef",
+   "path": "web/verify/test/anchor/tags/bootstrap.json"
+  },
+  {
+   "file": "anchor-tags/checkpoint.json",
+   "interface": "I5",
+   "branch": "feat/eth-anchor-latest-finalized",
+   "commit": "1f8bf9006c7f705a8593b1cdb561651c041a60ef",
+   "path": "web/verify/test/anchor/tags/checkpoint.json"
+  },
+  {
+   "file": "anchor-tags/finalized-1.json",
+   "interface": "I5",
+   "branch": "feat/eth-anchor-latest-finalized",
+   "commit": "1f8bf9006c7f705a8593b1cdb561651c041a60ef",
+   "path": "web/verify/test/anchor/tags/finalized-1.json"
+  },
+  {
+   "file": "anchor-tags/latest-1.json",
+   "interface": "I5",
+   "branch": "feat/eth-anchor-latest-finalized",
+   "commit": "1f8bf9006c7f705a8593b1cdb561651c041a60ef",
+   "path": "web/verify/test/anchor/tags/latest-1.json"
+  },
+  {
+   "file": "anchor-tags/latest-10.json",
+   "interface": "I5",
+   "branch": "feat/eth-anchor-latest-finalized",
+   "commit": "1f8bf9006c7f705a8593b1cdb561651c041a60ef",
+   "path": "web/verify/test/anchor/tags/latest-10.json"
+  },
+  {
+   "file": "anchor-tags/latest-130.json",
+   "interface": "I5",
+   "branch": "feat/eth-anchor-latest-finalized",
+   "commit": "1f8bf9006c7f705a8593b1cdb561651c041a60ef",
+   "path": "web/verify/test/anchor/tags/latest-130.json"
+  },
+  {
+   "file": "anchor-tags/latest-42161.json",
+   "interface": "I5",
+   "branch": "feat/eth-anchor-latest-finalized",
+   "commit": "1f8bf9006c7f705a8593b1cdb561651c041a60ef",
+   "path": "web/verify/test/anchor/tags/latest-42161.json"
+  },
+  {
+   "file": "anchor-tags/latest-4663.json",
+   "interface": "I5",
+   "branch": "feat/eth-anchor-latest-finalized",
+   "commit": "1f8bf9006c7f705a8593b1cdb561651c041a60ef",
+   "path": "web/verify/test/anchor/tags/latest-4663.json"
+  },
+  {
+   "file": "anchor-tags/latest-57073.json",
+   "interface": "I5",
+   "branch": "feat/eth-anchor-latest-finalized",
+   "commit": "1f8bf9006c7f705a8593b1cdb561651c041a60ef",
+   "path": "web/verify/test/anchor/tags/latest-57073.json"
+  },
+  {
+   "file": "anchor-tags/latest-8453.json",
+   "interface": "I5",
+   "branch": "feat/eth-anchor-latest-finalized",
+   "commit": "1f8bf9006c7f705a8593b1cdb561651c041a60ef",
+   "path": "web/verify/test/anchor/tags/latest-8453.json"
+  },
+  {
+   "file": "anchor-tags/updates.json",
+   "interface": "I5",
+   "branch": "feat/eth-anchor-latest-finalized",
+   "commit": "1f8bf9006c7f705a8593b1cdb561651c041a60ef",
+   "path": "web/verify/test/anchor/tags/updates.json"
+  },
+  {
+   "file": "block/arbitrum-one-523278185.json",
+   "interface": "I1",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/block/arbitrum-one-523278185.json"
+  },
+  {
+   "file": "block/base-56049971.json",
+   "interface": "I1",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/block/base-56049971.json"
+  },
+  {
+   "file": "block/ethereum-1500000-uncles-unproven.json",
+   "interface": "I1",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/block/ethereum-1500000-uncles-unproven.json"
+  },
+  {
+   "file": "block/ethereum-1500000.json",
+   "interface": "I1",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/block/ethereum-1500000.json"
+  },
+  {
+   "file": "block/ethereum-17034874.json",
+   "interface": "I1",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/block/ethereum-17034874.json"
+  },
+  {
+   "file": "block/ethereum-26391511.json",
+   "interface": "I1",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/block/ethereum-26391511.json"
+  },
+  {
+   "file": "block/ink-60901963.json",
+   "interface": "I1",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/block/ink-60901963.json"
+  },
+  {
+   "file": "block/op-159400794.json",
+   "interface": "I1",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/block/op-159400794.json"
+  },
+  {
+   "file": "block/robinhood-111702114.json",
+   "interface": "I1",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/block/robinhood-111702114.json"
+  },
+  {
+   "file": "block/unichain-63652013.json",
+   "interface": "I1",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/block/unichain-63652013.json"
+  },
+  {
+   "file": "fees/arbitrum-one-523278185-16.history.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/arbitrum-one-523278185-16.history.json"
+  },
+  {
+   "file": "fees/arbitrum-one-523278185-4.history.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/arbitrum-one-523278185-4.history.json"
+  },
+  {
+   "file": "fees/arbitrum-one-523278185.fee.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/arbitrum-one-523278185.fee.json"
+  },
+  {
+   "file": "fees/base-56049971-16.history.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/base-56049971-16.history.json"
+  },
+  {
+   "file": "fees/base-56049971-4.history.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/base-56049971-4.history.json"
+  },
+  {
+   "file": "fees/base-56049971.fee.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/base-56049971.fee.json"
+  },
+  {
+   "file": "fees/ethereum-26391511-1.history.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/ethereum-26391511-1.history.json"
+  },
+  {
+   "file": "fees/ethereum-26391511-16.history.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/ethereum-26391511-16.history.json"
+  },
+  {
+   "file": "fees/ethereum-26391511.fee.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/ethereum-26391511.fee.json"
+  },
+  {
+   "file": "fees/ink-60901963-16.history.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/ink-60901963-16.history.json"
+  },
+  {
+   "file": "fees/ink-60901963-4.history.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/ink-60901963-4.history.json"
+  },
+  {
+   "file": "fees/ink-60901963.fee.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/ink-60901963.fee.json"
+  },
+  {
+   "file": "fees/op-159400794-16.history.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/op-159400794-16.history.json"
+  },
+  {
+   "file": "fees/op-159400794-2.history.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/op-159400794-2.history.json"
+  },
+  {
+   "file": "fees/op-159400794.fee.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/op-159400794.fee.json"
+  },
+  {
+   "file": "fees/robinhood-111702114-16.history.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/robinhood-111702114-16.history.json"
+  },
+  {
+   "file": "fees/robinhood-111702114-4.history.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/robinhood-111702114-4.history.json"
+  },
+  {
+   "file": "fees/robinhood-111702114.fee.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/robinhood-111702114.fee.json"
+  },
+  {
+   "file": "fees/unichain-63652013-16.history.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/unichain-63652013-16.history.json"
+  },
+  {
+   "file": "fees/unichain-63652013-4.history.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/unichain-63652013-4.history.json"
+  },
+  {
+   "file": "fees/unichain-63652013.fee.json",
+   "interface": "I4",
+   "branch": "feat/blockproof-block-fee-proofs",
+   "commit": "bacac24166bba5b1df80c1313d912bd8686e74c9",
+   "path": "zkvm/logset-guest/blockproof/fixtures/fees/unichain-63652013.fee.json"
+  },
+  {
+   "file": "state/absent.json",
+   "interface": "I2",
+   "branch": "feat/state-verify-crate",
+   "commit": "8f6e62f77c000256338ddb817a48cf37bd5203ee",
+   "path": "zkvm/logset-guest/state-verify/testdata/state/absent.json"
+  },
+  {
+   "file": "state/base-usdc.json",
+   "interface": "I2",
+   "branch": "feat/state-verify-crate",
+   "commit": "8f6e62f77c000256338ddb817a48cf37bd5203ee",
+   "path": "zkvm/logset-guest/state-verify/testdata/state/base-usdc.json"
+  },
+  {
+   "file": "state/eoa.json",
+   "interface": "I2",
+   "branch": "feat/state-verify-crate",
+   "commit": "8f6e62f77c000256338ddb817a48cf37bd5203ee",
+   "path": "zkvm/logset-guest/state-verify/testdata/state/eoa.json"
+  },
+  {
+   "file": "state/usdc-slots-code.json",
+   "interface": "I2",
+   "branch": "feat/state-verify-crate",
+   "commit": "8f6e62f77c000256338ddb817a48cf37bd5203ee",
+   "path": "zkvm/logset-guest/state-verify/testdata/state/usdc-slots-code.json"
+  },
+  {
+   "file": "call/call-blockhash.json",
+   "interface": "I3",
+   "branch": "feat/state-verify-crate",
+   "commit": "8f6e62f77c000256338ddb817a48cf37bd5203ee",
+   "path": "zkvm/logset-guest/state-verify/testdata/call/call-blockhash.json"
+  },
+  {
+   "file": "call/call-revert.json",
+   "interface": "I3",
+   "branch": "feat/state-verify-crate",
+   "commit": "8f6e62f77c000256338ddb817a48cf37bd5203ee",
+   "path": "zkvm/logset-guest/state-verify/testdata/call/call-revert.json"
+  },
+  {
+   "file": "call/call-usdc-balance.json",
+   "interface": "I3",
+   "branch": "feat/state-verify-crate",
+   "commit": "8f6e62f77c000256338ddb817a48cf37bd5203ee",
+   "path": "zkvm/logset-guest/state-verify/testdata/call/call-usdc-balance.json"
+  },
+  {
+   "file": "call/estimate-creation.json",
+   "interface": "I3",
+   "branch": "feat/state-verify-crate",
+   "commit": "8f6e62f77c000256338ddb817a48cf37bd5203ee",
+   "path": "zkvm/logset-guest/state-verify/testdata/call/estimate-creation.json"
+  },
+  {
+   "file": "call/estimate-out-of-gas.json",
+   "interface": "I3",
+   "branch": "feat/state-verify-crate",
+   "commit": "8f6e62f77c000256338ddb817a48cf37bd5203ee",
+   "path": "zkvm/logset-guest/state-verify/testdata/call/estimate-out-of-gas.json"
+  },
+  {
+   "file": "call/estimate-revert.json",
+   "interface": "I3",
+   "branch": "feat/state-verify-crate",
+   "commit": "8f6e62f77c000256338ddb817a48cf37bd5203ee",
+   "path": "zkvm/logset-guest/state-verify/testdata/call/estimate-revert.json"
+  },
+  {
+   "file": "call/estimate-transfer.json",
+   "interface": "I3",
+   "branch": "feat/state-verify-crate",
+   "commit": "8f6e62f77c000256338ddb817a48cf37bd5203ee",
+   "path": "zkvm/logset-guest/state-verify/testdata/call/estimate-transfer.json"
+  },
+  {
+   "file": "call/estimate-uniswap-swap.json",
+   "interface": "I3",
+   "branch": "feat/state-verify-crate",
+   "commit": "8f6e62f77c000256338ddb817a48cf37bd5203ee",
+   "path": "zkvm/logset-guest/state-verify/testdata/call/estimate-uniswap-swap.json"
+  },
+  {
+   "file": "call/estimate-usdc-transfer.json",
+   "interface": "I3",
+   "branch": "feat/state-verify-crate",
+   "commit": "8f6e62f77c000256338ddb817a48cf37bd5203ee",
+   "path": "zkvm/logset-guest/state-verify/testdata/call/estimate-usdc-transfer.json"
+  },
+  {
+   "file": "call/estimate-weth-deposit.json",
+   "interface": "I3",
+   "branch": "feat/state-verify-crate",
+   "commit": "8f6e62f77c000256338ddb817a48cf37bd5203ee",
+   "path": "zkvm/logset-guest/state-verify/testdata/call/estimate-weth-deposit.json"
+  }
+ ]
+}

@@ -404,7 +404,11 @@ impl<'a> View<'a> {
         put(&mut o, "blockNumber", q(ctx.number));
         put(&mut o, "blockTimestamp", q(ctx.timestamp));
         match self.millis {
-            Millis::Known(ms) => put(&mut o, "blockTimestampMs", q(ctx.timestamp * 1_000 + ms)),
+            Millis::Known(ms) => put(
+                &mut o,
+                "blockTimestampMs",
+                q(ctx.timestamp.saturating_mul(1_000).saturating_add(ms)),
+            ),
             Millis::Unknown => unproven.push("blockTimestampMs".to_string()),
             Millis::None => {}
         }
@@ -774,7 +778,11 @@ fn log_json(
     put(&mut o, "blockHash", hx(&ctx.hash));
     put(&mut o, "blockTimestamp", q(ctx.timestamp));
     if let Some(ms) = millis {
-        put(&mut o, "blockTimestampMs", q(ctx.timestamp * 1_000 + ms));
+        put(
+            &mut o,
+            "blockTimestampMs",
+            q(ctx.timestamp.saturating_mul(1_000).saturating_add(ms)),
+        );
     }
     if let Some(h) = tx_hash {
         put(&mut o, "transactionHash", hx(&h));

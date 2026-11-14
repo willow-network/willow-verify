@@ -1,6 +1,6 @@
 // Runs the wasm verifiers off the main thread: the log verifier (SP1 proofs, and every check of
-// an answer but the OpenVM proofs' own), its OpenVM proof module, and the transaction and receipt
-// verifier, each loaded on first use. The OpenVM module loads when an answer's proofs include an
+// an answer but the OpenVM proofs' own), its OpenVM proof module, the transaction, receipt, block
+// and fee verifier, and the state, call and estimate verifier, each loaded on first use. The OpenVM module loads when an answer's proofs include an
 // OpenVM one; the log verifier calls it for each such proof, under the key it chose. `response` is
 // a JSON-RPC response body as the server sent it (the wasm parses it; the page never re-serialises
 // server data). Requests are answered in order. Messages:
@@ -9,10 +9,16 @@
 //   {type:'verify', response, filter, ids, proofs: {id: bytes}} -> {type:'checked', id, ms, error, system}* then {type:'verified', report, logs} | {type:'error'}
 //     (system: 'sp1' or 'openvm', the proof's own, read from its bytes in the wasm)
 //   {type:'compare', response}                                  -> {type:'compared', result} | {type:'error'}
-// Transaction and receipt proofs (no init needed):
+// Transaction, receipt, block and fee proofs (no init needed; kind: transaction, receipt,
+// blockReceipts, block, fees, feeHistory):
 //   {type:'items-request', chainId, kind, target}               -> {type:'items-requested', method, params} | {type:'error'}
 //   {type:'items-verify', response}                             -> {type:'items-verified', report, proven, transactions, transaction, transactionUnproven} | {type:'error'}
+//   {type:'items-block', full}                                  -> {type:'items-block', proven, unproven} | {type:'error'} (the last block proof verified)
 //   {type:'items-compare', which, response}                     -> {type:'compared', result} | {type:'error'}
+// State, call and estimate proofs (kind: state, call, estimate; target: the proof method's params as JSON text):
+//   {type:'state-request', chainId, kind, target}               -> {type:'state-requested', method, params} | {type:'error'}
+//   {type:'state-verify', response}                             -> {type:'state-verified', report, proven} | {type:'error'}
+//   {type:'state-compare', method, response}                    -> {type:'compared', result} | {type:'error'}
 // Block confirmation on Ethereum (every message carries checkpoint: {root, slot} and now, in seconds):
 //   {type:'anchor-restore', saved}                              -> {type:'anchor-done', result} | {type:'error'} (saved: verified again)
 //   {type:'anchor-bootstrap', response}                         -> {type:'anchor-done', result} | {type:'error'}
@@ -20,7 +26,8 @@
 //   {type:'anchor-verify', chainId, number, hash, response}     -> {type:'anchor-verified', result, saved} | {type:'error'}
 //     result.ok, or result.kind 'need-bootstrap' / 'need-updates' (from, count): what to fetch first.
 // Errors carry the verifier's kind: 'rejected' or 'malformed-input' (Willow's answer failed a
-// check), 'invalid-filter', 'invalid-keys', 'invalid-request' (what was typed), 'unknown-fork',
+// check; an items error also carries the 'fault' that failed; a state error's kind is what failed,
+// such as 'account', 'slot', 'outcome'), 'invalid-filter', 'invalid-keys', 'invalid-request' (what was typed), 'unknown-fork',
 // 'stale-checkpoint', 'unreachable', 'stale-head' (the light client cannot start, follow or say); or 'internal' when
 // something threw (out of memory, a wasm trap, the module not loading). The verifier returns its
 // verdicts and never throws them, so 'internal' is never a verdict on an answer, though a very
@@ -29,6 +36,7 @@
 import initLogs, { Verifier } from './__GLUE__';
 import initOpenVm, { OpenVmVerifier } from './__OPENVM_GLUE__';
 import initItems, { ItemVerifier } from './__ITEMS_GLUE__';
+import initState, { StateVerifier } from './__STATE_GLUE__';
 import initAnchor, { Anchor } from './__ANCHOR_GLUE__';
 
 // Proofs that passed in the last check, for a repeat check of the same blocks. A new check
@@ -39,12 +47,14 @@ let verifier = null;
 // The OpenVM proof check, made once: it holds the pinned verifying keys.
 let openvm = null;
 let items = null;
+let state = null;
 // Ethereum's light client: the committees it verified live as long as the worker.
 let anchor = null;
 // Each module loads once, when a message first needs it. Every message awaits its module and reports a failed load.
 let logsReady = null;
 let openvmReady = null;
 let itemsReady = null;
+let stateReady = null;
 let anchorReady = null;
 const logsModule = () => (logsReady ??= initLogs({ module_or_path: new URL('./__WASM__', import.meta.url) }));
 const openvmModule = () => (openvmReady ??= initOpenVm({ module_or_path: new URL('./__OPENVM_WASM__', import.meta.url) }));
@@ -68,12 +78,14 @@ async function openvmCheck() {
   return openvm;
 }
 const itemsModule = () => (itemsReady ??= initItems({ module_or_path: new URL('./__ITEMS_WASM__', import.meta.url) }));
+const stateModule = () => (stateReady ??= initState({ module_or_path: new URL('./__STATE_WASM__', import.meta.url) }));
 const anchorModule = () => (anchorReady ??= initAnchor({ module_or_path: new URL('./__ANCHOR_WASM__', import.meta.url) }));
-const moduleFor = (type) => (type.startsWith('items-') ? itemsModule() : type.startsWith('anchor-') ? anchorModule() : logsModule());
+const moduleFor = (type) =>
+  type.startsWith('items-') ? itemsModule() : type.startsWith('state-') ? stateModule() : type.startsWith('anchor-') ? anchorModule() : logsModule();
 
 const text = (e) => String(e && e.message ? e.message : e);
 const crashed = (step, e) => postMessage({ type: 'error', step, kind: 'internal', message: text(e) });
-const refused = (step, r) => postMessage({ type: 'error', step, kind: r.kind, message: r.message });
+const refused = (step, r) => postMessage({ type: 'error', step, kind: r.kind, message: r.message, ...(r.fault ? { fault: r.fault } : {}) });
 
 // One message at a time, in order: each waits for the one before it.
 let queue = Promise.resolve();
@@ -180,6 +192,40 @@ async function handle(m) {
       else refused('items-compare', r);
     } catch (e) {
       crashed('items-compare', e);
+    }
+  } else if (m.type === 'items-block') {
+    try {
+      const r = JSON.parse(items.block(!!m.full));
+      if (r.ok) postMessage({ type: 'items-block', proven: r.proven, unproven: r.unproven });
+      else refused('items-block', r);
+    } catch (e) {
+      crashed('items-block', e);
+    }
+  } else if (m.type === 'state-request') {
+    try {
+      if (state) state.free();
+      state = new StateVerifier(m.chainId);
+      const r = JSON.parse(state.request(m.kind, m.target));
+      if (r.ok) postMessage({ type: 'state-requested', method: r.method, params: r.params });
+      else refused('state-request', r);
+    } catch (e) {
+      crashed('state-request', e);
+    }
+  } else if (m.type === 'state-verify') {
+    try {
+      const r = JSON.parse(state.verify(m.response));
+      if (r.ok) postMessage({ type: 'state-verified', report: r.report, proven: r.proven });
+      else refused('state-verify', r);
+    } catch (e) {
+      crashed('state-verify', e);
+    }
+  } else if (m.type === 'state-compare') {
+    try {
+      const r = JSON.parse(state.compare(m.method, m.response));
+      if (r.ok) postMessage({ type: 'compared', result: r.result });
+      else refused('state-compare', r);
+    } catch (e) {
+      crashed('state-compare', e);
     }
   }
 }

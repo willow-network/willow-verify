@@ -564,7 +564,7 @@ function settle(wk, m) {
   if (m.step === 'verify' || m.kind === 'internal') stopWorker(wk.w);
   // The worker's kind decides; the message is only shown (it can carry server text).
   if (m.kind === 'invalid-keys') head.reject(new CheckError(`The program keys under Advanced are not valid: ${m.message}`, { stage: m.step, kind: m.kind }));
-  else head.reject(new CheckError(m.message, { stage: m.step, kind: m.kind }));
+  else head.reject(new CheckError(m.message, { stage: m.step, kind: m.kind, fault: m.fault }));
 }
 
 /// The worker could not run: every open request fails as the browser's failure.
@@ -1141,12 +1141,13 @@ function readCommon() {
   return { ch, endpoint, nodes: nodesFor(ch, node), other };
 }
 
-/// The checked kind: logs, transaction, receipt or blockReceipts.
+/// The checked kind: logs, receipt (a transaction), blockReceipts, block, account, call or fees.
 const kindOf = () => (document.querySelector('input[name=kind]:checked') || { value: 'logs' }).value;
 
 async function run(ev) {
   ev && ev.preventDefault();
-  return kindOf() === 'logs' ? runLogs() : runItems();
+  const kind = kindOf();
+  return kind === 'logs' ? runLogs() : isProofKind(kind) ? runProof() : runItems();
 }
 
 /// The nodes that confirm a block: the one entered; else none on a chain the browser confirms
@@ -2134,6 +2135,502 @@ function downloadItems() {
   saveJson(lastItems.json, lastItems.name);
 }
 
+// ---------- block, account, call and fee proofs ----------
+
+/// What a proof of each kind verifies, for What this verifies.
+const PROOF_KINDS = {
+  block: {
+    coverage: 'Proven: every field of the block as eth_getBlockByNumber returns it, with every transaction in it. The header hashes to the block hash, the transactions, withdrawals and uncles rebuild its roots, and each sender is recovered from its signature in your browser. totalDifficulty is left out: no block commits to it.',
+  },
+  account: {
+    coverage: "Proven: the account's balance, nonce, code and each storage slot asked for, by its path in the state trie of a header that hashes to the block hash. An account that does not exist is proven absent: every value zero, no code.",
+  },
+  call: {
+    coverage: 'Proven: your browser ran the call in its own EVM over every account, storage slot and code it reads, each proven against the state root of a header that hashes to the block hash. The result is its own run, as geth runs eth_call. A read the proof does not hold fails verification.',
+  },
+  estimate: {
+    coverage: "Proven: your browser ran geth's gas estimation (v1.17.10) in its own EVM over every account, storage slot and code it reads, each proven against the state root of a header that hashes to the block hash, and the call succeeds with the gas found. The estimate is its own search's.",
+  },
+  fees: {
+    coverage: "Proven: the headers and transactions the fee formula reads, against block hashes chained by their parent hashes up to the block. Your browser computes eth_gasPrice, eth_maxPriorityFeePerGas and eth_blobBaseFee from them itself, by the published formula willow-fee-v1. On Ethereum it samples 4 blocks where geth samples 20, and it prices the next block's base fee, so a node's own suggestion can differ.",
+  },
+};
+const isProofKind = (k) => k === 'block' || k === 'account' || k === 'call' || k === 'fees';
+/// State kinds a failed state proof reports: what failed, never the page's or the browser's fault.
+const STATE_FAILED = new Set(['malformed', 'wrong-chain', 'header', 'wrong-block', 'limits', 'account', 'slot', 'code', 'history', 'missing-read', 'outcome', 'estimate', 'algorithm']);
+/// Storage slots one account check asks for (the server's limit is 256), and compares one by one.
+const MAX_SLOTS = 64;
+const COMPARED_SLOTS = 16;
+
+/// A block typed for an account or a call, as the proof methods read it: a 0x number, latest, or {blockHash}.
+function stateBlock(text) {
+  const s = (text || '').trim() || 'latest';
+  if (s === 'latest') return 'latest';
+  if (TX_HASH.test(s)) return { blockHash: s.toLowerCase() };
+  if (/^\d{1,15}$/.test(s)) return toHex(Number(s));
+  if (/^0x[0-9a-fA-F]{1,13}$/.test(s)) return toHex(hexNum(s));
+  throw new CheckError('Enter a block: its number, its hash, or latest.');
+}
+
+/// A block typed for a block or fee proof: as typed (the verifier reads it), latest when empty.
+const itemBlock = (text) => (text || '').trim() || 'latest';
+
+/// The slots typed: 0x keys, separated by commas or spaces.
+function slotsOf(text) {
+  const list = (text || '').split(/[\s,]+/).filter(Boolean);
+  if (list.length > MAX_SLOTS) throw new CheckError(`Ask for at most ${MAX_SLOTS} storage slots at once.`);
+  for (const k of list) if (!/^0x[0-9a-fA-F]{1,64}$/.test(k)) throw new CheckError(`${k.slice(0, 80)} is not a storage slot: a 0x number of at most 32 bytes.`);
+  return [...new Set(list.map((k) => k.toLowerCase()))];
+}
+
+/// The call object typed, as JSON.
+function callOf(text) {
+  let c;
+  try {
+    c = JSON.parse(text);
+  } catch {
+    throw new CheckError('The call is not JSON: write it as eth_call takes it, such as {"to": "0x…", "data": "0x…"}.');
+  }
+  if (!c || typeof c !== 'object' || Array.isArray(c)) throw new CheckError('The call is a JSON object, such as {"to": "0x…", "data": "0x…"}.');
+  return c;
+}
+
+/// A JSON value as base64url, for a link, and back.
+const toB64url = (v) => btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(v)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+function fromB64url(s) {
+  const b = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+  return JSON.parse(new TextDecoder().decode(Uint8Array.from(b, (c) => c.charCodeAt(0))));
+}
+
+/// A comparison in a few words, for its step.
+function responseText(c) {
+  if (c.absent) return 'It responded null: it does not report what the proof shows.';
+  if (c.exact) return c.matched ? `Matches the proven response (${n(c.matched)} value${c.matched === 1 ? '' : 's'}).` : 'Matches the proven response.';
+  return `${n(c.differCount)} proven value${c.differCount === 1 ? '' : 's'} reported differently or left out.`;
+}
+
+/// A state comparison ({exact, differ}) in the shape of an items one.
+const asComparison = (c) => ({ exact: c.exact, absent: false, matched: 0, differ: c.differ, differCount: c.differ.length, unproven: [], omitted: [] });
+
+/// Another server's response to `method` `params`, compared in the worker with the proven one:
+/// { result } | { problem } (it could not be fetched, or refused) | { unreadable }.
+async function compareProof(url, method, params, msg) {
+  let text;
+  try {
+    ({ text } = await rpc(url, method, params));
+  } catch (e) {
+    if (isRuntimeFailure(e)) throw e;
+    return { problem: e.message };
+  }
+  try {
+    const r = (await ask({ ...msg, response: text })).result;
+    return { result: msg.type === 'state-compare' ? asComparison(r) : r };
+  } catch (e) {
+    if (e.kind === 'malformed-input' || e.kind === 'malformed') return { unreadable: e.message };
+    throw e;
+  }
+}
+
+function showResponseDiffs(diffs) {
+  if (!diffs.length) return;
+  const lines = [];
+  for (const [who, c] of diffs) {
+    if (c.absent) {
+      lines.push(`${who}: null, where the proof shows a value`);
+      continue;
+    }
+    lines.push(`${who}:`);
+    for (const d of c.differ) lines.push(`  differs: ${d}`);
+    if (c.differCount > c.differ.length) lines.push(`  … and ${c.differCount - c.differ.length} more`);
+    for (const u of c.unproven) lines.push(`  not covered by the proof: ${u}`);
+    for (const o of c.omitted) lines.push(`  left out, as some nodes do: ${o}`);
+  }
+  $('diffText').textContent = '"Differs" is a proven value the response reports differently or leaves out. Fields not covered by the proof are listed, never counted against the response.';
+  $('diffBody').textContent = lines.join('\n');
+  $('diff').hidden = false;
+}
+
+/// What the form asks for, read: the proof's kind for the worker, its target, and the standard
+/// methods whose responses are compared with the proven ones ([key, label, method, params, compare message]).
+function readProof(kind, ch, endpoint) {
+  if (kind === 'block') {
+    return { module: 'items', kind: 'block', target: itemBlock($('item').value), label: 'The block' };
+  }
+  if (kind === 'fees') {
+    return { module: 'items', kind: 'fees', target: itemBlock($('at').value), label: 'The block' };
+  }
+  if (isPublic(endpoint)) {
+    throw new CheckError(`Willow proves ${kind === 'account' ? 'accounts' : 'calls'} only for an API key: under Advanced, enter your Willow RPC endpoint ending in your key.`);
+  }
+  const at = stateBlock($('at').value);
+  if (kind === 'account') {
+    const address = $('address').value.trim();
+    if (!ADDRESS.test(address)) throw new CheckError('Enter an account address: 0x and 40 hex digits.');
+    const slots = slotsOf($('slots').value);
+    return { module: 'state', kind: 'state', target: JSON.stringify([address.toLowerCase(), slots, at, { code: true }]), address: address.toLowerCase(), slots, at, label: 'The block' };
+  }
+  if (ch.id !== 1) throw new CheckError(`Calls are verified on Ethereum only: Willow does not run ${ch.name}'s EVM. Choose Ethereum.`);
+  const call = callOf($('call').value);
+  const estimate = $('estimate').checked;
+  return { module: 'state', kind: estimate ? 'estimate' : 'call', target: JSON.stringify([call, at]), call, at, label: 'The block' };
+}
+
+/// The standard methods compared with the proven response, at the proven block.
+function comparisons(p, rep) {
+  const at = { blockHash: rep.block.hash };
+  if (p.kind === 'block') {
+    return [
+      ['eth_getBlockByHash', [rep.block.hash, false], { type: 'items-compare', which: 'answer' }],
+      ['eth_getBlockByHash (full)', [rep.block.hash, true], { type: 'items-compare', which: 'transactions' }],
+    ];
+  }
+  if (p.kind === 'fees') {
+    // The standard fee methods take no block: they price the server's newest block, which a moment
+    // later may be another, so only another provider's are compared (and not counted against Willow).
+    return [];
+  }
+  if (p.kind === 'state') {
+    const out = [
+      ['eth_getBalance', [p.address, at], { type: 'state-compare', method: 'eth_getBalance' }],
+      ['eth_getTransactionCount', [p.address, at], { type: 'state-compare', method: 'eth_getTransactionCount' }],
+      ['eth_getCode', [p.address, at], { type: 'state-compare', method: 'eth_getCode' }],
+    ];
+    p.slots.slice(0, COMPARED_SLOTS).forEach((k, i) => out.push([`eth_getStorageAt ${shortHash(k)}`, [p.address, k, at], { type: 'state-compare', method: `eth_getStorageAt:${i}` }]));
+    out.push(['eth_getProof', [p.address, p.slots, at], { type: 'state-compare', method: 'eth_getProof' }]);
+    return out;
+  }
+  const method = p.kind === 'call' ? 'eth_call' : 'eth_estimateGas';
+  return [[method, [p.call, at], { type: 'state-compare', method }]];
+}
+
+/// The fee methods of another provider, against the formula's values.
+const FEE_METHODS = ['eth_gasPrice', 'eth_maxPriorityFeePerGas', 'eth_blobBaseFee'];
+
+async function runProof() {
+  $('formError').textContent = '';
+  const kind = kindOf();
+  let ch, endpoint, nodes, other, p;
+  try {
+    ({ ch, endpoint, nodes, other } = readCommon());
+    p = readProof(kind, ch, endpoint);
+  } catch (e) {
+    $('formError').textContent = e.message;
+    return;
+  }
+  remember();
+  checkLink =
+    p.kind === 'block' ? { ch, block: p.target } : p.kind === 'state' ? { ch, address: p.address, slots: p.slots, at: $('at').value.trim() } : p.kind === 'call' ? { ch, call: p.call, at: $('at').value.trim() } : null;
+  $('run').disabled = true;
+  $('result').hidden = true;
+  const list = [
+    ['proof', 'Proof from Willow'],
+    ['verify', p.module === 'state' ? (p.kind === 'state' ? "Verifying the account against the block's state root" : `${p.kind === 'call' ? 'Running the call' : 'Estimating its gas'} over proven state`) : p.kind === 'fees' ? 'Verifying the blocks and computing the fees' : 'Verifying the block against its hash'],
+  ];
+  setupSteps(list);
+  const t0 = performance.now();
+  const facts = [];
+  let current = 'proof';
+  lastItems = null;
+  try {
+    step('proof', 'active', 'Asking Willow…');
+    let req;
+    try {
+      req = await ask({ type: `${p.module}-request`, chainId: ch.id, kind: p.kind, target: p.target });
+    } catch (e) {
+      if (e.kind !== 'invalid-request' && e.kind !== 'unsupported') throw e;
+      $('progress').hidden = true;
+      $('formError').textContent = e.message;
+      return;
+    }
+    let proofText, proofSize;
+    try {
+      ({ text: proofText, size: proofSize } = await rpc(endpoint, req.method, req.params));
+    } catch (e) {
+      throw proofRequestRefused(e, ch, req.method);
+    }
+    step('proof', 'done', `${req.method}, ${bytes(proofSize)}`);
+
+    current = 'verify';
+    step('verify', 'active', 'Verifying…');
+    const tv = performance.now();
+    let v;
+    try {
+      v = await ask({ type: `${p.module}-verify`, response: proofText });
+    } catch (e) {
+      // A state proof's kind is what failed; the page reads it as a failed verification.
+      const failed = "Not verified: Willow's proof failed verification";
+      if (p.module === 'state' && STATE_FAILED.has(e.kind)) throw new CheckError(`${e.message} (${e.kind})`, { kind: 'rejected', fault: e.kind, title: failed });
+      if (e.kind === 'rejected' || e.kind === 'malformed-input') throw new CheckError(e.fault ? `${e.message} (${e.fault})` : e.message, { kind: e.kind, fault: e.fault, title: failed });
+      throw e;
+    }
+    const ms = performance.now() - tv;
+    let full = null;
+    if (p.kind === 'block') full = await ask({ type: 'items-block', full: true });
+    const rep = v.report;
+    const blockNum = hexNum(rep.block.number);
+    const blockHash = rep.block.hash;
+    // A copied link names the block verified, not "latest".
+    if (checkLink && p.kind === 'block') checkLink.block = String(blockNum);
+    else if (checkLink) checkLink.at = String(blockNum);
+    step('verify', 'done', verifiedNote(p, v, blockNum, ms));
+    facts.push(['Chain', `${ch.name} (${ch.id})`]);
+    facts.push(['Block', `${blockNum}, hash ${blockHash}`]);
+    if (Number.isSafeInteger(rep.block.timestamp)) facts.push(['Block time', new Date(rep.block.timestamp * 1000).toISOString().replace('.000Z', ' UTC').replace('T', ' ')]);
+    if (p.kind === 'state') facts.push(['Account', p.address]);
+    if (rep.algorithm) facts.push(['Algorithm', rep.algorithm]);
+    if (rep.formula) facts.push(['Formula', rep.formula]);
+    facts.push(['Proof', `${req.method}, ${bytes(proofSize)}, verified in ${secs(ms)}`]);
+
+    // Willow's standard methods at the proven block, then another provider's.
+    const diffs = [];
+    let mismatch = null;
+    let unreadable = null;
+    let compareProblem = null;
+    for (const [label, method, params, msg] of comparisons(p, rep).map(([l, pr, m]) => [l, l.split(' ')[0], pr, m])) {
+      const key = `cmp-${label}`;
+      list.push([key, `Willow's ${label} response`]);
+      setupStepsKeep(list);
+      current = key;
+      step(key, 'active', 'Fetching…');
+      const c = await compareProof(endpoint, method, params, msg);
+      if (c.problem) {
+        compareProblem = compareProblem || `${label}: ${c.problem}`;
+        step(key, 'warn', c.problem);
+      } else if (c.unreadable) {
+        unreadable = unreadable || c.unreadable;
+        step(key, 'fail', c.unreadable);
+      } else {
+        step(key, c.result.exact ? 'done' : 'fail', responseText(c.result));
+        if (!c.result.exact) {
+          mismatch = mismatch || { label, c: c.result };
+          diffs.push([`Willow ${label}`, c.result]);
+        }
+      }
+    }
+    let otherNote = null;
+    if (other) {
+      list.push(['other', `Responses from ${hostOf(other)}`]);
+      setupStepsKeep(list);
+      current = 'other';
+      step('other', 'active', 'Fetching…');
+      const notes = [];
+      let worst = 'done';
+      const theirs = p.kind === 'fees' ? FEE_METHODS.map((m) => [m, m, [], { type: 'items-compare', which: m }]) : comparisons(p, rep).map(([l, pr, m]) => [l, l.split(' ')[0], pr, m]);
+      for (const [label, method, params, msg] of theirs) {
+        let c;
+        try {
+          c = await compareProof(other, method, params, msg);
+        } catch (e) {
+          // Another provider is only compared, never part of the proof: nothing it sends stops the verification.
+          if (!(e.kind === 'internal' || isRuntimeFailure(e))) throw e;
+          c = { problem: `your browser could not finish the comparison (${e.message})` };
+        }
+        if (c.result && c.result.exact) notes.push(`${label}: ${responseText(c.result)}`);
+        else {
+          worst = c.result ? (p.kind === 'fees' ? (worst === 'fail' ? 'fail' : 'warn') : 'fail') : worst === 'fail' ? 'fail' : 'warn';
+          if (c.result) diffs.push([`${hostOf(other)} ${label}`, c.result]);
+          notes.push(`${label}: ${c.result ? responseText(c.result) : c.problem || c.unreadable}`);
+          otherNote =
+            otherNote ||
+            (c.result
+              ? p.kind === 'fees'
+                ? `${hostOf(other)} suggests other fees than the formula, as nodes do by their own rules and at their own newest block; see Differences.`
+                : `The response from ${hostOf(other)} differs from the proven one; see Differences.`
+              : sentence(`The response from ${hostOf(other)} could not be compared: ${c.problem || c.unreadable}`));
+        }
+      }
+      step('other', worst, notes.join(' '));
+    }
+
+    // The proof is about the block whose hash it carries: verify that block against Ethereum.
+    list.push(['anchor', anchorLabel(nodes, 'The block')]);
+    setupStepsKeep(list);
+    current = 'anchor';
+    step('anchor', 'active', nodes ? `Asking for block ${blockNum}…` : `Verifying block ${blockNum} against Ethereum's validators…`);
+    const anchor = await confirmAnchor(ch, endpoint, nodes, blockNum, blockHash);
+    relabel('anchor', anchorDoneLabel(anchor, ch, nodes, 'The block'));
+    step('anchor', anchorState(anchor), anchorNote(anchor, blockNum, blockHash));
+    facts.push(['Block hash confirmed', anchor.confirmed ? confirmedFact(anchor, ch) : 'no']);
+    facts.push(['Time', secs(performance.now() - t0)]);
+    facts.push(['Endpoint', hostOf(endpoint)]);
+
+    const thing = proofThing(p, v, blockNum);
+    const unproven = rep.unproven || [];
+    const uncovered = unproven.length ? ` ${n(unproven.length)} field${unproven.length === 1 ? ' is' : 's are'} not covered by this proof; see What this verifies.` : '';
+    let tone, title, text;
+    let verified = false;
+    if (anchor.mismatch.length) {
+      tone = 'bad';
+      title = mismatchTitle(anchor, blockNum);
+      text = mismatchText(anchor, blockNum, 'The proof is valid');
+    } else if (anchor.failed) {
+      tone = 'bad';
+      title = 'Not verified: the data to confirm the block failed verification';
+      text = `The proof of ${thing} is valid, but ${failedText(anchor, blockNum)}`;
+    } else if (unreadable) {
+      tone = 'bad';
+      title = "Not verified: Willow's response failed verification";
+      text = `The proof of ${thing} is valid, but Willow's standard response could not be read: ${sentence(unreadable)}`;
+    } else if (mismatch) {
+      tone = 'bad';
+      title = `Not verified: Willow's ${mismatch.label} response differs from the proven one`;
+      text = mismatch.c.absent
+        ? `The proof shows ${thing}, but Willow's standard response is null.`
+        : `The proof of ${thing} is valid, but Willow's standard response reports ${n(mismatch.c.differCount)} proven value${mismatch.c.differCount === 1 ? '' : 's'} differently or leaves ${mismatch.c.differCount === 1 ? 'it' : 'them'} out. See Differences.`;
+    } else if (!anchor.confirmed || compareProblem) {
+      tone = 'warn';
+      title = 'Proof valid, but verification is not complete';
+      text = [
+        `The proof of ${thing} is valid.`,
+        compareProblem && sentence(`Willow's standard response could not be compared: ${compareProblem}`),
+        !anchor.confirmed && sentence(`The block could not be confirmed: ${problemsText(anchor)}`),
+      ]
+        .filter(Boolean)
+        .join(' ');
+      text += uncovered;
+    } else if (unanchored(anchor, ch)) {
+      verified = true;
+      tone = 'warn';
+      title = 'Proof valid, but the block is not verified against Ethereum';
+      text = `${cap(thing)} is proven at block ${blockNum}${comparisons(p, rep).length ? ", and Willow's standard responses report it the same way" : ''}. ${confirmedText(anchor, ch, 'The block', rep.block.timestamp)}${uncovered}`;
+    } else {
+      verified = true;
+      tone = 'ok';
+      title = `Verified: ${thing}`;
+      text = `${cap(thing)} is proven at block ${blockNum}${comparisons(p, rep).length ? ", and Willow's standard responses report it the same way" : ''}. ${confirmedText(anchor, ch, 'The block', rep.block.timestamp)}${uncovered}`;
+    }
+    if (otherNote) text += ` ${otherNote}`;
+    showVerdict(tone, title, text);
+    showFacts(facts);
+    $('proofCoverage').hidden = false;
+    $('proofCoverageText').textContent = PROOF_KINDS[p.kind === 'state' ? 'account' : p.kind].coverage;
+    $('proofUncovered').textContent = unproven.length ? `Not covered by this proof: ${unproven.join(', ')}.` : '';
+    showResponseDiffs(diffs);
+    showProven(p, v, full, verified, ch, blockNum);
+    if (!verified) checkLink = null;
+  } catch (e) {
+    showFailure(e, current, facts);
+  } finally {
+    finish(null);
+  }
+}
+
+/// The steps in `list`, keeping the state and notes of those already shown.
+function setupStepsKeep(list) {
+  const ol = $('steps');
+  for (const [key, what] of list) {
+    if (steps[key]) continue;
+    const note = el('div', { class: 'note' });
+    const li = el('li', { 'data-state': 'pending' }, el('span', { class: 'mark', 'aria-hidden': 'true' }), el('div', {}, el('div', { class: 'what' }, what), note));
+    steps[key] = { li, note };
+    ol.append(li);
+  }
+}
+
+/// A refusal of a block, account, call or fee proof, in plain words.
+function proofRequestRefused(e, ch, method) {
+  if (e.rateLimited) return e;
+  const msg = e.rpcMessage || '';
+  if (e.rpcCode === -32601) {
+    return new CheckError(`This endpoint does not serve ${method} for this key or path (${msg}).`, { title: `Could not verify: ${method} is not served here`, tone: 'warn', stepNote: msg });
+  }
+  if (/not found in this store|outside the indexed range|not in the full-block tier/.test(msg)) {
+    return new CheckError(`Willow does not hold what this proof needs on ${ch.name} (${msg}).`, { title: 'Could not verify: Willow does not hold this block', tone: 'warn', stepNote: msg });
+  }
+  return new CheckError(e.message, { tone: 'warn', title: 'Could not verify: Willow refused the proof', stepNote: msg || e.message });
+}
+
+/// The verify step's note.
+function verifiedNote(p, v, blockNum, ms) {
+  const rep = v.report;
+  if (p.kind === 'block') return `The header hashes to block ${blockNum}'s hash, and its ${n(rep.transactions)} transactions, withdrawals and uncles rebuild its roots (${secs(ms)}).`;
+  if (p.kind === 'fees') return `The headers chain up to block ${blockNum}, each body rebuilds its roots, and the formula gives the fees (${secs(ms)}).`;
+  if (p.kind === 'state') return `The account and ${n(p.slots.length)} slot${p.slots.length === 1 ? '' : 's'} are proven against block ${blockNum}'s state root (${secs(ms)}).`;
+  const out = v.proven.error ? `ends in ${v.proven.error.code === 3 ? 'a revert' : 'an error'}` : p.kind === 'call' ? 'returns' : 'needs';
+  return `Your browser ${p.kind === 'call' ? 'ran the call' : "ran geth's gas estimation"} over state proven against block ${blockNum}'s state root: it ${out}${v.proven.error ? '' : ` ${p.kind === 'call' ? 'the proven result' : `${n(hexNum(v.proven.result))} gas`}`} (${secs(ms)}).`;
+}
+
+/// What was verified, for the verdict.
+function proofThing(p, v, blockNum) {
+  if (p.kind === 'block') return `block ${blockNum}`;
+  if (p.kind === 'fees') return `the fees at block ${blockNum}`;
+  if (p.kind === 'state') return `account ${shortHash(p.address)}`;
+  return p.kind === 'call' ? `the call's ${v.proven.error ? 'revert' : 'result'}` : `the gas estimate${v.proven.error ? "'s error" : ''}`;
+}
+
+const weiText = (hex) => {
+  const w = big(hex);
+  return w === null ? String(hex) : `${w.toLocaleString('en-US')} wei (${amountText(w, 18)} ETH)`;
+};
+const gweiText = (hex) => {
+  if (hex === null || hex === undefined) return 'none: this chain\'s blocks carry no blob gas';
+  const w = big(hex);
+  return w === null ? String(hex) : `${w.toLocaleString('en-US')} wei (${amountText(w, 9)} gwei)`;
+};
+
+/// The proven values: a table of fields. Called "proven" only when every check passed.
+function showProven(p, v, full, verified, ch, blockNum) {
+  const head = $('itemTable').tHead;
+  const body = $('itemTable').tBodies[0];
+  const text = (x) => (typeof x === 'string' ? x : x === null ? 'null' : clip(JSON.stringify(x)));
+  head.replaceChildren(el('tr', {}, el('th', {}, 'Field'), el('th', {}, 'Value')));
+  const row = (k, val) => el('tr', {}, el('td', { class: 'mono' }, k), el('td', { class: 'value' }, el('div', { class: 'cell' }, val)));
+  const rows = [];
+  let json = v.proven;
+  let title;
+  if (p.kind === 'block') {
+    for (const [key, value] of Object.entries(v.proven || {})) rows.push(row(key, key === 'transactions' && Array.isArray(value) ? `${n(value.length)} transaction${value.length === 1 ? '' : 's'}: ${text(value)}` : text(value)));
+    for (const f of v.report.unproven) rows.push(el('tr', {}, el('td', { class: 'mono' }, f), el('td', { class: 'value uncovered' }, 'not covered by this proof')));
+    json = full ? { block: v.proven, full: full.proven, unproven: full.unproven } : v.proven;
+    title = `block ${blockNum}`;
+  } else if (p.kind === 'fees') {
+    const f = v.proven;
+    rows.push(row('eth_gasPrice', gweiText(f.eth_gasPrice)), row('eth_maxPriorityFeePerGas', gweiText(f.eth_maxPriorityFeePerGas)), row('eth_blobBaseFee', gweiText(f.eth_blobBaseFee)));
+    rows.push(row('baseFeePerGas', gweiText(f.baseFeePerGas)), row('nextBaseFeePerGas', gweiText(f.nextBaseFeePerGas)), row('formula', f.formula));
+    title = `fees at block ${blockNum}`;
+  } else if (p.kind === 'state') {
+    const s = v.proven;
+    rows.push(row('eth_getBalance', weiText(s.eth_getBalance)), row('eth_getTransactionCount', `${n(hexNum(s.eth_getTransactionCount))} (${s.eth_getTransactionCount})`));
+    rows.push(row('eth_getCode', s.eth_getCode === '0x' ? 'none (0x)' : `${n((s.eth_getCode.length - 2) / 2)} bytes: ${s.eth_getCode.slice(0, 130)}…`));
+    p.slots.forEach((k, i) => rows.push(el('tr', {}, el('td', { class: 'mono', title: k }, `slot ${shortHash(k)}`), el('td', { class: 'value' }, el('div', { class: 'cell' }, s.eth_getStorageAt[i])))));
+    rows.push(row('codeHash', s.eth_getProof.codeHash), row('storageHash', s.eth_getProof.storageHash));
+    title = `account ${shortHash(p.address)}`;
+  } else {
+    const r = v.proven;
+    const method = p.kind === 'call' ? 'eth_call' : 'eth_estimateGas';
+    if (r.error) {
+      rows.push(row(`${method} error`, `${r.error.code}: ${r.error.message}`));
+      if (r.error.data) rows.push(row('data', text(r.error.data)));
+    } else rows.push(row(method, p.kind === 'call' ? text(r.result) : `${n(hexNum(r.result))} gas (${r.result})`));
+    if (v.report.algorithm) rows.push(row('algorithm', v.report.algorithm));
+    title = p.kind === 'call' ? 'call' : 'gas estimate';
+  }
+  body.replaceChildren(...rows);
+  $('itemTitle').textContent = verified ? `Proven ${title}` : `${cap(title)} in Willow's proof`;
+  $('itemMore').textContent = verified ? '' : 'Verification did not pass, so these values are not verified.';
+  lastItems = { name: `willow-${verified ? 'proven' : 'unverified'}-${p.kind === 'state' ? 'account' : p.kind}-${ch.id}-${blockNum}.json`, json };
+  $('itemCard').hidden = false;
+}
+
+/// Examples: Uniswap v4's PoolManager on the chosen chain, and USDC's balanceOf for it on Ethereum.
+const USDC_ETHEREUM = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
+function useAccountExample() {
+  $('formError').textContent = '';
+  $('address').value = chosen().poolManager;
+  $('slots').value = '0x0';
+  $('at').value = 'latest';
+}
+function useCallExample() {
+  $('formError').textContent = '';
+  const ch = chosen();
+  if (ch.id !== 1) {
+    $('formError').textContent = 'Calls are verified on Ethereum only. Choose Ethereum for the example.';
+    return;
+  }
+  $('call').value = JSON.stringify({ to: USDC_ETHEREUM, data: `0x70a08231${'0'.repeat(24)}${ch.poolManager.slice(2)}` }, null, 2);
+  $('at').value = 'latest';
+}
+
 // ---------- results ----------
 
 function showVerdict(tone, title, text, actions = [], checks = null) {
@@ -2147,6 +2644,7 @@ function showVerdict(tone, title, text, actions = [], checks = null) {
   $('waitProgress').hidden = true;
   $('coverage').hidden = true;
   $('itemCoverage').hidden = true;
+  $('proofCoverage').hidden = true;
   $('details').hidden = true;
   $('diff').hidden = true;
   $('logsCard').hidden = true;
@@ -2347,7 +2845,14 @@ function linkOf(search) {
 function linkTo(c) {
   const q = new URLSearchParams({ chain: c.ch.slugs[0] });
   if (c.tx) q.set('tx', c.tx);
-  else {
+  else if (c.block !== undefined) q.set('block', c.block);
+  else if (c.address || c.call) {
+    if (c.address) {
+      q.set('address', c.address);
+      if (c.slots.length) q.set('slots', c.slots.join(','));
+    } else q.set('call', toB64url(c.call));
+    if (c.at) q.set('block', c.at);
+  } else {
     q.set('from', String(c.from));
     q.set('to', String(c.to));
     const f = c.filter;
@@ -2886,10 +3391,71 @@ function runLogsLink(link) {
   runLogs();
 }
 
+/// A link to a block, an account or a call, from the page's query string: null for none; { ch,
+/// kind: 'block', block } for ?chain=&block=; { ch, kind: 'account', address, slots, at } for
+/// ?chain=&address=&slots=&block= (no from or to); { ch, kind: 'call', call, at } for
+/// ?chain=&call=<base64url JSON>&block=. Throws a CheckError for a link it cannot read.
+function formLinkOf(search) {
+  const q = new URLSearchParams(search);
+  if (q.has('tx') || q.has('from') || q.has('to')) return null;
+  const kind = q.has('call') ? 'call' : q.has('address') ? 'account' : q.has('block') ? 'block' : null;
+  if (!kind) return null;
+  const ch = chainNamed(q.get('chain'));
+  if (!ch) throw new CheckError(`The link names no chain Willow serves. It takes chain=${CHAINS.map((c) => c.slugs[0]).join(', ')} or a chain ID.`);
+  const at = (q.get('block') || '').trim();
+  if (at && at !== 'latest' && !TX_HASH.test(at) && !/^\d{1,15}$/.test(at) && !/^0x[0-9a-fA-F]{1,13}$/.test(at)) throw new CheckError("The link's block is not a block number, a block hash or latest.");
+  if (kind === 'block') return { ch, kind, block: at || 'latest' };
+  if (kind === 'account') {
+    const address = q.get('address').trim();
+    if (!ADDRESS.test(address)) throw new CheckError("The link's address is not an account address.");
+    return { ch, kind, address: address.toLowerCase(), slots: slotsOf(q.get('slots') || ''), at };
+  }
+  let call;
+  try {
+    call = fromB64url(q.get('call').trim());
+  } catch {
+    throw new CheckError("The link's call is not a call object written as base64url JSON.");
+  }
+  if (!call || typeof call !== 'object' || Array.isArray(call)) throw new CheckError("The link's call is not a call object.");
+  return { ch, kind, call, at };
+}
+
+/// A block, account or call link: its tab filled in, and verified at once. Accounts and calls
+/// need an endpoint with a key: the one this device remembers, or one typed under Advanced.
+function runFormLink(link) {
+  $('chain').value = String(link.ch.id);
+  const prev = chainShown;
+  chainShown = link.ch;
+  showChain(prev);
+  document.querySelector(`input[name=kind][value=${link.kind}]`).checked = true;
+  showKind();
+  if (link.kind === 'block') $('item').value = link.block;
+  if (link.kind === 'account') {
+    $('address').value = link.address;
+    $('slots').value = link.slots.join(', ');
+  }
+  if (link.kind === 'call') {
+    $('call').value = JSON.stringify(link.call, null, 2);
+    $('estimate').checked = false;
+  }
+  if (link.kind !== 'block') $('at').value = link.at;
+  if (link.kind !== 'block' && isPublic($('endpoint').value.trim())) {
+    document.querySelector('details.advanced').open = true;
+    $('formError').textContent = `This link verifies ${link.kind === 'account' ? 'an account' : 'a call'}, which Willow proves only for an API key: under Advanced, enter your Willow RPC endpoint ending in your key, then Verify.`;
+    return;
+  }
+  runProof();
+}
+
 /// Starts the link in the page's address, if any. True when it did.
 function startLink() {
   let link;
   try {
+    const form = formLinkOf(location.search);
+    if (form) {
+      runFormLink(form);
+      return false;
+    }
     link = linkOf(location.search);
   } catch (e) {
     document.body.classList.add('link-mode');
@@ -2993,7 +3559,7 @@ async function useItemExample() {
     return;
   }
   const block = tip - 10;
-  if (kind === 'blockReceipts') {
+  if (kind === 'blockReceipts' || kind === 'block') {
     $('item').value = String(block);
     return;
   }
@@ -3050,8 +3616,9 @@ let shownKind = 'logs';
 function showKind() {
   const kind = kindOf();
   const logs = kind === 'logs';
-  const block = kind === 'blockReceipts';
-  const group = (k) => (k === 'logs' ? null : k === 'blockReceipts' ? 'block' : 'tx');
+  const block = kind === 'blockReceipts' || kind === 'block';
+  const item = block || kind === 'receipt' || kind === 'transaction';
+  const group = (k) => (k === 'blockReceipts' || k === 'block' ? 'block' : k === 'receipt' || k === 'transaction' ? 'tx' : null);
   const was = group(shownKind);
   const now = group(kind);
   if (was) itemValues[was] = $('item').value;
@@ -3059,14 +3626,29 @@ function showKind() {
   shownKind = kind;
   if (logs && !$('pinned').textContent) showPinned();
   $('logsField').hidden = !logs;
-  $('itemField').hidden = logs;
+  $('itemField').hidden = !item;
+  $('addressField').hidden = kind !== 'account';
+  $('slotsField').hidden = kind !== 'account';
+  $('callField').hidden = kind !== 'call';
+  $('atField').hidden = !(kind === 'account' || kind === 'call' || kind === 'fees');
+  $('atHint').textContent = kind === 'fees' ? 'Empty: the newest block. The fees are for the block after it.' : 'Empty: the newest block.';
   $('keysFields').hidden = !logs;
   $('itemLabel').textContent = block ? 'Block' : 'Transaction';
   $('item').placeholder = block ? 'A block number, a block hash, or latest' : 'A transaction hash, or <block>:<index>';
   $('compareHint').textContent = logs
     ? 'Its eth_getLogs response for the same blocks is compared with the proven logs too. The provider must allow browser requests.'
-    : `Its ${ITEM_KINDS[kind].plain} response${block ? ' and the block\'s transactions' : ''} ${block ? 'are' : 'is'} compared with the proven one too. The provider must allow browser requests.`;
+    : isProofKind(kind)
+      ? PROOF_COMPARE_HINTS[kind]
+      : `Its ${ITEM_KINDS[kind].plain} response${block ? ' and the block\'s transactions' : ''} ${block ? 'are' : 'is'} compared with the proven one too. The provider must allow browser requests.`;
 }
+
+/// What another provider's responses are compared with, per new kind.
+const PROOF_COMPARE_HINTS = {
+  block: 'Its eth_getBlockByHash responses, with and without every transaction, are compared with the proven block too. The provider must allow browser requests.',
+  account: 'Its eth_getBalance, eth_getTransactionCount, eth_getCode, eth_getStorageAt and eth_getProof responses at the same block are compared with the proven ones too. The provider must allow browser requests.',
+  call: 'Its eth_call or eth_estimateGas response at the same block is compared with the proven one too. The provider must allow browser requests.',
+  fees: "Its own eth_gasPrice, eth_maxPriorityFeePerGas and eth_blobBaseFee are shown beside the formula's. They can differ: each node suggests fees by its own rules, at its own newest block. The provider must allow browser requests.",
+};
 
 function remember() {
   // A link's endpoint and nodes are its own, not the visitor's.
@@ -3116,6 +3698,8 @@ restore();
 $('form').addEventListener('submit', run);
 $('example').addEventListener('click', useExample);
 $('itemExample').addEventListener('click', useItemExample);
+$('accountExample').addEventListener('click', useAccountExample);
+$('callExample').addEventListener('click', useCallExample);
 $('download').addEventListener('click', downloadLogs);
 $('itemDownload').addEventListener('click', downloadItems);
 $('remember').addEventListener('change', remember);

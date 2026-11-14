@@ -3,16 +3,18 @@
 # (zkvm/logset-guest/query-wasm, with SP1's verifier), its OpenVM proof check
 # (zkvm/logset-guest-openvm/verify-wasm: OpenVM's verifier cannot share SP1's dependency graph,
 # so it is a module of its own that the log verifier calls for each OpenVM proof), the
-# transaction and receipt verifier (zkvm/logset-guest/items-wasm, Merkle-Patricia proofs) and
-# the block confirmation (zkvm/logset-guest/anchor-wasm, Ethereum's light client), each its own
-# wasm module.
+# transaction, receipt, block and fee verifier (zkvm/logset-guest/items-wasm, Merkle-Patricia
+# proofs), the state, call and estimate verifier (zkvm/logset-guest/state-wasm, account proofs and
+# the EVM) and the block confirmation (zkvm/logset-guest/anchor-wasm, Ethereum's light client),
+# each its own wasm module. @willow-network/rpc (web/client) ships the same modules.
 # Needs: the repo toolchain with the wasm32-unknown-unknown target, wasm-bindgen-cli 0.2.129
 # (cargo install wasm-bindgen-cli --version 0.2.129), and a C compiler and archiver for wasm32
 # (OpenVM's verifier links zstd's C code): WASM_CC / WASM_AR, by default clang and llvm-ar (Apple's
 # clang has no wasm32 target; Homebrew's llvm does). wasm-opt is used when it is on PATH. Every
 # file but index.html gets a content hash in its name, so they can be cached forever;
 # SHA256SUMS.txt lists them all. Target directories: LOGS_TARGET_DIR / OPENVM_TARGET_DIR /
-# ITEMS_TARGET_DIR / ANCHOR_TARGET_DIR, else CARGO_TARGET_DIR, else each crate's own target/.
+# ITEMS_TARGET_DIR / STATE_TARGET_DIR / ANCHOR_TARGET_DIR, else CARGO_TARGET_DIR, else each
+# crate's own target/.
 #
 # The bytes are the same from any checkout. Cargo hashes a local dependency's absolute path into
 # the build when the dependency sits outside the workspace root, and that hash reaches the binary
@@ -21,7 +23,9 @@
 # The page's starting point on Ethereum (ETH_CHECKPOINT) is refreshed at each build from two
 # independent beacon APIs (checkpoint.py; BEACON_APIS names them): the page refuses one over 30
 # days old, so a build serves 30 days at most. CHECKPOINT=<root>:<slot> pins one instead, and
-# CHECKPOINT=test the saved one the browser tests serve (test/anchor/checkpoint.json).
+# CHECKPOINT=test the saved one the browser tests serve (test/anchor/checkpoint.json). The
+# checkpoint also goes beside the page as checkpoint.json, which @willow-network/rpc fetches once
+# the checkpoint it ships is too old to start from.
 # CHECKPOINT=test is also the test build: only its log verifier has query-wasm's test-cutover
 # feature (Verifier.setTestCutover, a test cutover in place of a chain's pinned first OpenVM block,
 # for test/real-openvm.mjs), and every other build stops if its log verifier has it.
@@ -36,7 +40,7 @@ test_build=
 
 [ "$(wasm-bindgen --version)" = "wasm-bindgen 0.2.129" ] || { echo "need wasm-bindgen-cli 0.2.129" >&2; exit 1; }
 repo="$(cd "$here/../.." && pwd)"
-# What the four crates build from, relative to the repo. The OpenVM pins are the minted program
+# What the five crates build from, relative to the repo. The OpenVM pins are the minted program
 # keys (program-keys.txt: MINT.txt's key tables, without the record's provenance), the verifying
 # keys (vk/) and the ELF hashes the trust module reads.
 SOURCES=(rust-toolchain.toml crates/network/src/beacon crates/receipts-trie zkvm/anchor-guest/core
@@ -44,7 +48,8 @@ SOURCES=(rust-toolchain.toml crates/network/src/beacon crates/receipts-trie zkvm
   zkvm/logset-guest/anchor-verify zkvm/logset-guest/anchor-wasm zkvm/logset-guest/blockcheck
   zkvm/logset-guest/blockproof zkvm/logset-guest/chains zkvm/logset-guest/core
   zkvm/logset-guest/fixtures zkvm/logset-guest/items-wasm zkvm/logset-guest/query
-  zkvm/logset-guest/query-verify zkvm/logset-guest/query-wasm zkvm/logset-guest/vkeys
+  zkvm/logset-guest/query-verify zkvm/logset-guest/query-wasm zkvm/logset-guest/state-verify
+  zkvm/logset-guest/state-wasm zkvm/logset-guest/vkeys
   zkvm/logset-guest-openvm/verify zkvm/logset-guest-openvm/verify-wasm
   zkvm/logset-guest-openvm/pins/program-keys.txt zkvm/logset-guest-openvm/pins/vk
   zkvm/logset-guest-openvm/pins/logset-leaf.sha256 zkvm/logset-guest-openvm/pins/logset-idxagg.sha256
@@ -115,6 +120,7 @@ wasm() {
 logs=zkvm/logset-guest/query-wasm
 openvm=zkvm/logset-guest-openvm/verify-wasm
 items=zkvm/logset-guest/items-wasm
+state=zkvm/logset-guest/state-wasm
 anchor=zkvm/logset-guest/anchor-wasm
 wasm $logs willow_logs_verify_wasm verifier "${LOGS_TARGET_DIR:-${CARGO_TARGET_DIR:-$repo/$logs/target}}" \
   "${test_build:+test-cutover}"
@@ -129,6 +135,7 @@ fi
 wasm $openvm willow_logs_verify_openvm_wasm openvm "${OPENVM_TARGET_DIR:-${CARGO_TARGET_DIR:-$repo/$openvm/target}}" "" \
   '--cfg getrandom_backend="wasm_js"'
 wasm $items willow_items_verify_wasm items "${ITEMS_TARGET_DIR:-${CARGO_TARGET_DIR:-$repo/$items/target}}" ""
+wasm $state willow_state_verify_wasm state "${STATE_TARGET_DIR:-${CARGO_TARGET_DIR:-$repo/$state/target}}" ""
 wasm $anchor willow_anchor_verify_wasm anchor "${ANCHOR_TARGET_DIR:-${CARGO_TARGET_DIR:-$repo/$anchor/target}}" ""
 
 h() { shasum -a 256 "$1" | cut -c1-12; }
@@ -151,9 +158,11 @@ owasm=$(hashed "$tmp/openvm_bg.wasm" openvm wasm)
 oglue=$(hashed "$tmp/openvm.js" openvm js)
 iwasm=$(hashed "$tmp/items_bg.wasm" items wasm)
 iglue=$(hashed "$tmp/items.js" items js)
+swasm=$(hashed "$tmp/state_bg.wasm" state wasm)
+sglue=$(hashed "$tmp/state.js" state js)
 awasm=$(hashed "$tmp/anchor_bg.wasm" anchor wasm)
 aglue=$(hashed "$tmp/anchor.js" anchor js)
-worker=$(hashed "$here/worker.js" worker js "__ITEMS_GLUE__=$iglue" "__ITEMS_WASM__=$iwasm" "__ANCHOR_GLUE__=$aglue" "__ANCHOR_WASM__=$awasm" "__OPENVM_GLUE__=$oglue" "__OPENVM_WASM__=$owasm" "__GLUE__=$glue" "__WASM__=$wasm")
+worker=$(hashed "$here/worker.js" worker js "__ITEMS_GLUE__=$iglue" "__ITEMS_WASM__=$iwasm" "__STATE_GLUE__=$sglue" "__STATE_WASM__=$swasm" "__ANCHOR_GLUE__=$aglue" "__ANCHOR_WASM__=$awasm" "__OPENVM_GLUE__=$oglue" "__OPENVM_WASM__=$owasm" "__GLUE__=$glue" "__WASM__=$wasm")
 case "${CHECKPOINT:-}" in
   "") checkpoint="$(python3 "$here/checkpoint.py")" ;;
   test) checkpoint="$(python3 -c 'import json, sys; c = json.load(open(sys.argv[1])); print(c["root"] + ":" + str(c["slot"]))' "$here/test/anchor/checkpoint.json")" ;;
@@ -164,6 +173,7 @@ cp_root="${checkpoint%%:*}" cp_slot="${checkpoint##*:}"
 sed "s|^const ETH_CHECKPOINT = .*|const ETH_CHECKPOINT = { root: '$cp_root', slot: $cp_slot };|" "$here/app.js" > "$tmp/app.js"
 grep -q "^const ETH_CHECKPOINT = { root: '$cp_root', slot: $cp_slot };" "$tmp/app.js" || { echo "no ETH_CHECKPOINT in app.js" >&2; exit 1; }
 echo "Checkpoint $cp_root at slot $cp_slot"
+printf '{"root":"%s","slot":%s}\n' "$cp_root" "$cp_slot" > "$out/checkpoint.json"
 app=$(hashed "$tmp/app.js" app js "__WORKER__=$worker")
 # Willow's fonts (fonts/, from Fontsource; licenses alongside).
 fonts=()
@@ -180,5 +190,5 @@ for kv in "__APP__=$app" "__STYLE__=$style" "__ICON__=$icon" "${subs[@]}"; do
   sed "s|${kv%%=*}|${kv#*=}|g" "$tmp/index.html" > "$tmp/y" && mv "$tmp/y" "$tmp/index.html"
 done
 mv "$tmp/index.html" "$out/index.html"
-(cd "$out" && shasum -a 256 index.html "$wasm" "$glue" "$owasm" "$oglue" "$iwasm" "$iglue" "$awasm" "$aglue" "$worker" "$app" "$style" "$icon" "${fonts[@]}" > SHA256SUMS.txt)
+(cd "$out" && shasum -a 256 index.html checkpoint.json "$wasm" "$glue" "$owasm" "$oglue" "$iwasm" "$iglue" "$swasm" "$sglue" "$awasm" "$aglue" "$worker" "$app" "$style" "$icon" "${fonts[@]}" > SHA256SUMS.txt)
 ls -l "$out"

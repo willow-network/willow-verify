@@ -340,3 +340,282 @@ fn another_answer_is_compared_field_by_field() {
         "{r}"
     );
 }
+
+// ---------- block, fee and fee-history proofs (W1's fixtures, interface I6) ----------
+
+const W1: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../blockproof/fixtures");
+
+/// W1's fixtures of `dir` whose names end with `suffix`.
+fn w1(dir: &str, suffix: &str) -> Vec<(String, Value)> {
+    let mut out: Vec<(String, Value)> = std::fs::read_dir(format!("{W1}/{dir}"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.ends_with(suffix))
+        .map(|n| {
+            let v =
+                serde_json::from_slice(&std::fs::read(format!("{W1}/{dir}/{n}")).unwrap()).unwrap();
+            (n, v)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    assert!(!out.is_empty(), "no {suffix} fixtures in {dir}");
+    out
+}
+
+fn requested(v: &mut ItemVerifier, kind: &str, target: &str) -> Value {
+    let r = parse(&v.request(kind, target));
+    assert_eq!(r["ok"], json!(true), "{kind} {target}: {r}");
+    r
+}
+
+#[test]
+fn every_block_proof_verifies_renders_and_compares() {
+    for (name, f) in w1("block", ".json") {
+        let chain = f["chainId"].as_u64().unwrap() as u32;
+        let result = &f["result"];
+        let hash = result["blockHash"].as_str().unwrap();
+        let node = &f["node"]["eth_getBlockByNumber"];
+        for target in [
+            hash.to_string(),
+            u64::from_str_radix(&result["blockNumber"].as_str().unwrap()[2..], 16)
+                .unwrap()
+                .to_string(),
+        ] {
+            let mut v = ItemVerifier::new(chain);
+            let r = requested(&mut v, "block", &target);
+            assert_eq!(r["method"], json!("willow_getBlockProof"));
+            let out = parse(&v.verify(&body(result)));
+            assert_eq!(out["ok"], json!(true), "{name}: {out}");
+            let rep = &out["report"];
+            assert_eq!(rep["method"], json!("willow_getBlockProof"));
+            assert_eq!(rep["block"]["hash"], json!(hash.to_lowercase()), "{name}");
+            assert_eq!(rep["block"]["parentHash"], node["parentHash"], "{name}");
+            assert_eq!(
+                rep["block"]["timestamp"],
+                json!(u64::from_str_radix(&node["timestamp"].as_str().unwrap()[2..], 16).unwrap())
+            );
+            assert_eq!(
+                rep["transactions"],
+                json!(node["transactions"].as_array().unwrap().len())
+            );
+            // proven is eth_getBlockByNumber(n, false); block(false) the same; block(true) every object.
+            let hashes: Vec<Value> = node["transactions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["hash"].clone())
+                .collect();
+            let mut light = node.clone();
+            light["transactions"] = json!(hashes);
+            let c = parse(&v.compare("answer", &body(&light)));
+            assert_eq!(c["result"]["exact"], json!(true), "{name}: {c}");
+            let lazy = parse(&v.block(false));
+            assert_eq!(lazy["proven"], out["proven"], "{name}");
+            let full = parse(&v.block(true));
+            assert_eq!(full["ok"], json!(true), "{name}: {full}");
+            assert_eq!(
+                full["proven"]["transactions"].as_array().unwrap().len(),
+                hashes.len()
+            );
+            let c = parse(&v.compare("transactions", &body(node)));
+            assert_eq!(c["result"]["exact"], json!(true), "{name}: {c}");
+            let unproven: Vec<String> = serde_json::from_value(rep["unproven"].clone()).unwrap();
+            assert_eq!(
+                unproven.is_empty(),
+                !name.contains("uncles-unproven"),
+                "{name}: {unproven:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_tampered_block_proof_names_its_fault() {
+    let f = &w1("block", ".json")
+        .into_iter()
+        .find(|(n, _)| n.starts_with("ethereum-26"))
+        .unwrap()
+        .1;
+    let hash = f["result"]["blockHash"].as_str().unwrap();
+    let run = |change: &dyn Fn(&mut Value)| {
+        let mut v = ItemVerifier::new(1);
+        requested(&mut v, "block", hash);
+        let mut p = f["result"].clone();
+        change(&mut p);
+        let r = parse(&v.verify(&body(&p)));
+        assert_eq!(r["ok"], json!(false), "{r}");
+        assert!(
+            v.block(false).contains("internal"),
+            "no block after a failure"
+        );
+        (
+            r["kind"].as_str().unwrap().to_string(),
+            r["fault"].as_str().unwrap_or("").to_string(),
+        )
+    };
+    let rejected = |fault: &str| ("rejected".to_string(), fault.to_string());
+    assert_eq!(run(&|p| flip(&mut p["header"], 100)), rejected("header"));
+    assert_eq!(
+        run(&|p| p["chainId"] = json!("0xa")),
+        rejected("wrong-chain")
+    );
+    assert_eq!(
+        run(&|p| flip(&mut p["transactions"][3], 40)),
+        rejected("transactions")
+    );
+    assert_eq!(
+        run(&|p| {
+            p.as_object_mut().unwrap().remove("transactions");
+        }),
+        rejected("missing")
+    );
+    assert_eq!(
+        run(&|p| {
+            p.as_object_mut().unwrap().remove("withdrawals");
+        }),
+        rejected("missing")
+    );
+    assert_eq!(
+        run(&|p| p["unproven"] = json!(["size", "uncles"])),
+        rejected("uncles")
+    );
+    // Another block for the hash asked.
+    let other = &w1("block", ".json")
+        .into_iter()
+        .find(|(n, _)| n.starts_with("ethereum-17"))
+        .unwrap()
+        .1;
+    assert_eq!(
+        run(&|p| *p = other["result"].clone()),
+        rejected("wrong-block")
+    );
+    // Unreadable: malformed-input, with no fault.
+    let mut v = ItemVerifier::new(1);
+    requested(&mut v, "block", hash);
+    let r = parse(&v.verify("<html>502</html>"));
+    assert_eq!(
+        (r["kind"].clone(), r.get("fault").cloned()),
+        (json!("malformed-input"), None)
+    );
+    // A shipped kind names its fault too.
+    let (kind, _) = tampered("eth-receipt", |p| {
+        let items = p["receiptProofs"].as_array_mut().unwrap();
+        let it = items.last_mut().unwrap();
+        flip(&mut it["proof"][0], 40);
+    });
+    assert_eq!(kind, "rejected");
+    let c = case("eth-receipt");
+    let mut v = asked(&c);
+    let mut p = c["proof"]["result"].clone();
+    flip(&mut p["header"], 100);
+    assert_eq!(parse(&v.verify(&body(&p)))["fault"], json!("header"));
+}
+
+#[test]
+fn every_fee_proof_verifies_as_its_formula() {
+    for (name, f) in w1("fees", ".fee.json") {
+        let chain = f["chainId"].as_u64().unwrap() as u32;
+        let hash = f["result"]["blockHash"].as_str().unwrap();
+        let mut v = ItemVerifier::new(chain);
+        let r = requested(&mut v, "fees", hash);
+        assert_eq!(
+            (r["method"].clone(), r["params"].clone()),
+            (json!("willow_getFeeProof"), json!([hash.to_lowercase()]))
+        );
+        let out = parse(&v.verify(&body(&f["result"])));
+        assert_eq!(out["ok"], json!(true), "{name}: {out}");
+        assert_eq!(out["proven"], f["verified"], "{name}");
+        assert_eq!(out["report"]["formula"], json!("willow-fee-v1"));
+        assert_eq!(out["report"]["block"]["hash"], json!(hash.to_lowercase()));
+        assert!(out["report"]["block"]["parentHash"].as_str().unwrap().len() == 66);
+        // Each standard method compared with the formula's value (the recorded node's, where equal).
+        let mine = parse(&v.compare(
+            "eth_maxPriorityFeePerGas",
+            &body(&f["verified"]["eth_maxPriorityFeePerGas"]),
+        ));
+        assert_eq!(mine["result"]["exact"], json!(true), "{name}: {mine}");
+        let other = parse(&v.compare("eth_gasPrice", &body(&json!("0x1"))));
+        assert_eq!(other["result"]["exact"], json!(false), "{name}: {other}");
+        assert_eq!(parse(&v.block(false))["kind"], json!("internal"));
+    }
+    // Tampered: a header link, a body and the formula.
+    let f = &w1("fees", ".fee.json")
+        .into_iter()
+        .find(|(n, _)| n.starts_with("ethereum"))
+        .unwrap()
+        .1;
+    let fault = |change: &dyn Fn(&mut Value)| {
+        let mut v = ItemVerifier::new(1);
+        requested(&mut v, "fees", f["result"]["blockHash"].as_str().unwrap());
+        let mut p = f["result"].clone();
+        change(&mut p);
+        parse(&v.verify(&body(&p)))["fault"].clone()
+    };
+    assert_eq!(
+        fault(&|p| p["formula"] = json!("willow-fee-v2")),
+        json!("unknown-formula")
+    );
+    assert_eq!(
+        fault(&|p| p["headers"].as_array_mut().unwrap().swap(0, 1)),
+        json!("broken-link")
+    );
+    assert_eq!(
+        fault(&|p| {
+            p["headers"].as_array_mut().unwrap().remove(0);
+        }),
+        json!("wrong-range")
+    );
+    assert_eq!(
+        fault(&|p| p["bodies"].as_array_mut().unwrap().swap(0, 1)),
+        json!("body")
+    );
+    assert_eq!(
+        fault(&|p| {
+            p["bodies"].as_array_mut().unwrap().pop();
+        }),
+        json!("missing")
+    );
+    assert_eq!(
+        fault(&|p| flip(&mut p["bodies"][0]["transactions"][0], 60)),
+        json!("transactions")
+    );
+}
+
+#[test]
+fn every_fee_history_proof_verifies_as_geths_fee_history() {
+    for (name, f) in w1("fees", ".history.json") {
+        let chain = f["chainId"].as_u64().unwrap() as u32;
+        let target = f["request"]["params"].to_string();
+        let mut v = ItemVerifier::new(chain);
+        let r = requested(&mut v, "feeHistory", &target);
+        assert_eq!(r["method"], json!("willow_getFeeHistoryProof"));
+        assert_eq!(r["params"], f["request"]["params"], "{name}");
+        let out = parse(&v.verify(&body(&f["result"])));
+        assert_eq!(out["ok"], json!(true), "{name}: {out}");
+        assert_eq!(out["proven"], f["verified"], "{name}");
+        assert_eq!(out["report"]["block"]["hash"], f["result"]["blockHash"]);
+        let c = parse(&v.compare("answer", &body(&f["verified"])));
+        assert_eq!(c["result"]["exact"], json!(true), "{name}: {c}");
+    }
+    let mut v = ItemVerifier::new(8453);
+    for bad in [
+        r#"["0x0", "latest", []]"#,
+        r#"["0x20", "latest", [10, 50]]"#,
+        r#"["0x4", "latest", [50, 10]]"#,
+        r#"["0x4", "latest", [101]]"#,
+        r#"["0x4", 5, []]"#,
+        r#"["0x4", "finalized", []]"#,
+        r#"{"blockCount": 4}"#,
+        "not json",
+    ] {
+        let r = parse(&v.request("feeHistory", bad));
+        assert_eq!(r["kind"], json!("invalid-request"), "{bad}: {r}");
+    }
+    // Over 1,024 is truncated, as geth does; without percentiles any count up to that is one proof.
+    let r = requested(&mut v, "feeHistory", r#"[5000, "latest"]"#);
+    assert_eq!(r["params"], json!(["0x400", "latest", []]));
+    // Nitro's rewards are zeros with no bodies, so 16 is no limit there.
+    let mut nitro = ItemVerifier::new(42161);
+    let r = requested(&mut nitro, "feeHistory", r#"["0x20", "0x10", [50]]"#);
+    assert_eq!(r["params"], json!(["0x20", "0x10", [50]]));
+}

@@ -172,9 +172,12 @@ pub fn verify_body_with_uncles(
             Some(vec![])
         }
         Some(want) => {
-            let list: Vec<Withdrawal> =
-                serde_json::from_value(listed.context("no withdrawals")?.clone())
-                    .context("withdrawals JSON parse")?;
+            // A node may leave out an empty list: only the empty-trie root lets it be read as one.
+            let list: Vec<Withdrawal> = match listed {
+                Some(w) => serde_json::from_value(w.clone()).context("withdrawals JSON parse")?,
+                None if want.0 == crate::trie::ordered_root(&[])? => vec![],
+                None => anyhow::bail!("no withdrawals"),
+            };
             let values: Vec<Vec<u8>> = list.iter().map(alloy_rlp::encode).collect();
             let root = crate::trie::ordered_root(&values)?;
             ensure!(
@@ -404,7 +407,7 @@ fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
 
 /// `len(rlp([header, transactions, uncles, withdrawals?]))`, typed transactions
 /// as strings (geth's `Block.Size`).
-fn block_size(
+pub fn block_size(
     header_rlp: &[u8],
     txs: &[Vec<u8>],
     uncles: &[Vec<u8>],

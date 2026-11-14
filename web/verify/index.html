@@ -34,7 +34,11 @@
       <div class="segmented">
         <label><input type="radio" name="kind" value="logs" checked> Logs</label>
         <label><input type="radio" name="kind" value="receipt"> Transaction</label>
-        <label><input type="radio" name="kind" value="blockReceipts"> Block</label>
+        <label><input type="radio" name="kind" value="blockReceipts"> Receipts</label>
+        <label><input type="radio" name="kind" value="block"> Block</label>
+        <label><input type="radio" name="kind" value="account"> Account</label>
+        <label><input type="radio" name="kind" value="call"> Call</label>
+        <label><input type="radio" name="kind" value="fees"> Fees</label>
       </div>
     </fieldset>
 
@@ -57,6 +61,34 @@
         <button type="button" id="itemExample" class="link" title="A transaction from a recent block">Use an example</button>
       </div>
       <input id="item" type="text" autocomplete="off" spellcheck="false">
+    </div>
+
+    <div class="field" id="addressField" hidden>
+      <div class="label-row">
+        <label for="address">Address</label>
+        <button type="button" id="accountExample" class="link" title="Uniswap v4's PoolManager on this chain">Use an example</button>
+      </div>
+      <input id="address" type="text" autocomplete="off" spellcheck="false" placeholder="0x…">
+    </div>
+
+    <div class="field" id="slotsField" hidden>
+      <label for="slots">Storage slots (optional)</label>
+      <input id="slots" type="text" autocomplete="off" spellcheck="false" placeholder="0x0, 0x1, … separated by commas">
+    </div>
+
+    <div class="field" id="callField" hidden>
+      <div class="label-row">
+        <label for="call">Call</label>
+        <button type="button" id="callExample" class="link" title="USDC's balanceOf for Uniswap v4's PoolManager">Use an example</button>
+      </div>
+      <textarea id="call" rows="6" wrap="off" spellcheck="false" autocomplete="off" placeholder='{"to": "0x…", "data": "0x…"}'></textarea>
+      <label class="check"><input id="estimate" type="checkbox"> Estimate its gas (eth_estimateGas) instead</label>
+    </div>
+
+    <div class="field" id="atField" hidden>
+      <label for="at">Block</label>
+      <input id="at" type="text" autocomplete="off" spellcheck="false" placeholder="A block number, a block hash, or latest">
+      <p class="hint" id="atHint"></p>
     </div>
 
     <div class="actions">
@@ -126,6 +158,11 @@
       <p>Proven and compared, for every log the filter matches in these blocks: <strong>address, topics, data, block number, transaction index and log index</strong>. None can be missing, added or changed without verification failing.</p>
       <p class="muted">Not compared: <code>blockHash</code>, <code>transactionHash</code>, <code>blockTimestamp</code>, and the <code>removed</code> flag (an entry marked removed counts as not proven). Values worked out from these logs, such as balances or totals, are not part of this verification.</p>
       </div>
+      <div id="proofCoverage" hidden>
+      <h3>What this verifies</h3>
+      <p id="proofCoverageText"></p>
+      <p id="proofUncovered" class="muted"></p>
+      </div>
       <div id="itemCoverage" hidden>
       <h3>What this verifies</h3>
       <p>Proven: every field listed under Proven fields. Each one is in the transaction's or receipt's bytes, in the block header, or worked out from them, and the header hashes to the block hash the node confirmed. None can be changed without verification failing.</p>
@@ -175,7 +212,9 @@
     <p><strong>Logs.</strong> Willow proves each block's logs with SP1 proofs, and with OpenVM proofs from each chain's switch to OpenVM. Your browser verifies them, each against its own system's program keys, and works out from your filter which logs must be there, so none can be left out.</p>
     <p><strong>Blocks.</strong> Your browser then verifies the block against Ethereum. On Ethereum it follows the validators' signatures from a starting point built into this page. On the other six chains it reads the chain's claim on Ethereum, which settles once its challenge period ends, after 5 to 7 days. Newer blocks are verified by the sequencer's signature. If Willow can't send that data, the page asks public nodes and shows the result in gold.</p>
     <p><strong>What you rely on.</strong> No node, Willow included. This page's code is served by Willow, with the program keys and the starting point. Its source is <a href="https://github.com/willow-network/willow-verify" target="_blank" rel="noopener noreferrer">on GitHub</a>, with a script that rebuilds this page and verifies that each file in <a href="SHA256SUMS.txt">SHA256SUMS.txt</a> is the one Willow serves. To run the same verification on your own machine, ask Willow for the command-line verifier.</p>
+    <p><strong>Blocks, accounts, calls and fees.</strong> A block proof carries the header and every transaction, which rebuild its roots. An account proof is the account's path in the state trie of a verified header. For a call, your browser runs the EVM itself over the state the call reads, each part proven against that header, and on Ethereum it runs geth's gas estimation the same way. Fees are a published formula, <code>willow-fee-v1</code>, over verified blocks. Accounts and calls need an endpoint with your API key under Advanced.</p>
     <p><strong>Links.</strong> <code>?chain=base&amp;tx=0x…</code> opens a transaction, and <code>?chain=base&amp;from=…&amp;to=…&amp;address=…&amp;topic0=…</code> every matching log in a block range. Copy link makes one.</p>
+    <p><code>?chain=base&amp;block=…</code> opens a block, <code>?chain=ethereum&amp;address=0x…&amp;slots=0x0,0x1&amp;block=…</code> an account, and <code>?chain=ethereum&amp;call=…&amp;block=…</code> a call, its call object as base64url JSON.</p>
   </details>
 </main>
 </body>

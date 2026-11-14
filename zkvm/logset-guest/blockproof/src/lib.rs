@@ -10,13 +10,21 @@
 //! - [`mpt`]: Merkle-Patricia proofs into a block's ordered tries
 //!   (transactionsRoot, receiptsRoot), built with alloy-trie and checked by
 //!   two walkers that must agree.
-//! - [`proof`]: the proof a server sends for a transaction, a receipt or a
-//!   block's receipts (the header, the items and their proofs), how it is
-//!   built and how a client verifies it.
+//! - [`proof`]: the proof a server sends for a transaction, a receipt, a
+//!   block's receipts or a block (the header, the items and their proofs),
+//!   how it is built and how a client verifies it.
+//! - [`block`]: a block's served header and the withdrawals and uncles of a
+//!   block proof.
+//! - [`fees`]: `willow-fee-v1`, the fee methods as a formula over verified
+//!   blocks, and the fee and fee-history proofs.
+//! - [`fault`]: the kind each failed verification reports.
 //! - [`compare`]: another endpoint's answer against the proven JSON.
 
+pub mod block;
 pub mod compare;
 pub mod derive;
+pub mod fault;
+pub mod fees;
 pub mod mpt;
 pub mod opfee;
 pub mod proof;
@@ -25,6 +33,12 @@ pub mod txs;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_block;
+#[cfg(test)]
+mod tests_fees;
+#[cfg(test)]
+mod tests_live;
 
 /// One transaction as stored: its transactions-trie value and its sender.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

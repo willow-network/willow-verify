@@ -24,8 +24,11 @@ pub struct OpChain {
 
 /// Read from each chain's contracts on Ethereum: the proposer its DisputeGameFactory names for the
 /// permissioned game type 5 (`gameArgs(5)`, 2026-11-11; Unichain's changed from `0xD5F0…FA9A` on
-/// 2026-10-29, block 26,299,517), and on Base the creator of its type-621 games (2026-10-19).
-pub const OP_CHAINS: [OpChain; 4] = [
+/// 2026-10-29, block 26,299,517), and on Base the creator of its type-621 games (2026-10-19). On
+/// 2026-11-14 OP Mainnet, Unichain and Ink respected type 9, its games made by the same proposers.
+/// Soneium (type 5) and Zora and World Chain (type 1, output roots): the proposer `gameArgs` names
+/// for the respected type, the creator of each one's newest games (2026-11-14).
+pub const OP_CHAINS: [OpChain; 7] = [
     OpChain {
         chain_id: 8453,
         name: "Base",
@@ -54,6 +57,27 @@ pub const OP_CHAINS: [OpChain; 4] = [
         proposers: &[address!("3832bfbeF03173E4C49a00ec0DD178817A02D177")],
         super_root: true,
     },
+    OpChain {
+        chain_id: 1868,
+        name: "Soneium",
+        registry: address!("4890928941e62e273dA359374b105F803329F473"),
+        proposers: &[address!("400c164C4a8cA84385B70EEd6eB03ea847c8E1b8")],
+        super_root: true,
+    },
+    OpChain {
+        chain_id: 7777777,
+        name: "Zora",
+        registry: address!("54027b388330415a34b2dBa9E6d25895649eEFf1"),
+        proposers: &[address!("48247032092e7b0ecf5dEF611ad89eaf3fC888Dd")],
+        super_root: false,
+    },
+    OpChain {
+        chain_id: 480,
+        name: "World Chain",
+        registry: address!("90BB48fe3310499Db36437dCAE642F721e32d094"),
+        proposers: &[address!("2307278fC8aB0005974A6DeD2FA6d1187333a223")],
+        super_root: false,
+    },
 ];
 
 /// Ethereum state older than this says nothing about a game: a guardian can blacklist one, and a
@@ -61,6 +85,9 @@ pub const OP_CHAINS: [OpChain; 4] = [
 pub const MAX_L1_AGE_SECS: u64 = 3600;
 /// Hops back through the L2's history one answer may take.
 pub(crate) const MAX_HOPS: usize = 16;
+/// Headers a descent may carry, and their bytes: past either, the anchor does not reach the block.
+pub const MAX_DESCENT: usize = 32_768;
+pub const MAX_DESCENT_BYTES: usize = 16 << 20;
 /// `GameStatus.CHALLENGER_WINS`.
 const CHALLENGER_WINS: u8 = 1;
 
@@ -76,6 +103,7 @@ fn rejected(message: impl Into<String>) -> Failure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct L2Header {
     pub hash: [u8; 32],
+    pub parent_hash: [u8; 32],
     pub state_root: [u8; 32],
     pub number: u64,
     pub timestamp: u64,
@@ -123,6 +151,7 @@ pub fn header(rlp_hex: &str) -> Result<L2Header, Failure> {
     }
     Ok(L2Header {
         hash: keccak256(&rlp).0,
+        parent_hash: b32(f[0], "parentHash")?,
         state_root: b32(f[3], "stateRoot")?,
         number: uint(f[8], "number")?,
         timestamp: uint(f[11], "timestamp")?,
@@ -131,9 +160,57 @@ pub fn header(rlp_hex: &str) -> Result<L2Header, Failure> {
     })
 }
 
-/// Block `number`'s hash, back from `top` (`headers[0]`) through the L2's own block-hash history
-/// (`ring` blocks, contract `code`): the anchor's `proofs`, and for each hop of `ring` blocks the
-/// header of the block it lands on (`headers[1..]`), checked by the hash the history holds.
+/// Down from `top` through the anchor's `descent`, if it has one: the headers of the blocks below
+/// it, each its child's parent, one number lower, never below block `number`. Returns the lowest
+/// header reached (`top` without a descent). The descent adds hash links only, so it adds no
+/// trust: the level stays the claim's.
+pub fn descend(top: &L2Header, number: u64, answer: &Value) -> Result<L2Header, Failure> {
+    let Some(d) = answer.get("descent") else {
+        return Ok(top.clone());
+    };
+    let list = d
+        .as_array()
+        .ok_or_else(|| bad("the descent is not a list of headers"))?;
+    let bytes: usize = list
+        .iter()
+        .map(|h| h.as_str().map_or(0, str::len) / 2)
+        .sum();
+    if list.len() > MAX_DESCENT || bytes > MAX_DESCENT_BYTES {
+        return Err(Failure::new(
+            Kind::NotCovered,
+            format!(
+                "the descent from block {} is over {MAX_DESCENT} headers or {} MB",
+                top.number,
+                MAX_DESCENT_BYTES >> 20
+            ),
+        ));
+    }
+    let mut current = top.clone();
+    for h in list {
+        if current.number <= number {
+            return Err(rejected(format!(
+                "the descent goes on below block {number}"
+            )));
+        }
+        let older = header(
+            h.as_str()
+                .ok_or_else(|| bad("a descent header is not hex"))?,
+        )?;
+        if older.hash != current.parent_hash || older.number + 1 != current.number {
+            return Err(rejected(format!(
+                "the descent's header of block {} is not block {}'s parent",
+                older.number, current.number
+            )));
+        }
+        current = older;
+    }
+    Ok(current)
+}
+
+/// Block `number`'s hash, back from `top` (`headers[0]`) through the anchor's `descent` if it has
+/// one, then the L2's own block-hash history (`ring` blocks, contract `code`): the anchor's
+/// `proofs`, and for each hop of `ring` blocks the header of the block it lands on
+/// (`headers[1..]`), checked by the hash the history holds.
 pub(crate) fn walk_back(
     top: &L2Header,
     number: u64,
@@ -142,11 +219,14 @@ pub(crate) fn walk_back(
     ring: u64,
     code: alloy_primitives::B256,
 ) -> Result<[u8; 32], Failure> {
+    let mut current = descend(top, number, answer)?;
+    if current.number == number {
+        return Ok(current.hash);
+    }
     let proofs = answer
         .get("proofs")
         .and_then(Value::as_array)
         .ok_or_else(|| bad("the anchor has no L2 history proofs"))?;
-    let mut current = top.clone();
     let mut next_header = 1;
     let mut proofs = proofs.iter();
     loop {
@@ -569,8 +649,10 @@ pub fn confirm_nitro(
             format!("block {number} is after the asserted block"),
         ));
     }
-    let hash = if number == top.number {
-        top.hash
+    // Down the descent, if any, then one proof from where it ends.
+    let low = descend(&top, number, answer)?;
+    let hash = if number == low.number {
+        low.hash
     } else {
         let proof = answer
             .get("proofs")
@@ -578,8 +660,8 @@ pub fn confirm_nitro(
             .and_then(|p| p.first())
             .ok_or_else(|| bad("the anchor has no L2 history proof"))?;
         history::block_hash(
-            top.state_root,
-            top.number,
+            low.state_root,
+            low.number,
             number,
             NITRO_RING,
             nitro_code_hash(),

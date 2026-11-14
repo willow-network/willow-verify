@@ -1,0 +1,29 @@
+[package]
+name = "willow-state-verify-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# State, call and estimate proofs in the browser (web/verify) and in @willow-network/rpc
+# (web/client, interface I6): `state-verify`'s client side, compiled to wasm32 for a Web Worker.
+# Its own module, so a block or log check loads no EVM. Its own workspace and lockfile, like
+# items-wasm and anchor-wasm.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+state-verify = { path = "../state-verify" }
+wasm-bindgen = "=0.2.129"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+# k256 (the EVM's ecrecover) pulls getrandom 0.2 (through rand_core); on wasm32-unknown-unknown it needs the JS backend.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

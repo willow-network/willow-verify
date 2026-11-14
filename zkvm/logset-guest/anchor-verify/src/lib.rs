@@ -6,18 +6,23 @@
 //!   period, finality updates.
 //! - [`history`]: a block's hash from EIP-2935's history under a verified execution state root.
 //! - `beacon`: older blocks through the beacon state (`window_anchor_core::run`, the witness the
-//!   SP1 window-anchor guest checks), under a header the light client verified as final.
+//!   SP1 window-anchor guest checks; from the merge to Capella, [`bellatrix`]'s path through
+//!   `historical_roots`), under a header the light client verified as final.
+//! - [`premerge`]: blocks before the merge through EIP-7643's accumulator, whose root is pinned:
+//!   no light client.
 //!
 //! As in the other two verifiers, no method throws a verdict: each returns JSON with `ok` and,
 //! when it is false, a `kind` the page decides by, never the message. Host and wasm32, with no
 //! wasm-bindgen: `anchor-wasm` is the page's face of [`Anchor`], and `willow-eth-anchor` checks
 //! what it serves with [`confirm`].
 
+pub mod bellatrix;
 mod bls;
 pub mod call;
 pub mod history;
 pub mod l2;
 pub mod lc;
+pub mod premerge;
 pub mod signed;
 
 use alloy_primitives::B256;
@@ -127,7 +132,7 @@ pub fn result_of(body: &str, method: &str) -> Result<Value, Failure> {
 pub struct Confirmed {
     /// `final` (Ethereum finalized it) or `signed` (in the signed head's chain, not final yet).
     pub level: &'static str,
-    /// `head`, `history` or `beacon`.
+    /// `head`, `history`, `beacon` or `accumulator`.
     pub path: &'static str,
     /// Block `number`'s hash on Ethereum, as proven.
     pub hash: [u8; 32],
@@ -135,20 +140,79 @@ pub struct Confirmed {
     pub head: u64,
     pub head_time: u64,
     pub signers: usize,
+    /// Before the merge, the block's total difficulty, proven with its hash.
+    pub total_difficulty: Option<alloy_primitives::U256>,
 }
 
 /// A signed head older than this says nothing about a block not final yet: a head the validators
 /// signed and Ethereum later dropped could otherwise be shown forever.
 pub const MAX_SIGNED_AGE_SECS: u64 = 600;
 
+/// The block number an anchor names, which must be `number`.
+fn asked_block(number: u64, answer: &Value) -> Result<(), Failure> {
+    let asked = answer
+        .get("blockNumber")
+        .and_then(Value::as_str)
+        .and_then(|s| s.strip_prefix("0x"))
+        .and_then(|h| u64::from_str_radix(h, 16).ok())
+        .ok_or_else(|| Failure::new(Kind::MalformedInput, "the anchor has no blockNumber"))?;
+    if asked != number {
+        return Err(Failure::new(
+            Kind::Rejected,
+            format!("the anchor is for block {asked}, not {number}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether an Ethereum anchor for block `number` goes by the pre-merge accumulator: every block
+/// before the merge does, and only those may.
+pub fn is_premerge(number: u64, answer: &Value) -> bool {
+    number < premerge::MERGE_BLOCK
+        || answer
+            .get("proof")
+            .and_then(|p| p.get("kind"))
+            .and_then(Value::as_str)
+            == Some("accumulator")
+}
+
+/// Block `number`'s hash before the merge, from an `accumulator` anchor: no light client, so a
+/// stale checkpoint does not matter. Another kind of proof for a pre-merge block is rejected.
+pub fn confirm_premerge(number: u64, answer: &Value) -> Result<Confirmed, Failure> {
+    asked_block(number, answer)?;
+    let proof = answer
+        .get("proof")
+        .ok_or_else(|| Failure::new(Kind::MalformedInput, "the anchor has no proof"))?;
+    if proof.get("kind").and_then(Value::as_str) != Some("accumulator") {
+        return Err(Failure::new(
+            Kind::Rejected,
+            format!("block {number} is before the merge: only the accumulator proves it"),
+        ));
+    }
+    let (hash, td) = premerge::verify(number, proof)?;
+    Ok(Confirmed {
+        level: "final",
+        path: "accumulator",
+        hash,
+        finalized: 0,
+        head: 0,
+        head_time: 0,
+        signers: 0,
+        total_difficulty: Some(td),
+    })
+}
+
 /// Block `number`'s hash on Ethereum from a `willow_getBlockAnchor` result, through the light
-/// client's verified finality update.
+/// client's verified finality update (before the merge, through the accumulator alone).
 pub fn confirm(
     lc: &LightClient,
     number: u64,
     answer: &Value,
     now: u64,
 ) -> Result<Confirmed, Failure> {
+    if is_premerge(number, answer) {
+        return confirm_premerge(number, answer);
+    }
     lc.check_age(now)?;
     let asked = answer
         .get("blockNumber")
@@ -218,8 +282,15 @@ pub fn confirm(
                 .and_then(Value::as_str)
                 .ok_or_else(|| Failure::new(Kind::MalformedInput, "no beacon witness"))?;
             let blob = lc::bytes_of(w, "witness")?;
-            let s = window_anchor_core::run(&blob)
-                .map_err(|e| Failure::new(Kind::Rejected, format!("the beacon proof: {e:?}")))?;
+            // From the merge to Capella through historical_roots; from Capella on, the window
+            // guest's own core.
+            let s = if bellatrix::is_historical_roots(&blob) {
+                bellatrix::run(&blob)
+                    .map_err(|e| Failure::new(Kind::Rejected, format!("the beacon proof: {e:?}")))?
+            } else {
+                window_anchor_core::run(&blob)
+                    .map_err(|e| Failure::new(Kind::Rejected, format!("the beacon proof: {e:?}")))?
+            };
             if s.anchor_beacon_root != f.finalized.beacon.root()
                 || s.anchor_slot != f.finalized.beacon.slot
             {
@@ -263,6 +334,7 @@ pub fn confirm(
         head: head.number,
         head_time: head.timestamp,
         signers: f.signers,
+        total_difficulty: None,
     })
 }
 
@@ -427,6 +499,17 @@ impl Anchor {
                     "l1Block": c.l1_block,
                 }));
             }
+            if is_premerge(number as u64, &v) {
+                let c = confirm_premerge(number as u64, &v)?;
+                return Ok(json!({
+                    "ok": true,
+                    "level": c.level,
+                    "path": c.path,
+                    "hash": format!("{}", B256::from(c.hash)),
+                    "matches": c.hash == want,
+                    "totalDifficulty": c.total_difficulty.map(|t| format!("{t:#x}")),
+                }));
+            }
             let c = confirm(self.client()?, number as u64, &v, now as u64)?;
             Ok(json!({
                 "ok": true,
@@ -457,5 +540,7 @@ impl Anchor {
     }
 }
 
+#[cfg(test)]
+mod chains_tests;
 #[cfg(test)]
 mod tests;

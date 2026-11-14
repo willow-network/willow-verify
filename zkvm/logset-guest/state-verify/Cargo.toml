@@ -1,0 +1,32 @@
+# State, call and estimate proofs on Ethereum and the L2s (willow_getStateProof,
+# willow_getCallProof, willow_getEstimateGasProof): the wire shapes, the
+# verifier the client runs and the server checks itself with, and the EVM both
+# run (eth_call as geth runs it, eth_estimateGas as geth v1.17.10 searches).
+# Host and wasm32; its OWN workspace, like blockproof. No dev-dependencies, so
+# indexer-node, which depends on it by path, can run its tests
+# (`cargo test -p state-verify`).
+[workspace]
+resolver = "2"
+
+[package]
+name = "state-verify"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+logset-blockcheck = { path = "../blockcheck" }
+logset-blockproof = { path = "../blockproof" }
+alloy = { version = ">=1.1, <1.6", default-features = false, features = ["std", "consensus", "eips", "rlp", "k256"] }
+alloy-primitives = "1"
+alloy-rlp = "0.3"
+alloy-trie = "0.9"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+revm = { version = "29.0.1", default-features = false, features = ["std", "optional_block_gas_limit", "optional_eip3607", "optional_no_base_fee"] }
+
+# k256 (the EVM's ecrecover) pulls getrandom 0.2 (through rand_core); on wasm32-unknown-unknown it needs the JS backend.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }

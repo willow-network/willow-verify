@@ -1,18 +1,22 @@
-//! Proofs of a block's transactions and receipts against its block hash.
+//! Proofs of a block, its transactions and its receipts against its block hash.
 //!
 //! A proof carries the block's header (its RLP, whose keccak is the block
 //! hash) and items of its two ordered tries: either every value of a trie
 //! (`transactions`, `receipts`; the client rebuilds the root) or single items
 //! with the nodes from the root to each (`transactionProofs`,
-//! `receiptProofs`). What it proves is decided by the client's own request
-//! ([`Subject`]), never by the answer: [`verify`] binds the block (number or
-//! hash) and the transaction (hash or position) to the proven bytes, and the
-//! rendered JSON ([`Verified::answer`]) is built only from those bytes and the
-//! header. The one thing left to the client is that the block hash is
+//! `receiptProofs`). A block proof (`willow_getBlockProof`) also carries the
+//! block's withdrawals and uncles, which rebuild their header fields. What it
+//! proves is decided by the client's own request ([`Subject`]), never by the
+//! response: [`verify`] binds the block (number or hash) and the transaction
+//! (hash or position) to the proven bytes, and the rendered JSON
+//! ([`Verified::answer`]) is built only from those bytes and the header. The one thing left to the client is that the block hash is
 //! canonical: a node or light client of its own confirms it.
 
+use crate::block::{check_uncles, check_withdrawals, served_header};
+use crate::fault::{check, reject, Fault, Tag};
 use crate::mpt;
 use crate::render::{block_millis, Context, Rendered, View};
+use alloy::eips::eip4895::Withdrawal;
 use alloy_rlp::Decodable;
 use anyhow::{bail, ensure, Context as _, Result};
 use logset_blockcheck::receipts::{deposits_allowed, rlp_item, rlp_list_items, DEPOSIT_TX_TYPE};
@@ -46,6 +50,9 @@ pub enum Subject {
     /// `willow_getBlockReceiptsProof`: the `eth_getBlockReceipts` list (and
     /// every transaction object of the block).
     BlockReceipts(Block),
+    /// `willow_getBlockProof`: the `eth_getBlockByNumber` / `ByHash` object,
+    /// with transaction hashes or in full ([`Verified::block`]).
+    Block(Block),
 }
 
 /// The wire form (JSON-RPC result): hex quantities and `0x` data.
@@ -70,6 +77,18 @@ pub struct BlockProof {
     pub transaction_proofs: Vec<ItemProof>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub receipt_proofs: Vec<ItemProof>,
+    /// Block proofs: the block's withdrawals as one RLP list; absent when the
+    /// header has no withdrawalsRoot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawals: Option<String>,
+    /// Block proofs: the uncle headers' RLPs, in order; absent when the block
+    /// has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncles: Option<Vec<String>>,
+    /// Block proofs: the fields the proof does not cover, left out of the
+    /// rendering (only [`crate::block::UNPROVEN_UNCLES`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unproven: Vec<String>,
 }
 
 /// One trie item and the nodes from the root to its leaf, root first.
@@ -88,22 +107,23 @@ fn hexs(b: &[u8]) -> String {
     format!("0x{}", hex::encode(b))
 }
 
-fn parse_qty(s: &str, what: &str) -> Result<u64> {
+pub(crate) fn parse_qty(s: &str, what: &str) -> Result<u64> {
     let digits = s
         .strip_prefix("0x")
-        .with_context(|| format!("{what}: not a 0x quantity"))?;
-    ensure!(
+        .ok_or_else(|| reject(Fault::Malformed, format!("{what}: not a 0x quantity")))?;
+    check!(
         !digits.is_empty() && digits.len() <= 16 && digits.bytes().all(|b| b.is_ascii_hexdigit()),
+        Fault::Malformed,
         "{what}: not a quantity"
     );
-    Ok(u64::from_str_radix(digits, 16)?)
+    u64::from_str_radix(digits, 16).map_err(|e| reject(Fault::Malformed, format!("{what}: {e}")))
 }
 
-fn parse_bytes(s: &str, what: &str) -> Result<Vec<u8>> {
+pub(crate) fn parse_bytes(s: &str, what: &str) -> Result<Vec<u8>> {
     let digits = s
         .strip_prefix("0x")
-        .with_context(|| format!("{what}: not 0x data"))?;
-    hex::decode(digits).with_context(|| format!("{what}: not hex"))
+        .ok_or_else(|| reject(Fault::Malformed, format!("{what}: not 0x data")))?;
+    hex::decode(digits).map_err(|_| reject(Fault::Malformed, format!("{what}: not hex")))
 }
 
 /// Which items a proof of transaction or receipt `index` carries.
@@ -187,6 +207,52 @@ pub fn build_block(
     Ok(p)
 }
 
+/// The proof of a block (`willow_getBlockProof`): its header, every
+/// transaction, its withdrawals (`withdrawals`, their RLP list, when the
+/// header has a withdrawalsRoot) and its uncle headers (`uncles`, in order;
+/// `None` for a block whose uncle headers the server lacks, which leaves its
+/// uncles and size unproven). On the OP stack it also proves each deposit's
+/// receipt (`receipts`, all of the block's), whose bytes hold the nonce its
+/// transaction object reports.
+pub fn build_block_proof(
+    chain_id: u64,
+    header: &[u8],
+    txs: &[&[u8]],
+    receipts: Option<&[&[u8]]>,
+    withdrawals: Option<&[u8]>,
+    uncles: Option<&[&[u8]]>,
+) -> Result<BlockProof> {
+    let mut p = skeleton(chain_id, header)?;
+    let h = decode_header(header)?;
+    p.transactions = Some(txs.iter().map(|v| hexs(v)).collect());
+    let deposits: Vec<usize> = (0..txs.len())
+        .filter(|&i| deposits_allowed(chain_id) && txs[i].first() == Some(&DEPOSIT_TX_TYPE))
+        .collect();
+    if !deposits.is_empty() {
+        let receipts = receipts.context("an OP-stack block proof needs the block's receipts")?;
+        ensure!(
+            receipts.len() == txs.len(),
+            "{} transactions, {} receipts",
+            txs.len(),
+            receipts.len()
+        );
+        p.receipt_proofs = item_proofs(receipts, &deposits)?;
+    }
+    p.withdrawals = withdrawals.map(hexs);
+    let empty = h.ommers_hash.0 == crate::block::empty_ommers();
+    match uncles {
+        Some(u) if !u.is_empty() => p.uncles = Some(u.iter().map(|v| hexs(v)).collect()),
+        None if !empty => {
+            p.unproven = crate::block::UNPROVEN_UNCLES
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        }
+        _ => {}
+    }
+    Ok(p)
+}
+
 fn skeleton(chain_id: u64, header: &[u8]) -> Result<BlockProof> {
     let h = decode_header(header)?;
     Ok(BlockProof {
@@ -259,108 +325,174 @@ pub struct Verified {
     pub receipts: BTreeMap<usize, Vec<u8>>,
     /// Every transaction and receipt of the block is here.
     pub complete: bool,
+    /// The header's RLP.
+    pub header_rlp: Vec<u8>,
+    /// Block proofs: every transaction is here.
+    pub all_transactions: bool,
+    /// Block proofs: the withdrawals, when the header has a withdrawalsRoot.
+    pub withdrawals: Option<Vec<Withdrawal>>,
+    /// Block proofs: the uncles' RLPs and hashes; `None` when left unproven.
+    pub uncles: Option<crate::block::Uncles>,
+    /// Block proofs: the fields the proof leaves out.
+    pub unproven: Vec<String>,
 }
 
 /// Check `p` as the answer to `subject` on chain `chain_id`: the header hashes
 /// to the block hash, every item is under the header's roots (lists rebuild
 /// them, item proofs walk to them), the block and transaction are the ones
-/// asked for, and every item the subject needs is there.
+/// asked for, and every item the subject needs is there. Each failure carries
+/// its [`Fault`] ([`crate::fault::fault`]).
 pub fn verify(p: &BlockProof, chain_id: u64, subject: &Subject) -> Result<Verified> {
     let got_chain = parse_qty(&p.chain_id, "chainId")?;
-    ensure!(
+    check!(
         got_chain == chain_id,
+        Fault::Chain,
         "the proof is for chain {got_chain}, not {chain_id}"
     );
     let header = parse_bytes(&p.header, "header")?;
-    let h = decode_header(&header)?;
+    let h = decode_header(&header).tag(Fault::Header)?;
     let hash = alloy_primitives::keccak256(&header).0;
-    ensure!(
+    check!(
         parse_bytes(&p.block_hash, "blockHash")? == hash,
+        Fault::Header,
         "blockHash is not the keccak of the header"
     );
-    ensure!(
+    check!(
         parse_qty(&p.block_number, "blockNumber")? == h.number,
+        Fault::Header,
         "blockNumber is not the header's"
     );
     let block = match subject {
         Subject::Transaction(Item::At(b, _))
         | Subject::Receipt(Item::At(b, _))
-        | Subject::BlockReceipts(b) => *b,
+        | Subject::BlockReceipts(b)
+        | Subject::Block(b) => *b,
         _ => Block::Tag,
     };
     match block {
-        Block::Number(n) => ensure!(
+        Block::Number(n) => check!(
             h.number == n,
+            Fault::Block,
             "the proof is for block {}, not {n}",
             h.number
         ),
-        Block::Hash(want) => ensure!(
+        Block::Hash(want) => check!(
             hash == want,
+            Fault::Block,
             "the proof is for block 0x{}, not 0x{}",
             hex::encode(hash),
             hex::encode(want)
         ),
         Block::Tag => {}
     }
+    let is_block = matches!(subject, Subject::Block(_));
+    if !is_block {
+        check!(
+            p.withdrawals.is_none() && p.uncles.is_none() && p.unproven.is_empty(),
+            Fault::Malformed,
+            "withdrawals, uncles or unproven fields in a proof that is not a block proof"
+        );
+    }
     let (transactions, all_txs) = items(
         p.transactions.as_deref(),
         &p.transaction_proofs,
         &h.transactions_root.0,
         "transaction",
-    )?;
+    )
+    .tag(Fault::Transactions)?;
     let (receipts, all_receipts) = items(
         p.receipts.as_deref(),
         &p.receipt_proofs,
         &h.receipts_root.0,
         "receipt",
-    )?;
+    )
+    .tag(Fault::Receipts)?;
     let complete = all_txs && all_receipts;
     if complete {
-        ensure!(
+        check!(
             transactions.len() == receipts.len(),
+            Fault::Receipts,
             "{} transactions but {} receipts",
             transactions.len(),
             receipts.len()
         );
     }
+    let (mut withdrawals, mut uncles) = (None, None);
     let index = match subject {
         Subject::BlockReceipts(_) => {
-            ensure!(
+            check!(
                 complete,
+                Fault::Missing,
                 "a block's receipts are proven only by every transaction and receipt"
             );
+            None
+        }
+        Subject::Block(_) => {
+            check!(
+                p.transaction_index.is_none(),
+                Fault::Malformed,
+                "a transactionIndex in a block proof"
+            );
+            check!(
+                all_txs,
+                Fault::Missing,
+                "a block is proven only by every transaction"
+            );
+            let raw = p
+                .withdrawals
+                .as_deref()
+                .map(|w| parse_bytes(w, "withdrawals"))
+                .transpose()?;
+            withdrawals = check_withdrawals(chain_id, &h, raw.as_deref())?;
+            let raw = p
+                .uncles
+                .as_ref()
+                .map(|u| {
+                    u.iter()
+                        .enumerate()
+                        .map(|(i, v)| parse_bytes(v, &format!("uncle {i}")))
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?;
+            uncles = check_uncles(&h, raw.as_deref(), &p.unproven)?;
             None
         }
         Subject::Transaction(item) | Subject::Receipt(item) => {
             let i = parse_qty(
                 p.transaction_index
                     .as_deref()
-                    .context("no transactionIndex")?,
+                    .ok_or_else(|| reject(Fault::Missing, "no transactionIndex"))?,
                 "transactionIndex",
             )?;
             let i = usize::try_from(i)
                 .ok()
                 .filter(|i| *i < mpt::MAX_ITEMS)
-                .context("transactionIndex out of range")?;
+                .ok_or_else(|| reject(Fault::Malformed, "transactionIndex out of range"))?;
             let tx = transactions
                 .get(&i)
-                .with_context(|| format!("transaction {i} is not proven"))?;
+                .ok_or_else(|| reject(Fault::Missing, format!("transaction {i} is not proven")))?;
             match item {
-                Item::Hash(want) => ensure!(
+                Item::Hash(want) => check!(
                     alloy_primitives::keccak256(tx).0 == *want,
+                    Fault::Item,
                     "the proven transaction {i} is 0x{}, not 0x{}",
                     hex::encode(alloy_primitives::keccak256(tx)),
                     hex::encode(want)
                 ),
                 Item::At(_, want) => {
-                    ensure!(
+                    check!(
                         i as u64 == *want,
+                        Fault::Item,
                         "the proof is for transaction {i}, not {want}"
                     )
                 }
             }
             if matches!(subject, Subject::Receipt(_)) {
-                ensure!(receipts.contains_key(&i), "receipt {i} is not proven");
+                check!(
+                    receipts.contains_key(&i),
+                    Fault::Missing,
+                    "receipt {i} is not proven"
+                );
             }
             Some(i)
         }
@@ -375,6 +507,11 @@ pub fn verify(p: &BlockProof, chain_id: u64, subject: &Subject) -> Result<Verifi
         transactions,
         receipts,
         complete,
+        header_rlp: header,
+        all_transactions: all_txs,
+        withdrawals,
+        uncles,
+        unproven: if is_block { p.unproven.clone() } else { vec![] },
     })
 }
 
@@ -387,8 +524,9 @@ fn items(
 ) -> Result<(BTreeMap<usize, Vec<u8>>, bool)> {
     let mut out = BTreeMap::new();
     if let Some(all) = all {
-        ensure!(
+        check!(
             proofs.is_empty(),
+            Fault::Malformed,
             "both every {what} and {what} proofs: one or the other"
         );
         let values = all
@@ -396,6 +534,12 @@ fn items(
             .enumerate()
             .map(|(i, v)| parse_bytes(v, &format!("{what} {i}")))
             .collect::<Result<Vec<_>>>()?;
+        check!(
+            values.len() <= mpt::MAX_ITEMS,
+            Fault::Malformed,
+            "{} {what}s, more than any block holds",
+            values.len()
+        );
         let rebuilt = logset_blockcheck::trie::ordered_root(&values)?;
         ensure!(
             &rebuilt == root,
@@ -410,7 +554,7 @@ fn items(
         let i = usize::try_from(i)
             .ok()
             .filter(|i| *i < mpt::MAX_ITEMS)
-            .with_context(|| format!("{what} index {i} out of range"))?;
+            .ok_or_else(|| reject(Fault::Malformed, format!("{what} index {i} out of range")))?;
         let value = parse_bytes(&p.value, &format!("{what} {i}"))?;
         let nodes = p
             .proof
@@ -422,7 +566,11 @@ fn items(
             proven == value,
             "{what} {i}: the value is not the proven one"
         );
-        ensure!(out.insert(i, value).is_none(), "{what} {i} twice");
+        check!(
+            out.insert(i, value).is_none(),
+            Fault::Malformed,
+            "{what} {i} twice"
+        );
     }
     Ok((out, false))
 }
@@ -439,8 +587,12 @@ impl Verified {
     }
 
     /// The JSON the subject's standard method answers, rendered from the proven
-    /// bytes, with the fields the proof does not determine.
+    /// bytes, with the fields the proof does not determine. A block proof's is
+    /// the block with transaction hashes ([`Verified::block`]).
     pub fn answer(&self) -> Result<Rendered> {
+        if let Subject::Block(_) = self.subject {
+            return self.block(false);
+        }
         let v = self.view()?;
         match (self.subject, self.index) {
             (Subject::Transaction(_), Some(i)) => v.tx(i).context("no transaction"),
@@ -448,6 +600,50 @@ impl Verified {
             (Subject::BlockReceipts(_), _) => Ok(each(&v, |v, i| v.receipt(i))),
             _ => bail!("no transaction index"),
         }
+    }
+
+    /// `eth_getBlockByNumber(n, full)` (and `eth_getBlockByHash`) of a block
+    /// proof, from the proven parts alone: the served header (the log store's
+    /// own rendering) without the fields the proof leaves unproven, and with
+    /// `full` every transaction object, each sender recovered from its bytes.
+    pub fn block(&self, full: bool) -> Result<Rendered> {
+        ensure!(
+            matches!(self.subject, Subject::Block(_)) && self.all_transactions,
+            "not a verified block proof"
+        );
+        let tx_values: Vec<Vec<u8>> = self.transactions.values().cloned().collect();
+        let (uncle_rlps, uncle_hashes) = self.uncles.clone().unwrap_or_default();
+        let size = logset_blockcheck::block::block_size(
+            &self.header_rlp,
+            &tx_values,
+            &uncle_rlps,
+            self.withdrawals.as_deref(),
+        );
+        let body = logset_blockcheck::VerifiedBody {
+            tx_hashes: tx_values
+                .iter()
+                .map(|v| alloy_primitives::keccak256(v).0)
+                .collect(),
+            tx_values,
+            withdrawals: self.withdrawals.clone(),
+            uncles: uncle_hashes,
+            size: size as u64,
+        };
+        let header = logset_blockcheck::header_from_rlp(&self.header_rlp)?;
+        let mut json = served_header(self.chain_id, &header, &body)?;
+        let o = json.as_object_mut().expect("an object");
+        for f in &self.unproven {
+            o.remove(f);
+        }
+        let mut unproven = self.unproven.clone();
+        if full {
+            let txs = each(&self.view()?, |v, i| v.tx(i));
+            o.insert("transactions".into(), txs.json);
+            unproven.extend(txs.unproven.into_iter().map(|f| format!("transactions{f}")));
+        }
+        unproven.sort();
+        unproven.dedup();
+        Ok(Rendered { json, unproven })
     }
 
     /// The proof's own transaction object, for transaction and receipt proofs.

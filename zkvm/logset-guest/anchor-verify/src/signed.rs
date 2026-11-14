@@ -31,7 +31,8 @@ pub struct Sequenced {
     pub key: KeyOn,
 }
 
-pub const SEQUENCED: [Sequenced; 6] = [
+/// Soneium, Zora and World Chain: their SystemConfigs as `willow-l2-heads` reads them (2026-11-12).
+pub const SEQUENCED: [Sequenced; 9] = [
     Sequenced {
         chain_id: 8453,
         name: "Base",
@@ -67,6 +68,21 @@ pub const SEQUENCED: [Sequenced; 6] = [
             inbox: address!("Bd0D173EEb87D57A09521c24388a12789F33ba96"),
             first_block: 0,
         },
+    },
+    Sequenced {
+        chain_id: 1868,
+        name: "Soneium",
+        key: KeyOn::SystemConfig(address!("7A8Ed66B319911A0F3E7288BDdAB30d9c0C875c3")),
+    },
+    Sequenced {
+        chain_id: 7777777,
+        name: "Zora",
+        key: KeyOn::SystemConfig(address!("A3cAB0126d5F504B071b81a3e8A2BBBF17930d86")),
+    },
+    Sequenced {
+        chain_id: 480,
+        name: "World Chain",
+        key: KeyOn::SystemConfig(address!("6ab0777fD0e609CE58F939a7F70Fe41F5Aa6300A")),
     },
 ];
 

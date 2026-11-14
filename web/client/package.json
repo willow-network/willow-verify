@@ -1,0 +1,71 @@
+{
+  "name": "@willow-network/rpc",
+  "version": "0.1.0",
+  "description": "A drop-in verifying JSON-RPC client for Willow: a viem transport and an ethers v6 provider that verify every response",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/willow-network/willow-verify.git",
+    "directory": "web/client"
+  },
+  "homepage": "https://api.willow.tech/verify/",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    },
+    "./viem": {
+      "import": "./dist/esm/viem.js",
+      "require": "./dist/cjs/viem.js"
+    },
+    "./ethers": {
+      "import": "./dist/esm/ethers.js",
+      "require": "./dist/cjs/ethers.js"
+    },
+    "./verifiers": {
+      "import": "./dist/esm/verifiers.js",
+      "require": "./dist/cjs/verifiers.js"
+    }
+  },
+  "files": [
+    "dist",
+    "wasm",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@noble/curves": "1.9.1",
+    "@noble/hashes": "1.8.0"
+  },
+  "peerDependencies": {
+    "ethers": "^6.13.0",
+    "viem": "^2.21.0"
+  },
+  "peerDependenciesMeta": {
+    "ethers": {
+      "optional": true
+    },
+    "viem": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "20.19.25",
+    "ethers": "6.15.0",
+    "typescript": "5.9.3",
+    "viem": "2.57.11",
+    "vitest": "3.2.4"
+  }
+}
