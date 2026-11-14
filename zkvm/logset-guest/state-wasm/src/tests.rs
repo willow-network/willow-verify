@@ -273,8 +273,9 @@ fn requests_are_read_as_the_proof_methods_read_them() {
         ("state", json!([a, []])),
         (
             "call",
-            json!([{"to": a}, "latest", {a: {"balance": "0x1"}}]),
+            json!([{"to": a}, "latest", {a: {"state": {}, "stateDiff": {}}}]),
         ),
+        ("call", json!([{"to": a}, "latest", null, {"time": "soon"}])),
         ("call", json!(["0x", "latest"])),
         (
             "estimate",
@@ -290,12 +291,65 @@ fn requests_are_read_as_the_proof_methods_read_them() {
         json!("invalid-request")
     );
     assert_eq!(parse(&v.request("logs", "[]"))["kind"], json!("internal"));
+    // Overrides are the client's own: read, and laid over the proof's witness.
+    ok(
+        &mut v,
+        "call",
+        json!([{"to": a}, "latest", {a: {"balance": "0x1", "code": "0x00"}}, {"time": "0x5"}]),
+    );
+    ok(
+        &mut v,
+        "estimate",
+        json!([{"to": a}, "latest", {a: {"stateDiff": {format!("0x{:064x}", 1): format!("0x{:064x}", 2)}}}]),
+    );
+    // Ones the RPC doesn't run: not verifiable, never invalid.
+    for t in [
+        json!([{"to": a}, "latest", {a: {"movePrecompileToAddress": a}}]),
+        json!([{"to": a, "blobVersionedHashes": ["0x01"]}, "latest"]),
+    ] {
+        assert_eq!(
+            parse(&v.request("call", &t.to_string()))["kind"],
+            json!("unsupported"),
+            "{t}"
+        );
+    }
     let mut base = StateVerifier::new(8453);
     assert_eq!(
         parse(&base.request("call", &json!([{"to": a}, "latest"]).to_string()))["kind"],
         json!("unsupported")
     );
     ok(&mut base, "state", json!([a, [], "latest"]));
+    // Unichain's and Robinhood Chain's calls and estimates (Robinhood's without a difficulty or
+    // prevRandao override, which Nitro's estimate reads into its header).
+    let mut uni = StateVerifier::new(130);
+    ok(&mut uni, "call", json!([{"to": a}, "latest"]));
+    ok(&mut uni, "estimate", json!([{"to": a}, "latest"]));
+    let mut rh = StateVerifier::new(4663);
+    ok(
+        &mut rh,
+        "call",
+        json!([{"to": a, "skipL1Charging": true}, "latest"]),
+    );
+    ok(&mut rh, "estimate", json!([{"to": a}, "latest"]));
+    for o in [
+        json!({"difficulty": "0x2"}),
+        json!({"prevRandao": format!("0x{}", "11".repeat(32))}),
+    ] {
+        assert_eq!(
+            parse(&rh.request("estimate", &json!([{"to": a}, "latest", {}, o]).to_string()))
+                ["kind"],
+            json!("unsupported"),
+            "{o}"
+        );
+    }
+    let arbos = "0xa4b05fffffffffffffffffffffffffffffffffff";
+    assert_eq!(
+        parse(&rh.request(
+            "call",
+            &json!([{"to": a}, "latest", {arbos: {"balance": "0x1"}}]).to_string()
+        ))["kind"],
+        json!("unsupported")
+    );
     // Out of order: a fault of the caller, never a verdict.
     let mut fresh = StateVerifier::new(1);
     assert_eq!(
@@ -306,4 +360,141 @@ fn requests_are_read_as_the_proof_methods_read_them() {
         parse(&fresh.compare("eth_getBalance", &body(&json!("0x0"))))["kind"],
         json!("internal")
     );
+}
+
+/// Trace-verify's recorded trace proofs (Ethereum and Unichain mainnet), each verified through
+/// `StateVerifier` to the response the trace method sent, compared, and failed when tampered.
+#[test]
+fn every_trace_proof_verifies_and_compares() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../trace-verify/testdata");
+    let mut files: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.ends_with(".json"))
+        .collect();
+    files.sort();
+    let mut seen = 0;
+    for name in files {
+        let f: Value =
+            serde_json::from_slice(&std::fs::read(format!("{dir}/{name}")).unwrap()).unwrap();
+        let chain = u32::from_str_radix(&f["block"]["chainId"].as_str().unwrap()[2..], 16).unwrap();
+        for c in f["cases"].as_array().unwrap() {
+            let mut proof = f["block"].clone();
+            proof["ancestors"] = c["ancestors"].clone();
+            let pick = |field: &str| -> Value {
+                let at = |i: &Value| f["pool"][field][i.as_u64().unwrap() as usize].clone();
+                Value::Array(
+                    c["witness"][field]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(at)
+                        .collect(),
+                )
+            };
+            proof["witness"] = json!({"nodes": pick("nodes"), "codes": pick("codes")});
+            proof["algorithm"] = json!(trace_verify::ALGORITHM);
+            let method = c["params"][0].as_str().unwrap();
+            let mut v = StateVerifier::new(chain);
+            let r = parse(&v.request("trace", &c["params"].to_string()));
+            assert_eq!(r["ok"], json!(true), "{name} {method}: {r}");
+            assert_eq!(r["method"], json!("willow_getTraceProof"));
+            let out = parse(&v.verify(&body(&proof)));
+            assert_eq!(out["ok"], json!(true), "{name} {method}: {out}");
+            assert_eq!(out["proven"]["result"], c["expect"], "{name} {method}");
+            assert_eq!(out["report"]["block"]["hash"], proof["blockHash"]);
+            assert_eq!(out["report"]["traced"], json!(method));
+            let same = parse(&v.compare(method, &body(&c["expect"])));
+            assert_eq!(
+                same["result"]["exact"],
+                json!(true),
+                "{name} {method}: {same}"
+            );
+            let other = parse(&v.compare(method, &body(&json!([{"x": 1}]))));
+            assert_eq!(
+                other["result"]["exact"],
+                json!(false),
+                "{name} {method}: {other}"
+            );
+            for (change, kind) in [
+                (
+                    json!({"witness": {"nodes": [], "codes": []}}),
+                    "missing-read",
+                ),
+                (json!({"algorithm": "x"}), "algorithm"),
+                (json!({"receipts": []}), "receipts"),
+            ] {
+                let mut bent = proof.clone();
+                for (k, x) in change.as_object().unwrap() {
+                    bent[k] = x.clone();
+                }
+                let mut v = StateVerifier::new(chain);
+                v.request("trace", &c["params"].to_string());
+                let out = parse(&v.verify(&body(&bent)));
+                assert_eq!(out["kind"], json!(kind), "{name} {method} {change}: {out}");
+            }
+            seen += 1;
+        }
+    }
+    assert!(seen >= 10, "{seen} trace proofs");
+    let mut v = StateVerifier::new(10);
+    let r = parse(&v.request("trace", &json!(["trace_block", ["0x1"]]).to_string()));
+    assert_eq!(r["kind"], json!("unsupported"));
+    let mut v = StateVerifier::new(130);
+    let r = parse(&v.request(
+        "trace",
+        &json!(["debug_traceCall", [{}, "latest"]]).to_string(),
+    ));
+    assert_eq!(r["kind"], json!("unsupported"));
+    let mut v = StateVerifier::new(1);
+    let r = parse(&v.request("trace", &json!(["eth_call", []]).to_string()));
+    assert_eq!(r["kind"], json!("invalid-request"));
+}
+
+/// Trace-verify's recorded call trace proofs (`debug_traceCall`, `trace_call` on Ethereum), each
+/// verified through `StateVerifier` to the response the trace method sent, compared, and failed
+/// when tampered.
+#[test]
+fn every_call_trace_proof_verifies_and_compares() {
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../trace-verify/testdata/calls"
+    );
+    let mut seen = 0;
+    for e in std::fs::read_dir(dir).unwrap() {
+        let path = e.unwrap().path();
+        let f: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for c in f["cases"].as_array().unwrap() {
+            let method = c["params"][0].as_str().unwrap();
+            let mut v = StateVerifier::new(1);
+            let r = parse(&v.request("trace", &c["params"].to_string()));
+            assert_eq!(r["ok"], json!(true), "{method}: {r}");
+            let out = parse(&v.verify(&body(&c["result"])));
+            assert_eq!(out["ok"], json!(true), "{method}: {out}");
+            assert_eq!(out["proven"]["result"], c["expect"], "{method}");
+            assert_eq!(out["report"]["block"]["hash"], c["result"]["blockHash"]);
+            assert_eq!(out["report"]["traced"], json!(method));
+            let same = parse(&v.compare(method, &body(&c["expect"])));
+            assert_eq!(same["result"]["exact"], json!(true), "{method}: {same}");
+            for (change, kind) in [
+                (
+                    json!({"witness": {"accounts": [], "nodes": []}}),
+                    "missing-read",
+                ),
+                (json!({"algorithm": "x"}), "algorithm"),
+                (json!({"chainId": "0x5"}), "wrong-chain"),
+            ] {
+                let mut bent = c["result"].clone();
+                for (k, x) in change.as_object().unwrap() {
+                    bent[k] = x.clone();
+                }
+                let mut v = StateVerifier::new(1);
+                v.request("trace", &c["params"].to_string());
+                let out = parse(&v.verify(&body(&bent)));
+                assert_eq!(out["kind"], json!(kind), "{method} {change}: {out}");
+            }
+            seen += 1;
+        }
+    }
+    assert!(seen >= 10, "{seen} call trace proofs");
 }

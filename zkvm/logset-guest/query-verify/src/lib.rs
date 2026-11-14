@@ -43,7 +43,7 @@ pub fn openvm_keys() -> Keys {
 /// F. An L2's F is a timestamp (1,794,038,400, 2026-11-07 08:00 UTC, in all six 2026-10-29 L2
 /// registries), and its entry is the first block whose timestamp is at or after F, so it can be
 /// added only once that block exists: the L2s are pinned after 2026-11-07. Until a chain has an
-/// entry, an answer may move from SP1 to OpenVM once, at any block, and the report says where.
+/// entry, a response may move from SP1 to OpenVM once, at any block, and the report says where.
 pub const OPENVM_FROM: &[(u64, u64)] = &[(1, 26_361_856)];
 
 /// The first OpenVM block of `chain_id`, if pinned.

@@ -37,7 +37,7 @@ to 0, so a failed verification is never asked again. `new WillowProvider(options
 
 | Option | Default | |
 | :--- | :--- | :--- |
-| `chainId` | required | 1, 8453, 10, 130, 57073, 42161 or 4663 |
+| `chainId` | required | 1; 8453, 10, 130, 57073, 1868, 7777777, 480, 42161, 4663 (anchored on Ethereum); 11155420, 84532, 1301, 763373, 421614, 46630 (on Sepolia); 56 (on BNB's validators) |
 | `key` | `public` | the API key; the public path serves blocks, transactions, receipts, logs and fees, not state |
 | `url` | `https://api.willow.tech/v1/rpc/{chainId}/{key}` | |
 | `lightClientUrl` | `url` with chain 1 | Ethereum's route, for the light client |
@@ -48,11 +48,14 @@ to 0, so a failed verification is never asked again. `new WillowProvider(options
 | `maxHeadAgeSec` | 600 | how old the newest block Willow anchors may be |
 | `checkpoint` | the shipped one | the light client's start `{root, slot}` |
 | `checkpointUrl`, `beaconApis` | Willow's `checkpoint.json`; two beacon APIs in Node | a newer start once the shipped one is 29 days old, confirmed by the beacon APIs |
+| `sepoliaCheckpoint` | the shipped one | Sepolia's light client's start `{root, slot}` (the testnets); `checkpoint.json`'s `sepolia` once the shipped one is 29 days old |
+| `bnbStart` | the shipped one | BNB's light client's start `{number, hash, time}`, an epoch block; `checkpoint.json`'s `bnb` once the shipped one is a day old (the verifier refuses 7; a cold client walks every epoch since its start) |
 | `storage` | localStorage, or `~/.cache/willow-rpc/` in Node | where the light client's committees are kept (verified again when read); `false` for none |
 | `worker` | browsers true, Node false | verify in a Web Worker |
 | `batchWindowMs` | 5 | requests this close together go out as one batch |
 | `verifiers` | the package's wasm builds | the verifier modules (below), injected (tests, other builds) |
 | `logsTimeoutMs` | 120000 | how long `eth_getLogs` waits for Willow to prove blocks |
+| `anchorWaitMs` | 36000 | how long a request waits for the anchor of a block newer than the newest one anchored (below) |
 
 **What each method is verified by:**
 
@@ -61,19 +64,33 @@ to 0, so a failed verification is never asked again. `new WillowProvider(options
 | `eth_getBlockByNumber`, `ByHash`, `eth_getBlockTransactionCountBy*` | `willow_getBlockProof`, cached by hash |
 | `eth_blockNumber` | the anchored head: `willow_getBlockAnchor ["latest"]` |
 | `eth_getBalance`, `eth_getTransactionCount`, `eth_getCode`, `eth_getStorageAt`, `eth_getProof` | `willow_getStateProof`; reads of one account at one block go as one proof; code is cached by code hash |
-| `eth_call`, `eth_estimateGas` (Ethereum) | `willow_getCallProof`, `willow_getEstimateGasProof` |
+| `eth_call`, `eth_estimateGas` (Ethereum, Unichain, Robinhood Chain) | `willow_getCallProof`, `willow_getEstimateGasProof`, with the call's state and block overrides: the client lays them over the proven state itself; Robinhood Chain's estimate is Nitro's search (`nitro-v3.12.2-estimate`) |
 | `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_blobBaseFee` | one `willow_getFeeProof` at the head (formula `willow-fee-v1`) |
 | `eth_feeHistory` | `willow_getFeeHistoryProof`, in proofs of 16 blocks when rewards are asked for |
 | `eth_getTransactionByHash`, `ByBlock*AndIndex`, `eth_getTransactionReceipt`, `eth_getBlockReceipts` | the shipped transaction and receipt proofs; an unknown hash is `null` |
 | `eth_getLogs` | up to 8 blocks: `willow_getBlockReceiptsProof` per block, the range anchored from its newest block through parent hashes; more: `willow_getLogsProof` (plans with log proofs), its proof jobs waited for |
+| `debug_traceTransaction`, `debug_traceBlockByNumber`, `debug_traceBlockByHash`, `trace_block`, `trace_transaction`, `trace_replayBlockTransactions`, `trace_replayTransaction` (Ethereum, Unichain) | `willow_getTraceProof [method, params]`: the block run here over the proven parent state, every transaction checked against its receipt, the trace written by the server's own tracers (`trace-verify`) |
+| `debug_traceCall`, `trace_call` (Ethereum) | `willow_getTraceProof [method, params]`: a call proof's witness at the block the client resolved; the call run here as `eth_call` runs it, under the caller's overrides, traced by the same tracers |
+| `trace_filter` (Ethereum, Unichain) | `willow_getTraceProof` of `trace_block` per block (at most 16), filtered here, the range anchored from its newest block through parent hashes |
 | `eth_sendRawTransaction` | none: the hash is computed here from the bytes and must be the server's |
 | `eth_newFilter`, `eth_newBlockFilter`, `eth_getFilterChanges`, `eth_getFilterLogs`, `eth_uninstallFilter` | served here over the verified methods |
 | `eth_chainId`, `net_version`, `net_listening`, `net_peerCount`, `web3_clientVersion`, `eth_syncing`, `eth_accounts` | served here; one `eth_chainId` at start must name the configured chain |
 
-Every proven block is anchored on Ethereum by the light client (one for all seven chains), at
-`minLevel` or above. `latest` is the anchored head; `finalized` on Ethereum is the light client's
-finalized block; `safe` on Ethereum is refused, as the server refuses it. The pending nonce is
-the proven one, or one past this client's own last sent nonce, never a server's.
+Every proven block is anchored, at `minLevel` or above, by one of three light clients in the anchor
+module: Ethereum's (Ethereum and the L2s that settle on it), Sepolia's (the testnets; its data on the
+testnet's own route) and BNB's validator set (BNB Smart Chain, on its own route; its `latest` is its
+newest finalized block, so it is served at any `minLevel`; a block only sealed counts as `signed` for
+10 minutes). `latest` (and `pending`, or no block) is the anchored head, as Helios reads it: the
+newest block the light client has seen signed, not the server's newest; `finalized` on Ethereum is
+the light client's finalized block; `safe` on Ethereum is refused, as the server refuses it. The
+pending nonce is the proven one, or one past this client's own last sent nonce, never a server's.
+
+**The newest block.** The light client signs Ethereum block N only in slot N+1, and Willow's RPC
+serves state at its own node's newest block, one slot ahead of it. A request that names such a
+block by number waits for its anchor: while `willow_getBlockAnchor [n]` says `waiting`, it is
+asked again every `waitMs.anchor` (else the server's `retryAfterSeconds`, else 4 s) until
+`anchorWaitMs` (default 36 s, three slots) has passed; then the request fails as unverifiable
+(-32099, `anchor-waiting`).
 
 **Errors.** Every error has `code`, `message` and `data`. Decide by `data.kind`, never by the
 message.
@@ -98,15 +115,16 @@ message.
 | `tx-hash` | -32098 | the server's transaction hash is not the hash of the bytes |
 | `internal` | -32098 | a verifier failed to run (a trap): fail closed |
 | `tag` | -32099 | `safe` or `finalized` on an L2: the block verifies, the tag's meaning does not |
-| `method` | -32099 | a value from a method with no proof (overrides, eth_call on an L2 that serves one, any method not above) |
+| `method` | -32099 | a value from a method with no proof (a call or overrides the verifier doesn't run, such as `movePrecompileToAddress`; `eth_call` on an L2 without call proofs; any method not above) |
 | `not-on-plan` | -32099 | the proof method is not served for this key or path (-32601) |
 | `logs-range`, `logs-timeout`, `logs-job-failed` | -32099 | `eth_getLogs` over more than 8 blocks with no log proof |
 | `no-verifier` | -32099 | a verifier module is missing from this build |
 | `anchor-level` | -32099 | the block is anchored below `minLevel`, or an L2 `latest` above `signed` |
+| `anchor-waiting` | -32099 | the block's anchor was still waiting for the light client after `anchorWaitMs` |
 | `anchor-stale-head`, `anchor-not-covered`, `anchor-declined`, `anchor-disputed`, `anchor-unreachable`, `anchor-stale-checkpoint`, `anchor-unknown-fork`, `anchor-refused` | -32099 | the block can't be anchored now; a replayed or stale head lands here, as no forged value can |
 
 Absences and refusals pass through as they are: `null` receipts and transactions, every JSON-RPC
-error (L2 `eth_call` and `eth_estimateGas` are -32601), and provider errors from
+error (`eth_call` and `eth_estimateGas` where Willow doesn't run them are -32601), and provider errors from
 `eth_sendRawTransaction`.
 
 **Events** (`onVerification`): `{method, status, chainId, block?, level?, kind?, detail?, flags?,
@@ -168,6 +186,7 @@ over the `state-verify` crate). `new StateVerifier(chainId)`:
 | `state` | `willow_getStateProof` | `[address, storageKeys, block, {"code": bool}]` | `{eth_getBalance, eth_getTransactionCount, eth_getCode, eth_getStorageAt[], eth_getProof}` |
 | `call` | `willow_getCallProof` | `[call, block]` | `{result}` or `{error}` |
 | `estimate` | `willow_getEstimateGasProof` | `[call, block]` | `{result}` or `{error}` |
+| `trace` | `willow_getTraceProof` | `[method, params]` (a trace method a proof covers) | `{result}`: the trace method's response (`trace_verify::verify_trace`); the report adds `traced` and `algorithm` (`willow-trace-v1`) |
 
 - `request(kind, target)` → `{ok, method, params}`; `verify(response)` → `{ok, report, proven}`
   with `report.block` `{number, hash, timestamp, parentHash}`; `compare(method, response)` →

@@ -35,8 +35,10 @@ export interface AnchorsOptions {
   /** How old the newest block may be (appendix D rules 1 and 2). */
   maxHeadAgeSec: number;
   nowMs: () => number;
-  /** Waits before asking again for a block newer than the signed head. */
+  /** Waits before asking again for a block newer than the signed head (default: the server's `retryAfterSeconds`, else 4000). */
   waitingMs?: number;
+  /** How long a block newer than the signed head is waited for, in all (default 36000); then it is unverifiable (`anchor-waiting`). */
+  anchorWaitMs?: number;
 }
 
 /** Light-client updates asked for at once (one per period; anchor-verify lc.rs `MAX_UPDATES`; BNB: one per epoch, bnb.rs). */
@@ -50,7 +52,8 @@ const keyOf = (lc?: LightClientName) => (lc ? `${LIGHT_CLIENT_KEY}:${lc}` : LIGH
 const LATEST_IS_FINAL = new Set([56]);
 /** Catch-up rounds per anchor, as the page's confirmOnEthereum. */
 const CATCH_UP_ROUNDS = 3;
-const WAITING_RETRIES = 3;
+const WAITING_MS = 4000;
+const ANCHOR_WAIT_MS = 36_000;
 const ETHEREUM_SIGNED_SECS = 600;
 const L2_SIGNED_SECS = 3 * 3600;
 
@@ -168,15 +171,27 @@ export class Anchors {
     return p;
   }
 
-  /** A `willow_getBlockAnchor` response; a block newer than the signed head is asked for again. */
-  async body(chainId: number, param: string): Promise<Reply> {
-    for (let attempt = 0; ; attempt++) {
+  /**
+   * A `willow_getBlockAnchor` response. A block newer than the signed head (the server says
+   * `waiting`: the light client signs block N only in slot N+1) is asked for again until
+   * `anchorWaitMs` has passed, then it is unverifiable (`anchor-waiting`, -32099).
+   */
+  async body(chainId: number, param: string, method?: string): Promise<Reply> {
+    const started = Date.now();
+    for (;;) {
       const reply = await this.o.rpc(chainId, 'willow_getBlockAnchor', [param]);
       const e = reply.value.error;
       if (!e) return reply;
-      const waiting = e.data && typeof e.data === 'object' && (e.data as { status?: unknown }).status === 'waiting';
-      if (!waiting || attempt >= WAITING_RETRIES) return reply;
-      await sleep(this.o.waitingMs ?? 4000);
+      const data = e.data && typeof e.data === 'object' ? (e.data as { status?: unknown; retryAfterSeconds?: unknown }) : null;
+      if (data?.status !== 'waiting') return reply;
+      const bound = this.o.anchorWaitMs ?? ANCHOR_WAIT_MS;
+      const left = bound - (Date.now() - started);
+      if (left <= 0) {
+        throw new WillowUnverifiableError('anchor-waiting', `block ${param} of chain ${chainId} was not anchored within ${bound} ms: ${String(e.message ?? '')}`, method);
+      }
+      const after = Number(data.retryAfterSeconds);
+      const every = this.o.waitingMs ?? (after > 0 && after <= 60 ? after * 1000 : WAITING_MS);
+      await sleep(Math.min(every, left));
     }
   }
 
@@ -236,7 +251,7 @@ export class Anchors {
 
   private async fetchHead(chainId: number, which: 'latest' | 'finalized', tag: string, method?: string): Promise<Anchored> {
     const started = this.o.nowMs();
-    const reply = await this.body(chainId, tag);
+    const reply = await this.body(chainId, tag, method);
     if (reply.value.error) throw this.refused(reply, `willow_getBlockAnchor ["${tag}"]`, method);
     const n = toNumber((reply.value.result as { blockNumber?: unknown } | null)?.blockNumber);
     if (n === null) throw new WillowVerificationError('anchor-malformed', `the anchor for "${tag}" names no block number`, method);
@@ -286,7 +301,7 @@ export class Anchors {
 
   private async fetchBlock(chainId: number, number: number, hash: string, prefetched: Promise<Reply> | undefined, method?: string): Promise<Anchored> {
     for (let attempt = 0; ; attempt++) {
-      const reply = attempt === 0 && prefetched ? await prefetched : await this.body(chainId, toQuantity(number));
+      const reply = attempt === 0 && prefetched ? await prefetched : await this.body(chainId, toQuantity(number), method);
       if (reply.value.error) throw this.refused(reply, `willow_getBlockAnchor [${number}]`, method);
       let r: AnchorVerified;
       try {

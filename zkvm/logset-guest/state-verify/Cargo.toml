@@ -1,7 +1,9 @@
 # State, call and estimate proofs on Ethereum and the L2s (willow_getStateProof,
 # willow_getCallProof, willow_getEstimateGasProof): the wire shapes, the
-# verifier the client runs and the server checks itself with, and the EVM both
-# run (eth_call as geth runs it, eth_estimateGas as geth v1.17.10 searches).
+# verifier the client runs and the server checks itself with, and the EVMs both
+# run (eth_call as the log RPC serves it: reth's rules on Ethereum, op-reth's on
+# Unichain, Nitro's on Robinhood Chain, under the caller's overrides;
+# eth_estimateGas as geth v1.17.10 searches).
 # Host and wasm32; its OWN workspace, like blockproof. No dev-dependencies, so
 # indexer-node, which depends on it by path, can run its tests
 # (`cargo test -p state-verify`).
@@ -26,6 +28,12 @@ hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 revm = { version = "29.0.1", default-features = false, features = ["std", "optional_block_gas_limit", "optional_eip3607", "optional_no_base_fee"] }
+# Overrides read and laid over the witness as reth v1.8 does (the log RPC's eth_call uses the same).
+alloy-evm = { version = "0.21.3", default-features = false, features = ["std", "overrides"] }
+alloy-rpc-types-eth = { version = ">=1.1, <1.6", default-features = false, features = ["std", "serde"] }
+# The L2s' EVMs, as the log RPC runs their calls: Unichain's (OP stack) and Robinhood Chain's.
+willow-op-exec = { path = "../../../crates/op-exec" }
+willow-arb-exec = { path = "../../../crates/arb-exec" }
 
 # k256 (the EVM's ecrecover) pulls getrandom 0.2 (through rand_core); on wasm32-unknown-unknown it needs the JS backend.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

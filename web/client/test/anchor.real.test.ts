@@ -165,6 +165,7 @@ function anchorsFor(w: World, url: string, checkpoint: { root: string; slot: num
     maxHeadAgeSec: 600,
     nowMs: () => w.nowSec * 1000,
     waitingMs: 5,
+    anchorWaitMs: 50,
   });
 }
 

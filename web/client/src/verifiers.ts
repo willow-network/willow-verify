@@ -234,13 +234,19 @@ export interface ItemVerifierConstructor {
  * | `state`    | `willow_getStateProof`        | `[address, storageKeys, block, {"code": bool}]` (the last may be left out) |
  * | `call`     | `willow_getCallProof`         | `[callObject, block]`                                  |
  * | `estimate` | `willow_getEstimateGasProof`  | `[callObject, block]`                                  |
+ * | `trace`    | `willow_getTraceProof`        | `[method, params]`: a trace method and its own params   |
  *
  * `block` is any form W2's `At::parse` reads: a `0x` number, a tag, a 32-byte hash, or EIP-1898
  * `{"blockHash"}` / `{"blockNumber"}`. At most 256 storage keys (`MAX_PROOF_SLOTS`). `call` and
- * `estimate` refuse overrides (a third or fourth param), and any chain but 1 (`unsupported`).
- * `request` returns `params` as given, once they parse.
+ * `estimate` take the caller's state and block overrides (a third and fourth param) on chains 1,
+ * 130 and 4663 (else `unsupported`). `request` returns `params` as given, once they parse. `trace`
+ * covers `debug_traceTransaction`, `debug_traceBlockByNumber`, `debug_traceBlockByHash`,
+ * `trace_block`, `trace_transaction`, `trace_replayBlockTransactions` and
+ * `trace_replayTransaction` on chains 1 and 130, and `debug_traceCall` and `trace_call` on chain 1
+ * (trace-verify's `request::PROVEN`); `trace_filter` as one request, other chains and the tracers
+ * a chain's trace methods don't run are `unsupported`.
  */
-export type StateKind = 'state' | 'call' | 'estimate';
+export type StateKind = 'state' | 'call' | 'estimate' | 'trace';
 
 /** W2's `Kind::as_str()` (zkvm/logset-guest/state-verify/src/lib.rs), unchanged. */
 export type StateFailureKind =
@@ -259,15 +265,27 @@ export type StateFailureKind =
   | 'outcome'
   | 'estimate'
   | 'algorithm'
-  | 'internal';
+  | 'internal'
+  // `trace` only (trace-verify's `Kind::as_str()`):
+  | 'parent'
+  | 'transactions'
+  | 'receipts'
+  | 'disagrees'
+  | 'too-large'
+  | 'no-trace';
 
 export interface StateReport {
   method: string;
   chainId: number;
   /** The block the proof names (W2's `Named`), to anchor. */
   block: ProvenBlock;
-  /** `estimate`: the algorithm verified (`geth-v1.17.10-estimate`). */
+  /**
+   * `estimate`: the algorithm verified (`geth-v1.17.10-estimate`; on Robinhood Chain
+   * `nitro-v3.12.2-estimate`); `trace`: `willow-trace-v1`.
+   */
   algorithm?: string;
+  /** `trace`: the trace method proven. */
+  traced?: string;
 }
 
 /**
@@ -299,10 +317,15 @@ export interface StateProven {
  */
 export type CallProven = { result: string } | { error: { code: number; message: string; data?: string } };
 
+/** `trace` → `proven`: the trace method's standard `result`, from the client's own run of the block. */
+export interface TraceProven {
+  result: unknown;
+}
+
 export interface StateVerified {
   ok: true;
   report: StateReport;
-  proven: StateProven | CallProven;
+  proven: StateProven | CallProven | TraceProven;
 }
 
 /**
@@ -319,7 +342,7 @@ export interface StateVerifier {
    * `{"ok": true, "result": {"exact": boolean, "differ": string[]}}`, or a failure (`internal`
    * without a passing verify, `malformed` when `response` can't be read). `method` names which:
    * `eth_getBalance`, `eth_getTransactionCount`, `eth_getCode`, `eth_getProof`,
-   * `eth_getStorageAt:<i>` (the i-th key asked), `eth_call` or `eth_estimateGas`. The page and the
+   * `eth_getStorageAt:<i>` (the i-th key asked), `eth_call`, `eth_estimateGas` or the trace method. The page and the
    * differential tests use it; the client does not.
    */
   compare(method: string, response: string): JsonText;

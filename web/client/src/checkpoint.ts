@@ -88,12 +88,12 @@ export interface Starts {
 }
 
 /**
- * The package's starts besides Ethereum's, rewritten by the same build: Sepolia's slot 11,575,968
- * (2026-11-14, after Gloas; the same root at publicnode and ChainSafe) and BNB's epoch block
- * 133,510,000 (2026-11-14, the same hash at three operators).
+ * The package's starts besides Ethereum's, rewritten by the same build: Sepolia's slot 11,577,216
+ * (2026-11-14, after Gloas; the start Willow's Sepolia anchor service keeps the bootstrap of) and
+ * BNB's epoch block 133,510,000 (2026-11-14, the same hash at three operators).
  */
 export const SHIPPED_STARTS: Starts = {
-  sepolia: { root: '0x35f9d71dbf378dce8387786beaeb03b7496bb245a2d88692a76fd38df40923fd', slot: 11575968 },
+  sepolia: { root: '0x5d5b94c9c82d9f56409699948380d58de837f39a170e0de81c547642d3b58415', slot: 11577216 },
   bnb: { number: 133510000, hash: '0x51e9a0b4ab8fe7bfa6745a14c99860342f866d4b341828092356db2f8748a35f', time: 1794644124 },
 };
 

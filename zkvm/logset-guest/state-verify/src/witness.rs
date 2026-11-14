@@ -3,7 +3,7 @@
 //! witness of exactly what a call read ([`Builder`]).
 
 use crate::call::{Reads, Witness};
-use crate::history::{self, HISTORY_ADDRESS};
+use crate::history::{History, ETHEREUM, HISTORY_ADDRESS};
 use crate::proof::{self, hx, Proven};
 use crate::wire;
 use crate::{Failure, Kind};
@@ -119,6 +119,17 @@ pub fn expand(w: &wire::Witness) -> Result<Vec<Value>, Failure> {
 /// `w` proven against `state_root`: each account (present or absent) and each of its slots, and
 /// each account's code against its code hash. An account no run reads is proven and ignored.
 pub fn verify(state_root: B256, w: &wire::Witness) -> Result<Witness, Failure> {
+    verify_on(ETHEREUM, state_root, w, &HashSet::new())
+}
+
+/// [`verify`] on a chain whose history account is `history`; the code of an account in `own_code`
+/// (the caller's overrides set it) may be left out.
+pub fn verify_on(
+    history: History,
+    state_root: B256,
+    w: &wire::Witness,
+    own_code: &HashSet<Address>,
+) -> Result<Witness, Failure> {
     let accounts = expand(w)?;
     if w.codes.len() > MAX_ACCOUNTS {
         return Err(limits(format!(
@@ -142,7 +153,7 @@ pub fn verify(state_root: B256, w: &wire::Witness) -> Result<Witness, Failure> {
         }
         codes.insert(hash, code);
     }
-    let pinned = history::code_hash();
+    let pinned = history.code_hash();
     let mut seen = HashSet::new();
     let mut out = Witness::default();
     for a in &accounts {
@@ -157,7 +168,9 @@ pub fn verify(state_root: B256, w: &wire::Witness) -> Result<Witness, Failure> {
                 if h != pinned && h != KECCAK_EMPTY && h != B256::ZERO {
                     return Err(Failure::new(
                         Kind::History,
-                        format!("the history account's code hash is {h}, not EIP-2935's"),
+                        format!(
+                            "the history account's code hash is {h}, not this chain's EIP-2935's"
+                        ),
                     ));
                 }
             }
@@ -182,12 +195,20 @@ pub fn verify(state_root: B256, w: &wire::Witness) -> Result<Witness, Failure> {
             ));
         }
         let code = match p.has_code() {
-            true => codes.get(&p.code_hash).cloned().ok_or_else(|| {
-                Failure::new(
-                    Kind::Code,
-                    format!("the code of {address} ({}) is left out", p.code_hash),
-                )
-            })?,
+            true => match codes.get(&p.code_hash) {
+                Some(c) => c.clone(),
+                // The caller's code replaces it.
+                None if own_code.contains(&address) => {
+                    out.add_without_code(p);
+                    continue;
+                }
+                None => {
+                    return Err(Failure::new(
+                        Kind::Code,
+                        format!("the code of {address} ({}) is left out", p.code_hash),
+                    ))
+                }
+            },
             false => Bytes::new(),
         };
         out.add(p, code);
@@ -208,6 +229,10 @@ impl Builder {
     /// `p`, verified from the provider's `eth_getProof` answer `given`, with the code its code
     /// hash names. Proofs of one account in several parts (slots asked for in chunks) merge.
     pub fn add(&mut self, p: &Proven, given: &Value, code: &Bytes) {
+        self.put(p, given, Some(code));
+    }
+
+    fn put(&mut self, p: &Proven, given: &Value, code: Option<&Bytes>) {
         let keys = p
             .slots
             .iter()
@@ -226,19 +251,36 @@ impl Builder {
         for ((k, _), s) in p.slots.iter().zip(storage) {
             entry.1.insert(*k, s);
         }
-        if p.has_code() {
+        if let (true, Some(code)) = (p.has_code(), code) {
             self.codes.insert(p.code_hash, code.clone());
         }
+    }
+
+    /// `p`, verified from the provider's `eth_getProof` response `given`, without its code (the
+    /// caller's overrides set it).
+    pub fn add_without_code(&mut self, p: &Proven, given: &Value) {
+        self.put(p, given, None);
     }
 
     /// The witness of `reads`: each account read with the slots read of it, the EIP-2935 slots of
     /// the block hashes read, each code once and the nodes shared. Fails when something read was
     /// never added.
     pub fn build(&self, reads: &Reads) -> Result<wire::Witness, String> {
+        self.build_on(ETHEREUM, reads, &HashSet::new())
+    }
+
+    /// [`Builder::build`] on a chain whose history account is `history`; the code of an account in
+    /// `own_code` (the caller's overrides set it) is left out.
+    pub fn build_on(
+        &self,
+        history: History,
+        reads: &Reads,
+        own_code: &HashSet<Address>,
+    ) -> Result<wire::Witness, String> {
         let mut want = reads.accounts.clone();
         if !reads.block_hashes.is_empty() {
             let slots = want.entry(HISTORY_ADDRESS).or_default();
-            slots.extend(reads.block_hashes.iter().map(|n| history::slot(*n)));
+            slots.extend(reads.block_hashes.iter().map(|n| history.slot(*n)));
         }
         let mut accounts = Vec::with_capacity(want.len());
         let mut codes = BTreeMap::new();
@@ -263,12 +305,13 @@ impl Builder {
                 .filter(|b| b.len() == 32)
                 .map(|b| B256::from_slice(&b))
                 .unwrap_or(KECCAK_EMPTY);
-            if code_hash != KECCAK_EMPTY {
-                let code = self
-                    .codes
-                    .get(&code_hash)
-                    .ok_or_else(|| format!("no code of {address}"))?;
-                codes.insert(hx(code_hash.as_slice()), hx(code));
+            match self.codes.get(&code_hash) {
+                _ if code_hash == KECCAK_EMPTY => {}
+                Some(code) => {
+                    codes.insert(hx(code_hash.as_slice()), hx(code));
+                }
+                None if own_code.contains(address) => {}
+                None => return Err(format!("no code of {address}")),
             }
             accounts.push(a);
         }

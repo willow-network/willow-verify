@@ -1,7 +1,10 @@
 // Runs the built state, call and estimate verifier (web/verify-dist/state.*.wasm) under Node, as
 // the worker and @willow-network/rpc call it, on the proofs in
-// zkvm/logset-guest/state-verify/testdata/ (recorded with geth's own responses). Clean and tampered
-// cases; every tampered proof must fail with its kind. Exits 1 on any surprise.
+// zkvm/logset-guest/state-verify/testdata/ (recorded with geth's own responses; served/: proofs the
+// RPC built over recorded nodes' state on Ethereum, Unichain and Robinhood Chain, with overrides and
+// gas prices, each with the response its eth_call or eth_estimateGas served; Robinhood Chain's
+// estimates are Nitro's search, equal to the Nitro node's own). Clean and tampered cases; every tampered
+// proof must fail with its kind. Exits 1 on any surprise.
 //   node web/verify/test/state.mjs <dist dir>
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -29,8 +32,9 @@ const load = (dir) =>
     .filter((f) => f.endsWith('.json'))
     .sort()
     .map((name) => ({ name: name.replace(/\.json$/, ''), f: JSON.parse(readFileSync(join(DATA, dir, name), 'utf8')) }));
-const chainOf = (name) => (name.startsWith('base-') ? 8453 : 1);
-const kindOf = (name) => (name.startsWith('call-') ? 'call' : name.startsWith('estimate-') ? 'estimate' : 'state');
+const SERVED = new Map();
+const chainOf = (name) => SERVED.get(name)?.chain ?? (name.startsWith('base-') ? 8453 : 1);
+const kindOf = (name) => SERVED.get(name)?.kind ?? (name.startsWith('call-') ? 'call' : name.startsWith('estimate-') ? 'estimate' : 'state');
 const flip = (h) => h.slice(0, -1) + (h.at(-1) === '0' ? '1' : '0');
 const USDC = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
 const HISTORY = '0x0000f90827f1c53a10cb7a02335b175320002935';
@@ -153,6 +157,36 @@ callTamper('an account dropped from the witness', call('estimate-uniswap-swap'),
   expect('call: an extra, unrelated account in the witness is ignored', r.ok && isDeepStrictEqual(r.proven, balance.f.expect), r.ok ? '' : `${r.kind}: ${r.message}`);
 }
 
+// ---------- calls the RPC served (overrides, gas prices, Unichain, Robinhood Chain) ----------
+
+const served = load('served');
+for (const { name, f } of served) {
+  SERVED.set(name, { chain: parseInt(f.result.chainId, 16), kind: f.request.method === 'willow_getCallProof' ? 'call' : 'estimate' });
+}
+for (const { name, f } of served) {
+  const { req, r, ms } = run(name, f);
+  expect(`${name}: the request, its overrides included`, req.ok && isDeepStrictEqual(req.params, f.request.params), JSON.stringify(req).slice(0, 200));
+  expect(`${name} (chain ${chainOf(name)}): verifies to the response the RPC served`, r.ok && isDeepStrictEqual(r.proven, f.expect), r.ok ? `${ms.toFixed(0)} ms` : `${r.kind}: ${r.message}`);
+}
+const servedOf = (name) => served.find((c) => c.name === name);
+const L1_BLOCK = '0x4200000000000000000000000000000000000015';
+const ARBOS = '0xa4b05fffffffffffffffffffffffffffffffffff';
+callTamper('Unichain: an L1Block fee slot', servedOf('unichain-l1-fee'), (r) => (account(r, L1_BLOCK).storageProof[0].value = '0x1234'), 'slot');
+callTamper('Unichain: L1Block dropped', servedOf('unichain-l1-fee'), (r) => (r.witness.accounts = r.witness.accounts.filter((a) => a.address.toLowerCase() !== L1_BLOCK)), 'missing-read');
+callTamper('Robinhood: ArbOS dropped', servedOf('robinhood-0-0'), (r) => (r.witness.accounts = r.witness.accounts.filter((a) => a.address.toLowerCase() !== ARBOS)), 'missing-read');
+callTamper('Robinhood: a history slot dropped', servedOf('proof-hashes-robinhood'), (r) => account(r, HISTORY).storageProof.pop(), 'missing-read');
+callTamper("Robinhood: an estimate's ArbOS slots dropped", servedOf('robinhood-estimate-token-transfer'), (r) => (account(r, ARBOS).storageProof = []), 'missing-read');
+callTamper('Robinhood: estimate + 1', servedOf('robinhood-estimate-token-transfer'), (r) => (r.estimate.gas = `0x${(parseInt(r.estimate.gas, 16) + 1).toString(16)}`), 'estimate');
+callTamper("Robinhood: an estimate by geth's search", servedOf('robinhood-estimate-token-transfer'), (r) => (r.algorithm = 'geth-v1.17.10-estimate'), 'algorithm');
+{
+  // The overrides are the client's own: run without them, the slot they set is read and was never proven.
+  const s = servedOf('eth-override-slot');
+  const v = new StateVerifier(1);
+  v.request('call', JSON.stringify(s.f.request.params.slice(0, 2)));
+  const r = JSON.parse(v.verify(body(s.f.result)));
+  expect('call: a proof run under overrides, asked without them, fails as missing-read', !r.ok && r.kind === 'missing-read', r.ok ? 'verified' : `${r.kind}: ${r.message}`);
+}
+
 // ---------- requests ----------
 
 const a = '0x28c6c06298d514db089934071355e5743bf21d60';
@@ -160,7 +194,7 @@ for (const [kind, t, why] of [
   ['state', ['0x12', [], 'latest'], 'an address that is not one'],
   ['state', [a, Array(257).fill('0x1'), 'latest'], 'over 256 storage keys'],
   ['state', [a, [], 'yesterday'], 'a block that is not one'],
-  ['call', [{ to: a }, 'latest', { [a]: { balance: '0x1' } }], 'a state override'],
+  ['call', [{ to: a }, 'latest', { [a]: { state: {}, stateDiff: {} } }], 'an override with both state and stateDiff'],
   ['estimate', [{ to: a, gasPrice: '0x1', maxFeePerGas: '0x1' }, 'latest'], 'both gas prices'],
 ]) {
   const r = JSON.parse(new StateVerifier(1).request(kind, JSON.stringify(t)));
@@ -168,7 +202,11 @@ for (const [kind, t, why] of [
 }
 {
   const r = JSON.parse(new StateVerifier(8453).request('call', JSON.stringify([{ to: a }, 'latest'])));
-  expect('call: a call on an L2 is unsupported (the client sends it as it is)', !r.ok && r.kind === 'unsupported', r.message);
+  expect('call: a call on an L2 whose calls are not proven is unsupported (the client sends it as it is)', !r.ok && r.kind === 'unsupported', r.message);
+  const e = JSON.parse(new StateVerifier(4663).request('estimate', JSON.stringify([{ to: a }, 'latest'])));
+  expect("estimate: Robinhood Chain's estimates are verified (Nitro's search)", e.ok && e.method === 'willow_getEstimateGasProof', e.message);
+  const d = JSON.parse(new StateVerifier(4663).request('estimate', JSON.stringify([{ to: a }, 'latest', {}, { difficulty: '0x2' }])));
+  expect("estimate: Robinhood Chain's with a difficulty override is unsupported", !d.ok && d.kind === 'unsupported', d.message);
   const v = new StateVerifier(1);
   expect('verify before any request is internal', JSON.parse(v.verify(body({}))).kind === 'internal');
 }

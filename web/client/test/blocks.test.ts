@@ -61,6 +61,34 @@ describe('blocks on every chain', () => {
     expect(h.events.at(-1)!.block).toEqual(old);
   });
 
+  it('a block newer than the signed head waits for its anchor (the server says waiting), then is anchored', async () => {
+    h = await harness({ chainId: 1 });
+    headAt(h.world, 1, blockOf('ethereum-26391511.json'));
+    const old = blockOf('ethereum-17034874.json');
+    let asked = 0;
+    const waiting = { error: { code: -32000, message: `block ${old.number} is newer than the signed head`, data: { status: 'waiting', retryAfterSeconds: 4 } } };
+    h.world.intercept = (_c, m, p) => (m === 'willow_getBlockAnchor' && p[0] === toQuantity(old.number) && ++asked < 3 ? waiting : undefined);
+    await h.client.request({ method: 'eth_getBlockByNumber', params: [toQuantity(old.number), false] });
+    expect(asked).toBe(3);
+    expect(h.events.at(-1)).toMatchObject({ status: 'verified', block: old });
+  });
+
+  it('a block whose anchor is still waiting past anchorWaitMs is unverifiable (-32099, anchor-waiting)', async () => {
+    h = await harness({ chainId: 1, options: { anchorWaitMs: 40 } });
+    headAt(h.world, 1, blockOf('ethereum-26391511.json'));
+    const old = blockOf('ethereum-17034874.json');
+    let asked = 0;
+    const waiting = { error: { code: -32000, message: `block ${old.number} is newer than the signed head`, data: { status: 'waiting', retryAfterSeconds: 4 } } };
+    h.world.intercept = (_c, m, p) => (m === 'willow_getBlockAnchor' && p[0] === toQuantity(old.number) && ++asked ? waiting : undefined);
+    const started = Date.now();
+    await expect(h.client.request({ method: 'eth_getBlockByNumber', params: [toQuantity(old.number), false] })).rejects.toMatchObject({
+      code: -32099,
+      data: { kind: 'anchor-waiting' },
+    });
+    expect(asked).toBeGreaterThan(1);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(40);
+  });
+
   it("a block by hash: its anchor is a second round trip, and its parent's hash is then anchored without one", async () => {
     h = await harness({ chainId: 1 });
     headAt(h.world, 1, blockOf('ethereum-26391511.json'));

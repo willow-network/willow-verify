@@ -39,12 +39,28 @@
         <label><input type="radio" name="kind" value="account"> Account</label>
         <label><input type="radio" name="kind" value="call"> Call</label>
         <label><input type="radio" name="kind" value="fees"> Fees</label>
+        <label><input type="radio" name="kind" value="trace"> Trace</label>
       </div>
     </fieldset>
 
     <div class="field">
       <label for="chain">Chain</label>
       <select id="chain"></select>
+    </div>
+
+    <div class="field" id="traceField" hidden>
+      <label for="traceMethod">Method</label>
+      <select id="traceMethod">
+        <option value="debug_traceTransaction">debug_traceTransaction</option>
+        <option value="debug_traceBlockByNumber">debug_traceBlockByNumber</option>
+        <option value="debug_traceBlockByHash">debug_traceBlockByHash</option>
+        <option value="debug_traceCall">debug_traceCall</option>
+        <option value="trace_transaction">trace_transaction</option>
+        <option value="trace_block">trace_block</option>
+        <option value="trace_replayTransaction">trace_replayTransaction</option>
+        <option value="trace_replayBlockTransactions">trace_replayBlockTransactions</option>
+        <option value="trace_call">trace_call</option>
+      </select>
     </div>
 
     <div class="field" id="logsField">
@@ -82,7 +98,12 @@
         <button type="button" id="callExample" class="link" title="USDC's balanceOf for Uniswap v4's PoolManager">Use an example</button>
       </div>
       <textarea id="call" rows="6" wrap="off" spellcheck="false" autocomplete="off" placeholder='{"to": "0x…", "data": "0x…"}'></textarea>
-      <label class="check"><input id="estimate" type="checkbox"> Estimate its gas (eth_estimateGas) instead</label>
+      <label class="check" id="estimateRow"><input id="estimate" type="checkbox"> Estimate its gas (eth_estimateGas) instead</label>
+    </div>
+
+    <div class="field" id="tracerField" hidden>
+      <label for="tracer" id="tracerLabel">Tracer</label>
+      <select id="tracer"></select>
     </div>
 
     <div class="field" id="atField" hidden>

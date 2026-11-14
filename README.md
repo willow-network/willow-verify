@@ -6,8 +6,8 @@ This is the source of the page at https://api.willow.tech/verify/. The page veri
 
 Everything runs in a Web Worker, in four WebAssembly modules built from the Rust crates here.
 
-- **Logs** (`zkvm/logset-guest/query-wasm`, with `zkvm/logset-guest-openvm/verify-wasm`). Willow answers a log query with zkVM proofs that each block's logs are complete, plus proofs over its log index. Each chain's proofs are SP1 proofs up to its switch to OpenVM, and OpenVM 2.0.2 proofs from it. The page tells the two apart by each proof's first bytes, verifies every proof against its own system's program keys pinned in this repository, works out from your filter which logs must be in the answer, and compares Willow's plain `eth_getLogs` answer with the proven logs. SP1's and OpenVM's verifiers cannot be built into one module (they pin different versions of a shared crate), so OpenVM proofs are verified in a second module, loaded only for an answer that has one. The log module decides which key each proof is checked under; the OpenVM module checks it and verifies under the pinned OpenVM programs only.
-- **Transactions and receipts** (`zkvm/logset-guest/items-wasm`). Merkle-Patricia proofs: the header hashes to the block hash, each transaction or receipt is under the header's roots, and the block and transaction are the ones you asked for. The page then compares Willow's plain answers with the proven ones, field by field. No zero-knowledge proof is involved here.
+- **Logs** (`zkvm/logset-guest/query-wasm`, with `zkvm/logset-guest-openvm/verify-wasm`). Willow responds to a log query with zkVM proofs that each block's logs are complete, plus proofs over its log index. Each chain's proofs are SP1 proofs up to its switch to OpenVM, and OpenVM 2.0.2 proofs from it. The page tells the two apart by each proof's first bytes, verifies every proof against its own system's program keys pinned in this repository, works out from your filter which logs must be in the response, and compares Willow's plain `eth_getLogs` response with the proven logs. SP1's and OpenVM's verifiers cannot be built into one module (they pin different versions of a shared crate), so OpenVM proofs are verified in a second module, loaded only for a response that has one. The log module decides which key each proof is checked under; the OpenVM module checks it and verifies under the pinned OpenVM programs only.
+- **Transactions and receipts** (`zkvm/logset-guest/items-wasm`). Merkle-Patricia proofs: the header hashes to the block hash, each transaction or receipt is under the header's roots, and the block and transaction are the ones you asked for. The page then compares Willow's plain responses with the proven ones, field by field. No zero-knowledge proof is involved here.
 - **Blocks** (`zkvm/logset-guest/anchor-wasm`, built from `zkvm/logset-guest/anchor-verify`). Every proof above ends at a block hash, and the page confirms that hash is block N of its chain. On Ethereum it runs Ethereum's light client from a checkpoint built into the page, then finds the block's hash in Ethereum's own block-hash history (EIP-2935) or in the beacon state. On Base, OP Mainnet, Unichain, and Ink it reads the chain's dispute games on Ethereum. On Arbitrum One and Robinhood Chain it reads the chain's assertions on Ethereum. It does this by running the contracts' own code over Ethereum state proven against the light client. A block newer than any claim on Ethereum is verified by the sequencer's signature, with the sequencer's key read from Ethereum the same way.
 
 `web/verify/TRUSTLESS-ANCHOR.md` describes the block confirmation in full.
@@ -23,11 +23,11 @@ Everything runs in a Web Worker, in four WebAssembly modules built from the Rust
 ## What it does not trust
 
 - Willow's RPC, the beacon APIs, and the RPC nodes Willow reads from. Whatever they send is verified, and data that fails is shown as not verified.
-- Willow's plain answers. They are compared with the proven ones.
+- Willow's plain responses. They are compared with the proven ones.
 
 ## What it does not verify, and says so
 
-- When Willow cannot send the data to confirm an L2 block, the page asks two public nodes of that chain and shows their answer in gold, never as settled. A node you enter under Advanced is asked instead.
+- When Willow cannot send the data to confirm an L2 block, the page asks two public nodes of that chain and shows their response in gold, never as settled. A node you enter under Advanced is asked instead.
 - An L2's own finality (Base treats a block as final about 20 minutes in, for example). The page says it does not verify that.
 - Token symbols and decimals. They come from `eth_call` on public nodes.
 - Which block is "latest". That comes from Willow.

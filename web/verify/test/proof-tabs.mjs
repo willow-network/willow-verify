@@ -1,15 +1,18 @@
-// End-to-end: the Block, Account, Call and Fees tabs of the built page in a headless browser,
+// End-to-end: the Block, Account, Call, Fees and Trace tabs of the built page in a headless browser,
 // against a stand-in server that serves the page (with the live CSP) and the proof methods from
-// the block, fee, state and call fixtures (zkvm/logset-guest/blockproof/fixtures,
-// zkvm/logset-guest/state-verify/testdata). It holds no anchors for those blocks, so a clean case
-// ends "verification is not complete" at the block's confirmation; a tampered proof or a standard
-// response that differs ends "Not verified". Exits 1 on any failed case.
+// the block, fee, state, call and trace fixtures (zkvm/logset-guest/blockproof/fixtures,
+// zkvm/logset-guest/state-verify/testdata, zkvm/logset-guest/trace-verify/testdata). It holds no
+// anchors for those blocks (and every other host is refused, so no public node is asked), so a
+// clean case ends "verification is not complete" at the block's confirmation; a tampered proof or a
+// standard response that differs ends "Not verified". The chains without log or fee proofs refuse
+// those tabs before asking anything. Exits 1 on any failed case.
 //   [BROWSER=chromium|webkit|firefox] PLAYWRIGHT=<dir of the playwright package> node proof-tabs.mjs <dist> [screenshot dir]
 import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 const [dist, shots] = process.argv.slice(2);
 const require = createRequire(import.meta.url);
@@ -24,10 +27,24 @@ const FEES = json(`${W1}/fees/ethereum-26391511.fee.json`);
 const USDC = json(`${W2}/state/usdc-slots-code.json`);
 const CALL = json(`${W2}/call/call-usdc-balance.json`);
 const ESTIMATE = json(`${W2}/call/estimate-transfer.json`);
+const W3 = 'zkvm/logset-guest/trace-verify/testdata';
+/// Every recorded trace: [method, params] asked, the willow_getTraceProof result, and the trace method's response.
+const TRACES = [];
+for (const file of ['ethereum-26398868.json', 'unichain-63764357.json']) {
+  const f = json(`${W3}/${file}`);
+  for (const c of f.cases) {
+    const pick = (field) => c.witness[field].map((i) => f.pool[field][i]);
+    const proof = { ...f.block, ancestors: c.ancestors, witness: { nodes: pick('nodes'), codes: pick('codes') }, algorithm: 'willow-trace-v1' };
+    TRACES.push({ params: c.params, proof, expect: c.expect, call: false });
+  }
+}
+for (const c of json(`${W3}/calls/ethereum-call-26399187.json`).cases) TRACES.push({ params: c.params, proof: c.result, expect: c.expect, call: true });
+const traceOf = (asked) => TRACES.find((t) => isDeepStrictEqual(t.params, asked));
+const TRACE_METHODS = new Set(['debug_traceTransaction', 'debug_traceBlockByNumber', 'debug_traceBlockByHash', 'debug_traceCall', 'trace_transaction', 'trace_block', 'trace_replayTransaction', 'trace_replayBlockTransactions', 'trace_call']);
 const flip = (h) => h.slice(0, -1) + (h.at(-1) === '0' ? '1' : '0');
 const CSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https: http://127.0.0.1:*; img-src 'self' data:; style-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.svg': 'image/svg+xml', '.txt': 'text/plain', '.woff2': 'font/woff2', '.json': 'application/json' };
-const STATE = new Set(['willow_getStateProof', 'willow_getCallProof', 'willow_getEstimateGasProof', 'eth_getBalance', 'eth_getTransactionCount', 'eth_getCode', 'eth_getStorageAt', 'eth_getProof', 'eth_call', 'eth_estimateGas']);
+const STATE = new Set(['willow_getStateProof', 'willow_getCallProof', 'willow_getEstimateGasProof', 'willow_getTraceProof', 'eth_getBalance', 'eth_getTransactionCount', 'eth_getCode', 'eth_getStorageAt', 'eth_getProof', 'eth_call', 'eth_estimateGas', ...TRACE_METHODS]);
 
 /// One JSON-RPC response, by the path's mode: good, tampered (the proof changed), lying (a standard response changed).
 function respond(mode, key, { method, params }) {
@@ -87,8 +104,19 @@ function respond(mode, key, { method, params }) {
       return copy(ESTIMATE.result);
     case 'eth_estimateGas':
       return ESTIMATE.expect.result;
-    default:
+    case 'willow_getTraceProof': {
+      const t = traceOf(params);
+      if (!t) throw { code: -32602, message: `no recorded trace for ${JSON.stringify(params).slice(0, 120)}` };
+      const r = copy(t.proof);
+      if (tampered && t.call) r.witness.accounts.shift();
+      else if (tampered) r.witness.nodes = [];
+      return r;
+    }
+    default: {
+      const t = TRACE_METHODS.has(method) && traceOf([method, params]);
+      if (t) return lying ? (Array.isArray(t.expect) ? t.expect.slice(1) : { ...t.expect, gas: '0x1' }) : t.expect;
       throw { code: -32601, message: `the method ${method} does not exist/is not available` };
+    }
   }
 }
 
@@ -130,6 +158,8 @@ const errors = [];
 
 async function open(query = '', viewport = { width: 1280, height: 900 }) {
   const ctx = await browser.newContext({ viewport });
+  // Only the stand-in responds: a public node the page falls back to on an L2 is refused.
+  await ctx.route((url) => url.hostname !== '127.0.0.1', (r) => r.abort());
   const page = await ctx.newPage();
   page.setDefaultTimeout(30000);
   page.on('console', (m) => m.type() === 'error' && !/Failed to load resource/.test(m.text()) && errors.push(m.text()));
@@ -149,11 +179,12 @@ async function outcome(page) {
     coverage: await page.textContent('#proofCoverageText'),
   };
 }
-async function run(kind, { mode = 'good', fill, name }) {
+async function run(kind, { mode = 'good', fill, name, chain = 1 }) {
   const page = await open();
   await page.check(`input[name=kind][value=${kind}]`);
   await page.evaluate(() => (document.querySelector('details.advanced').open = true));
-  await page.fill('#endpoint', `${base}/v1/rpc/1/${mode}`);
+  await page.fill('#endpoint', `${base}/v1/rpc/${chain}/${mode}`);
+  await page.dispatchEvent('#endpoint', 'change');
   await fill(page);
   await page.click('#run');
   await done(page);
@@ -238,6 +269,117 @@ const typeCall = (call, estimate) => async (p) => {
   expect('Fees: two headers swapped fail verification', o.tone === 'bad' && /\(broken-link\)/.test(o.text), `${o.tone}: ${o.title}: ${o.text.slice(0, 160)}`);
 }
 
+// ---------- Trace ----------
+const notCompleteL2 = (o) => o.tone === 'warn' && o.title === 'Proof valid, but verification is not complete';
+const typeTrace = (method, { item, tracer, call, at }) => async (p) => {
+  await p.selectOption('#traceMethod', method);
+  if (item !== undefined) await p.fill('#item', item);
+  if (tracer !== undefined) await p.selectOption('#tracer', String(tracer));
+  if (call) await p.fill('#call', JSON.stringify(call));
+  if (at !== undefined) await p.fill('#at', at);
+};
+const ETH_TX = TRACES[0].params[1][0];
+{
+  const page = await open();
+  await page.check('input[name=kind][value=trace]');
+  await page.fill('#item', ETH_TX);
+  await page.click('#run');
+  const err = await page.textContent('#formError');
+  expect('Trace: on the keyless path the page asks for an API key, sending nothing', /proves traces only for an API key/.test(err) && (await page.isHidden('#progress')), err);
+  await page.selectOption('#chain', '8453');
+  await page.click('#run');
+  const other = await page.textContent('#formError');
+  expect('Trace: on a chain without trace proofs the page says which chains have them', other === 'Traces are verified on Ethereum and Unichain only. Choose one of them.', other);
+  const fields = await page.evaluate(() => ['traceField', 'itemField', 'tracerField', 'callField', 'atField'].map((id) => !document.getElementById(id).hidden));
+  expect('Trace: a transaction trace shows the method, the transaction and the tracer', isDeepStrictEqual(fields, [true, true, true, false, false]), JSON.stringify(fields));
+  await page.selectOption('#traceMethod', 'trace_call');
+  const callFields = await page.evaluate(() => ['itemField', 'tracerField', 'callField', 'atField', 'estimateRow'].map((id) => !document.getElementById(id).hidden));
+  expect('Trace: trace_call shows the call, its trace types and the block, without the estimate box', isDeepStrictEqual(callFields, [false, true, true, true, false]) && (await page.textContent('#tracerLabel')) === 'Trace types', JSON.stringify(callFields));
+  await page.context().close();
+}
+{
+  const o = await run('trace', { fill: typeTrace('debug_traceTransaction', { item: ETH_TX, tracer: 0 }), name: 'trace' });
+  expect("Trace: debug_traceTransaction (callTracer), the browser's own run is the proven trace; Willow's response is the same", notComplete(o) && stepOf(o, 'Tracing the transaction').startsWith('done') && stepOf(o, "Willow's debug_traceTransaction").startsWith('done') && o.table.some((r) => r.startsWith('result')) && /each proven against the state root of the block's parent/.test(o.coverage), `${o.title} | ${o.steps.join(' | ')}`);
+  expect('Trace: the trace is listed with its method and tracer (not "proven": no anchor here)', o.tableTitle === "Trace in Willow's proof" && o.table.some((r) => r.startsWith('tracercallTracer')) && o.table.some((r) => r.startsWith('algorithmwillow-trace-v1')), `${o.tableTitle}: ${o.table.slice(0, 3).join(' | ')}`);
+}
+{
+  const o = await run('trace', { mode: 'tampered', fill: typeTrace('debug_traceTransaction', { item: ETH_TX, tracer: 0 }), name: 'trace-tampered' });
+  expect('Trace: a proof without its trie nodes fails verification', o.tone === 'bad' && /\(missing-read\)/.test(o.text), `${o.tone}: ${o.title}: ${o.text.slice(0, 160)}`);
+}
+{
+  const o = await run('trace', { mode: 'lying', fill: typeTrace('debug_traceTransaction', { item: ETH_TX, tracer: 0 }), name: 'trace-lying' });
+  expect("Trace: Willow's standard debug_traceTransaction with another value is called out", o.tone === 'bad' && /Willow's debug_traceTransaction response differs/.test(o.title), `${o.tone}: ${o.title}`);
+}
+for (const [what, method, tracer, params] of [
+  ['struct logger', 'debug_traceTransaction', 7, [ETH_TX, {}]],
+  ['prestateTracer, diff mode', 'debug_traceTransaction', 3, null],
+  ['trace_transaction', 'trace_transaction', undefined, [ETH_TX]],
+  ['trace_replayTransaction trace, vmTrace', 'trace_replayTransaction', 2, [ETH_TX, ['trace', 'vmTrace']]],
+]) {
+  const t = params ? traceOf([method, params]) : TRACES.find((x) => x.params[0] === method && isDeepStrictEqual(x.params[1][1], { tracer: 'prestateTracer', tracerConfig: { diffMode: true } }));
+  const o = await run('trace', { fill: typeTrace(method, { item: t.params[1][0], tracer }), name: `trace-${method}-${tracer ?? 'none'}` });
+  expect(`Trace: ${what} on Ethereum verifies to the trace method's response`, notComplete(o) && stepOf(o, 'Tracing the transaction').startsWith('done') && stepOf(o, `Willow's ${method}`).startsWith('done'), `${o.title} | ${o.steps.join(' | ')}`);
+}
+{
+  const block = parseInt(TRACES.find((t) => t.params[0] === 'trace_block').params[1][0], 16);
+  for (const [method, tracer] of [['debug_traceBlockByNumber', 0], ['trace_block', undefined]]) {
+    const o = await run('trace', { chain: 130, fill: typeTrace(method, { item: String(block), tracer }), name: `trace-unichain-${method}` });
+    expect(`Trace: ${method} of a Unichain block verifies, each transaction run against its receipt`, notCompleteL2(o) && stepOf(o, 'Tracing the block').startsWith('done') && stepOf(o, `Willow's ${method}`).startsWith('done') && o.table.some((r) => r.startsWith('transactions')), `${o.title} | ${o.steps.join(' | ')}`);
+  }
+}
+{
+  const c = TRACES.find((t) => t.call && t.params[0] === 'debug_traceCall' && isDeepStrictEqual(t.params[1][2], { tracer: 'prestateTracer' }));
+  const at = String(parseInt(c.params[1][1], 16));
+  const o = await run('trace', { fill: typeTrace('debug_traceCall', { call: c.params[1][0], tracer: 2, at }), name: 'trace-call' });
+  expect("Trace: debug_traceCall (prestateTracer) runs the call in the browser and traces it; Willow's response is the same", notComplete(o) && stepOf(o, 'Tracing the call').startsWith('done') && stepOf(o, "Willow's debug_traceCall").startsWith('done') && /as eth_call runs the call/.test(o.coverage), `${o.title} | ${o.steps.join(' | ')}`);
+  const tc = TRACES.find((t) => t.call && t.params[0] === 'trace_call' && isDeepStrictEqual(t.params[1][1], ['trace', 'stateDiff']) && t.params[1].length === 3);
+  const o2 = await run('trace', { fill: typeTrace('trace_call', { call: tc.params[1][0], tracer: 1, at }), name: 'trace-call-parity' });
+  expect('Trace: trace_call (trace, stateDiff) verifies', notComplete(o2) && stepOf(o2, 'Tracing the call').startsWith('done') && stepOf(o2, "Willow's trace_call").startsWith('done'), `${o2.title} | ${o2.steps.join(' | ')}`);
+  const o3 = await run('trace', { mode: 'tampered', fill: typeTrace('debug_traceCall', { call: c.params[1][0], tracer: 2, at }), name: 'trace-call-tampered' });
+  expect("Trace: a call's trace proof without an account it reads fails verification", o3.tone === 'bad' && /\(missing-read\)/.test(o3.text), `${o3.tone}: ${o3.title}: ${o3.text.slice(0, 160)}`);
+}
+{
+  const page = await open();
+  await page.check('input[name=kind][value=trace]');
+  await page.evaluate(() => (document.querySelector('details.advanced').open = true));
+  await page.fill('#endpoint', `${base}/v1/rpc/130/good`);
+  await page.dispatchEvent('#endpoint', 'change');
+  await page.selectOption('#traceMethod', 'debug_traceCall');
+  await page.fill('#call', JSON.stringify({ to: '0x4200000000000000000000000000000000000006', data: '0x' }));
+  await page.click('#run');
+  const err = await page.textContent('#formError');
+  expect("Trace: a call's trace on Unichain is refused before asking anything", err === "Calls' traces are verified on Ethereum only. Choose Ethereum." && (await page.isHidden('#progress')), err);
+  await page.click('#callExample');
+  expect("Trace: the call example says calls' traces are Ethereum's", (await page.textContent('#formError')) === "Calls' traces are verified on Ethereum only. Choose Ethereum for the example.");
+  await page.context().close();
+}
+
+// ---------- Chains without log or fee proofs ----------
+{
+  const page = await open();
+  await page.selectOption('#chain', '1868');
+  await page.click('#run');
+  const err = await page.textContent('#formError');
+  expect('Logs on Soneium: refused before asking anything, said plainly', err === 'Willow does not prove logs on Soneium yet.' && (await page.isHidden('#progress')), err);
+  await page.check('input[name=kind][value=fees]');
+  await page.selectOption('#chain', '56');
+  await page.click('#run');
+  const fees = await page.textContent('#formError');
+  expect('Fees on BNB Smart Chain: refused before asking anything', fees === 'Willow does not prove fees on BNB Smart Chain yet.' && (await page.isHidden('#progress')), fees);
+  await page.selectOption('#chain', '11155420');
+  await page.check('input[name=kind][value=account]');
+  expect('Account on OP Sepolia: no example, as Uniswap lists no PoolManager there', await page.isHidden('#accountExample'));
+  const chains = await page.$$eval('#chain option', (o) => o.map((x) => x.value));
+  expect('All 17 chains are offered', chains.length === 17, chains.join(' '));
+  await page.context().close();
+}
+{
+  const page = await open('?chain=soneium&from=1&to=2');
+  await page.waitForFunction(() => !document.getElementById('linkIntro').hidden);
+  expect('A logs link on Soneium says why it cannot run', /Willow does not prove logs on Soneium yet/.test(await page.textContent('#linkIntro')));
+  await page.context().close();
+}
+
 // ---------- Links ----------
 {
   const page = await open(`?chain=ethereum&block=${n}`);
@@ -268,12 +410,24 @@ const typeCall = (call, estimate) => async (p) => {
 }
 
 // ---------- Phone width ----------
-for (const kind of ['block', 'account', 'call', 'fees']) {
+for (const kind of ['block', 'account', 'call', 'fees', 'trace']) {
   const page = await open('', { width: 360, height: 780 });
   await page.check(`input[name=kind][value=${kind}]`);
   const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   if (shots && kind === 'call') await page.screenshot({ path: join(shots, 'phone-call.png'), fullPage: true });
   expect(`Phone width: the ${kind} tab does not scroll sideways`, over <= 0, `${over}px`);
+  await page.context().close();
+}
+
+// Wider than a phone: the eight kinds fit (one line from 701 px, four a line below), with no sideways scroll.
+for (const width of [1280, 701, 700, 600, 561]) {
+  const page = await open('', { width, height: 900 });
+  const fit = await page.evaluate(() => {
+    const s = document.querySelector('.segmented');
+    const tops = new Set([...s.querySelectorAll('label')].map((l) => l.offsetTop));
+    return { over: document.documentElement.scrollWidth - document.documentElement.clientWidth, inside: s.scrollWidth - s.clientWidth, rows: tops.size };
+  });
+  expect(`Width ${width}: the kinds fit${width > 700 ? ' on one line' : ''}, and the page does not scroll sideways`, fit.over <= 0 && fit.inside <= 0 && (width <= 700 || fit.rows === 1), JSON.stringify(fit));
   await page.context().close();
 }
 

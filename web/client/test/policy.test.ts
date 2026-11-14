@@ -72,10 +72,11 @@ describe('methods without a proof', () => {
     await expect(h.client.request({ method: 'eth_estimateGas', params: [{ to: `0x${'11'.repeat(20)}` }] })).rejects.toMatchObject({ code: -32601 });
   });
 
-  it('eth_call with state overrides is not proven: a value from the server is unverifiable', async () => {
+  it('eth_call with overrides the verifier does not run (movePrecompileToAddress): a value from the server is unverifiable', async () => {
     h = await on(1);
     h.world.standard.set('1|eth_call|*', { result: '0x01' });
-    await expect(h.client.request({ method: 'eth_call', params: [{ to: `0x${'11'.repeat(20)}` }, 'latest', { [`0x${'11'.repeat(20)}`]: { balance: '0x1' } }] })).rejects.toMatchObject({
+    const a = `0x${'11'.repeat(20)}`;
+    await expect(h.client.request({ method: 'eth_call', params: [{ to: a }, 'latest', { [a]: { movePrecompileToAddress: `0x${'22'.repeat(20)}` } }] })).rejects.toMatchObject({
       code: -32099,
       data: { kind: 'method' },
     });

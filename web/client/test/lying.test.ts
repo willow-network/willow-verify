@@ -41,7 +41,9 @@ describe('the lying server', () => {
 
   for (const c of table) {
     it.skipIf(!!LIVE && !!c.fixtureOnly)(c.name, async () => {
-      let clock = world.nowSec;
+      // Live, the clock is real time (the light client refuses updates signed in a period that has
+      // not begun by the fixture clock); a replay moves it on from there.
+      let clock = LIVE ? Math.floor(Date.now() / 1000) : world.nowSec;
       if (!LIVE) {
         world.intercept = undefined;
         c.setup?.(world);

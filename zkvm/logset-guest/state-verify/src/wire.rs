@@ -4,9 +4,12 @@
 //!
 //! - `willow_getStateProof [address, storageKeys, block, {"code": bool}]` → [`StateProof`]
 //!   (`testdata/state/`).
-//! - `willow_getCallProof [call, block]` → [`CallProof`] (`testdata/call/call-*.json`).
-//! - `willow_getEstimateGasProof [call, block]` → [`EstimateProof`]
-//!   (`testdata/call/estimate-*.json`).
+//! - `willow_getCallProof [call, block, stateOverrides?, blockOverrides?]` → [`CallProof`]
+//!   (`testdata/call/call-*.json`).
+//! - `willow_getEstimateGasProof [call, block, stateOverrides?, blockOverrides?]` →
+//!   [`EstimateProof`] (`testdata/call/estimate-*.json`).
+//!
+//! A call's overrides are the client's own: no proof carries them.
 //!
 //! Quantities are `0x` hex without leading zeros, data is `0x` hex, as in `eth_getProof`.
 
@@ -17,8 +20,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-/// `willow_getEstimateGasProof`'s `algorithm`: the search the estimate is the output of.
+/// `willow_getEstimateGasProof`'s `algorithm`: the search the estimate is the output of (on
+/// Ethereum and Unichain).
 pub const ESTIMATE_ALGORITHM: &str = "geth-v1.17.10-estimate";
+/// On Robinhood Chain: Nitro's search (the Arbitrum go-ethereum fork's, as Nitro v3.12.2 calls
+/// it), over Nitro's gas estimation runs.
+pub const NITRO_ESTIMATE_ALGORITHM: &str = "nitro-v3.12.2-estimate";
+
+/// The search `chain_id`'s estimates are the output of.
+pub fn estimate_algorithm(chain_id: u64) -> &'static str {
+    match chain_id {
+        willow_arb_exec::ROBINHOOD => NITRO_ESTIMATE_ALGORITHM,
+        _ => ESTIMATE_ALGORITHM,
+    }
+}
 
 /// `willow_getStateProof`: one account at one block.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -48,7 +63,7 @@ pub struct Witness {
     pub codes: BTreeMap<String, String>,
 }
 
-/// `willow_getCallProof`: an `eth_call` on Ethereum and the state it read.
+/// `willow_getCallProof`: an `eth_call` and the state it read.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CallProof {
@@ -81,7 +96,7 @@ impl Default for Outcome {
     }
 }
 
-/// `willow_getEstimateGasProof`: an `eth_estimateGas` on Ethereum and the state its search read.
+/// `willow_getEstimateGasProof`: an `eth_estimateGas` and the state its search read.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EstimateProof {
@@ -124,10 +139,13 @@ impl Outcome {
     pub fn of(ran: &Ran) -> Option<Outcome> {
         Some(match ran {
             Ran::Returned(b) => Outcome::Returned(hx(b)),
-            Ran::Reverted(b) => Outcome::Reverted(hx(b)),
+            // Nitro's reason for one of ArbOS's own errors is the client's own run's.
+            Ran::Reverted(b) | Ran::RevertedSaying(b, _) => Outcome::Reverted(hx(b)),
             Ran::Halted(m) => Outcome::Halted(m.clone()),
             Ran::Invalid(m) => Outcome::Invalid(m.clone()),
-            Ran::Missing(_) | Ran::NoBlockHash(_) | Ran::Internal(_) => return None,
+            Ran::Missing(_) | Ran::NoBlockHash(_) | Ran::Refused(_) | Ran::Internal(_) => {
+                return None
+            }
         })
     }
 
@@ -138,6 +156,17 @@ impl Outcome {
             Outcome::Reverted(d) => Outcome::Reverted(canonical(d)?),
             other => other.clone(),
         })
+    }
+
+    /// The standard `eth_call` response of a run, `{"result"}` or `{"error"}`, as Willow's state
+    /// methods send it (with Nitro's reason for one of ArbOS's own errors); `None` when the run
+    /// came to no outcome.
+    pub fn response_of(ran: &Ran) -> Option<Value> {
+        match ran {
+            Ran::RevertedSaying(b, said) => Some(json!({"error": {"code": 3,
+                "message": format!("execution reverted: {said}"), "data": hx(b)}})),
+            r => Outcome::of(r).map(|o| o.response()),
+        }
     }
 
     /// The standard `eth_call` response, `{"result"}` or `{"error"}`, as Willow's state methods
@@ -162,7 +191,8 @@ impl Estimate {
     pub fn of(e: &Estimated) -> Option<Estimate> {
         Some(match e {
             Estimated::Gas(g) => Estimate::Gas(format!("0x{g:x}")),
-            Estimated::Reverted(b) => Estimate::Reverted(hx(b)),
+            // Nitro's reason for one of ArbOS's own errors is the client's own search's.
+            Estimated::Reverted(b) | Estimated::RevertedSaying(b, _) => Estimate::Reverted(hx(b)),
             Estimated::Error(m) => Estimate::Error(m.clone()),
             Estimated::Missing(_) | Estimated::NoBlockHash(_) | Estimated::Internal(_) => {
                 return None
@@ -180,6 +210,16 @@ impl Estimate {
             Estimate::Reverted(d) => Estimate::Reverted(canonical(d)?),
             Estimate::Error(m) => Estimate::Error(m.clone()),
         })
+    }
+
+    /// The standard `eth_estimateGas` response of a search, as Willow's sends it (with Nitro's
+    /// reason for one of ArbOS's own errors); `None` when it came to no estimate.
+    pub fn response_of(e: &Estimated) -> Option<Value> {
+        match e {
+            Estimated::RevertedSaying(b, said) => Some(json!({"error": {"code": 3,
+                "message": format!("execution reverted: {said}"), "data": hx(b)}})),
+            e => Estimate::of(e).map(|x| x.response()),
+        }
     }
 
     /// The standard `eth_estimateGas` response, `{"result"}` or `{"error"}`, as geth sends it.

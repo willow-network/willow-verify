@@ -19,6 +19,7 @@ import type {
   StateKind,
   StateProven,
   StateVerified,
+  TraceProven,
   VerifierModules,
 } from './verifiers.js';
 import { packageModules } from './wasm.js';
@@ -74,8 +75,15 @@ export interface WillowOptions {
   logsTimeoutMs?: number;
   /** The clock, in ms (tests). */
   now?: () => number;
-  /** Waits between asks for a block newer than the signed head (default 4000) and between proof-job polls. */
+  /** Waits between asks for a block newer than the signed head (default 4000, or the server's `retryAfterSeconds`) and between proof-job polls. */
   waitMs?: { anchor?: number; jobs?: number };
+  /**
+   * How long a request waits for the anchor of a block newer than the newest one anchored; default
+   * 36000 (three Ethereum slots: the light client signs block N in slot N+1, and Willow's RPC
+   * serves state at the tip, a slot ahead of it). Past it the request is unverifiable
+   * (`anchor-waiting`, -32099).
+   */
+  anchorWaitMs?: number;
 }
 
 export interface VerificationEvent {
@@ -120,6 +128,15 @@ const NOT_FOUND_TX = 'not found in this store: transaction ';
 const FILTER_IDLE_MS = 5 * 60 * 1000;
 const NITRO = new Set([42161, 4663, 421614, 46630]);
 const PROOF_DOWNLOADS = 4;
+/** The chains whose traces are proven (trace-verify): Ethereum and Unichain. */
+const TRACED = new Set([1, 130]);
+/** The chains whose calls' traces are proven (debug_traceCall, trace_call): Ethereum. */
+const CALL_TRACED = new Set([1]);
+/** The trace methods that name a block, and those that name a transaction, each proven by `willow_getTraceProof`. */
+const BLOCK_TRACES = new Set(['debug_traceBlockByNumber', 'debug_traceBlockByHash', 'trace_block', 'trace_replayBlockTransactions']);
+const TX_TRACES = new Set(['debug_traceTransaction', 'trace_transaction', 'trace_replayTransaction']);
+/** The most blocks one trace_filter spans (the server's `trace_filter_max_blocks` default). */
+export const TRACE_FILTER_BLOCKS = 16;
 
 /** The app's request, as the client tracks it for its event. */
 class Call {
@@ -208,6 +225,59 @@ const withChain = (url: string, id: number): string | null => {
 const isTag = (x: unknown) => x === undefined || x === null || x === 'latest' || x === 'pending';
 const emptyObject = (x: unknown) => x === undefined || x === null || (typeof x === 'object' && !Array.isArray(x) && Object.keys(x as object).length === 0);
 
+/** A filter's address list, lowercased (empty: any). */
+function addressList(x: unknown): Set<string> {
+  const list = x === undefined || x === null ? [] : Array.isArray(x) ? x : [x];
+  return new Set(list.filter((a): a is string => typeof a === 'string').map((a) => a.toLowerCase()));
+}
+
+/**
+ * `trace_filter`'s traces of the blocks' `trace_block` results, as the log RPC filters them
+ * (trace-verify's `answer::filtered`, alloy's `TraceFilterMatcher`): matched by mode, `after`
+ * skipped, at most `count`.
+ */
+export function traceFiltered(filter: Record<string, unknown>, blocks: unknown[]): unknown[] {
+  const fromSet = addressList(filter.fromAddress);
+  const toSet = addressList(filter.toAddress);
+  const any = (s: Set<string>, a: unknown) => s.size === 0 || (typeof a === 'string' && s.has(a.toLowerCase()));
+  const union = filter.mode !== 'intersection';
+  const all = blocks.flatMap((b) => (Array.isArray(b) ? b : [])).filter((t: any) => {
+    const a = t?.action ?? {};
+    let from: boolean;
+    let to: boolean;
+    switch (t?.type) {
+      case 'call':
+        [from, to] = [any(fromSet, a.from), any(toSet, a.to)];
+        break;
+      case 'create':
+        from = any(fromSet, a.from);
+        to = t.result && typeof t.result.address === 'string' ? any(toSet, t.result.address) : toSet.size === 0;
+        break;
+      case 'suicide':
+        [from, to] = [any(fromSet, a.address), any(toSet, a.refundAddress)];
+        break;
+      case 'reward':
+        [from, to] = [fromSet.size === 0, any(toSet, a.author)];
+        break;
+      default:
+        return false;
+    }
+    if (!union) return from && to;
+    if (fromSet.size === 0) return to;
+    if (toSet.size === 0) return from;
+    return from || to;
+  });
+  const after = toNumber(filter.after);
+  const count = toNumber(filter.count);
+  let out = all;
+  if (after !== null) {
+    if (after >= out.length) return [];
+    out = out.slice(after);
+  }
+  if (count !== null) out = out.slice(0, count);
+  return out;
+}
+
 function matches(log: any, filter: Record<string, unknown>): boolean {
   const a = filter.address;
   if (a !== undefined && a !== null) {
@@ -290,6 +360,7 @@ class Client implements WillowVerifier {
       maxHeadAgeSec: o.maxHeadAgeSec ?? 600,
       nowMs: this.now,
       waitingMs: o.waitMs?.anchor,
+      anchorWaitMs: o.anchorWaitMs,
     });
   }
 
@@ -425,6 +496,19 @@ class Client implements WillowVerifier {
         return this.resolve(call, p[0]).then((at) => this.item(call, 'blockReceipts', this.target(at), false));
       case 'eth_getLogs':
         return this.getLogs(call, p[0]);
+      case 'debug_traceTransaction':
+      case 'trace_transaction':
+      case 'trace_replayTransaction':
+      case 'debug_traceBlockByNumber':
+      case 'debug_traceBlockByHash':
+      case 'trace_block':
+      case 'trace_replayBlockTransactions':
+        return this.trace(call);
+      case 'trace_filter':
+        return this.traceFilter(call);
+      case 'debug_traceCall':
+      case 'trace_call':
+        return this.callTrace(call);
       case 'eth_newFilter':
       case 'eth_newBlockFilter':
       case 'eth_getFilterChanges':
@@ -620,12 +704,28 @@ class Client implements WillowVerifier {
    * Block `at`, verified and anchored (cached by hash), its parent's hash anchored with it.
    * `reply`: its proof, already asked for; `prefetch: false`: no anchor asked for ahead.
    */
-  private async block(call: Call, at: Resolved, full: boolean, opts: { reply?: Promise<Reply>; prefetch?: boolean } = {}): Promise<BlockEntry> {
+  private async block(call: Call, at: Resolved, full: boolean, opts: { reply?: Promise<Reply>; prefetch?: boolean } = {}): Promise<BlockEntry | null> {
     let entry = at.hash ? this.blocks.get(at.hash) : undefined;
     if (!entry) {
-      const prefetched = opts.prefetch === false ? undefined : this.prefetch(at);
-      const reply = await (opts.reply ?? this.blockReply(call, at));
+      let prefetched: Promise<Reply> | undefined;
+      let replied: Promise<Reply>;
+      if (opts.reply) {
+        prefetched = opts.prefetch === false ? undefined : this.prefetch(at);
+        replied = opts.reply;
+      } else {
+        const req = await this.itemRequest(call, 'block', this.target(at));
+        // The anchor and the proof asked for in one turn, so they share a batch however slow the
+        // verifier was to write the request (3.2 step 3).
+        prefetched = opts.prefetch === false ? undefined : this.prefetch(at);
+        replied = this.batcher.call(this.url, req.method, req.params);
+      }
+      const reply = await replied;
       if (reply.value.error) return this.refused(call, reply.value.error);
+      // A number past the server's newest block: `null`, as the standard method's (an absence).
+      if (reply.value.result === null && !at.hash) {
+        call.status = 'absent';
+        return null;
+      }
       const v = await this.verifyItem(call, 'block', this.target(at), reply, full);
       const b = v.report.block;
       entry = {
@@ -658,12 +758,14 @@ class Client implements WillowVerifier {
 
   private async getBlock(call: Call, at: Resolved, full: boolean): Promise<unknown> {
     const e = await this.block(call, at, full);
+    if (!e) return null;
     // A copy: what the app does with it can't change the verified block kept here.
     return structuredClone(full ? e.full : e.proven);
   }
 
-  private async txCount(call: Call, at: Resolved): Promise<string> {
+  private async txCount(call: Call, at: Resolved): Promise<string | null> {
     const e = await this.block(call, at, false);
+    if (!e) return null;
     const txs = e.proven.transactions;
     if (!Array.isArray(txs)) throw new WillowVerificationError('malformed', 'the proven block has no transaction list', call.method);
     return toQuantity(txs.length);
@@ -791,11 +893,14 @@ class Client implements WillowVerifier {
 
   private async evm(call: Call, kind: StateKind): Promise<unknown> {
     const [tx, b, ...rest] = call.params;
-    // Overrides are not proven, and only Ethereum's calls are: the server's response, by the rules for methods without a proof.
-    if (this.chainId !== 1 || !rest.every(emptyObject)) return this.forward(call);
     if (!tx || typeof tx !== 'object' || Array.isArray(tx)) throw new WillowRpcError(-32602, 'expected a call object');
     const at = await this.resolve(call, b);
-    const target = JSON.stringify([tx, this.blockParam(at)]);
+    // The caller's state and block overrides go with the proof request and are laid over its
+    // witness here: they are the caller's own, never proven. The verifier refuses a chain, a call or
+    // overrides it doesn't run (`unsupported`): those are the server's response, by the rules for
+    // methods without a proof.
+    while (rest.length && emptyObject(rest[rest.length - 1])) rest.pop();
+    const target = JSON.stringify([tx, this.blockParam(at), ...rest.map((o) => o ?? null)]);
     const run = async () => {
       const req = await this.verifierCall(call, this.backend.stateRequest(this.chainId, kind, target));
       if (!req.ok) {
@@ -833,6 +938,107 @@ class Client implements WillowVerifier {
     const clear = () => this.memo.delete(key);
     p.then(clear, clear);
     return p;
+  }
+
+  // ---------- traces (willow_getTraceProof) ----------
+
+  /**
+   * A trace method's response, from the client's own run of the block (trace-verify): the block a
+   * block trace names goes out by the hash the client resolved it to; the block a transaction's
+   * trace is in is the one the proof names, anchored. A tracer or chain a proof does not cover is
+   * the server's response, by the rules for methods without a proof.
+   */
+  private async trace(call: Call): Promise<unknown> {
+    const v = await this.provenTrace(call, call.method, call.params);
+    if (v === null) return this.forward(call);
+    await this.anchor(call, toNumber(v.report.block.number)!, v.report.block.hash);
+    return (v.proven as TraceProven).result;
+  }
+
+  /**
+   * A call's trace (`debug_traceCall`, `trace_call`), from the client's own run of the call over
+   * the state the proof proves at the block the client resolved (a call proof's witness, the
+   * caller's overrides laid over it here and never sent): the call runs as `eth_call` runs it,
+   * traced. Calls' traces are proven on Ethereum; elsewhere, and for what a proof does not cover,
+   * the server's response by the rules for methods without a proof.
+   */
+  private async callTrace(call: Call): Promise<unknown> {
+    if (!CALL_TRACED.has(this.chainId)) return this.forward(call);
+    const p = [...call.params];
+    if (!p[0] || typeof p[0] !== 'object' || Array.isArray(p[0])) throw new WillowRpcError(-32602, 'expected a call object');
+    const i = call.method === 'debug_traceCall' ? 1 : 2;
+    const at = await this.resolve(call, p[i]);
+    for (let k = p.length; k < i; k++) p[k] = null;
+    p[i] = this.blockParam(at);
+    const v = await this.provenTrace(call, call.method, p, at);
+    if (v === null) return this.forward(call);
+    await this.anchor(call, toNumber(v.report.block.number)!, v.report.block.hash);
+    return (v.proven as TraceProven).result;
+  }
+
+  /** `method(params)`'s trace proof, verified (not anchored); `null` when no proof covers it. */
+  private async provenTrace(call: Call, method: string, params: unknown[], resolved?: Resolved): Promise<StateVerified | null> {
+    if (!TRACED.has(this.chainId)) return null;
+    const p = [...params];
+    let at: Resolved | undefined = resolved;
+    if (BLOCK_TRACES.has(method)) {
+      at = method === 'debug_traceBlockByHash' ? { hash: this.hashParam(p[0]) } : await this.resolve(call, p[0]);
+      p[0] = method === 'debug_traceBlockByHash' ? at.hash : this.blockParam(at);
+    } else if (TX_TRACES.has(method)) {
+      p[0] = this.hashParam(p[0]);
+    }
+    const target = JSON.stringify([method, p]);
+    const run = async () => {
+      const req = await this.verifierCall(call, this.backend.stateRequest(this.chainId, 'trace', target));
+      if (!req.ok) {
+        if (req.kind === 'unsupported') return { forward: true as const };
+        if (req.kind === 'invalid-request') throw new WillowRpcError(-32602, req.message);
+        throw new WillowVerificationError(req.kind, req.message, call.method);
+      }
+      const reply = await this.batcher.call(this.url, req.method, req.params);
+      if (reply.value.error) return { error: reply.value.error };
+      const v = await this.verifierCall(call, this.backend.stateVerify(this.chainId, 'trace', target, reply.text));
+      if (!v.ok) throw new WillowVerificationError(v.kind === 'invalid-request' ? 'internal' : v.kind, v.message, call.method);
+      return { v };
+    };
+    const r = await (at?.hash ? this.once(`trace:${target}`, run) : run());
+    if ('forward' in r) return null;
+    if ('error' in r) return this.refused(call, r.error!);
+    return r.v;
+  }
+
+  /**
+   * `trace_filter`, from each block's `trace_block` proof (one batch), filtered here as the server
+   * filters (alloy's `TraceFilterMatcher`); the blocks linked by their proven parent hashes, so
+   * anchoring the newest anchors them all.
+   */
+  private async traceFilter(call: Call): Promise<unknown> {
+    if (!TRACED.has(this.chainId)) return this.forward(call);
+    const f = call.params[0];
+    if (!f || typeof f !== 'object' || Array.isArray(f)) throw new WillowRpcError(-32602, 'expected a trace filter object');
+    const filter = f as Record<string, unknown>;
+    const from = await this.resolve(call, filter.fromBlock ?? 'earliest');
+    const to = await this.resolve(call, filter.toBlock ?? 'latest');
+    if (from.number === undefined || to.number === undefined) throw new WillowRpcError(-32602, 'fromBlock and toBlock are numbers or tags');
+    if (from.number > to.number) throw new WillowRpcError(-32602, 'invalid parameters: fromBlock cannot be greater than toBlock');
+    if (to.number - from.number >= TRACE_FILTER_BLOCKS) {
+      throw new WillowRpcError(-32602, `Block range too large; currently limited to ${TRACE_FILTER_BLOCKS} blocks`);
+    }
+    const blocks: Resolved[] = [];
+    for (let n = from.number; n <= to.number; n++) blocks.push(n === to.number && to.hash ? to : n === from.number && from.hash ? from : { number: n });
+    const top = blocks.length - 1;
+    const prefetched = this.prefetch(blocks[top]);
+    const verified = await Promise.all(blocks.map((at) => this.provenTrace(call, 'trace_block', [at.hash ? at.hash : toQuantity(at.number!)])));
+    if (verified.some((v) => v === null)) return this.forward(call);
+    const named = verified.map((v) => ({ number: toNumber(v!.report.block.number)!, hash: v!.report.block.hash.toLowerCase(), parentHash: v!.report.block.parentHash }));
+    const linked = named.every((b, i) => i === top || (named[i + 1].number === b.number + 1 && typeof named[i + 1].parentHash === 'string' && named[i + 1].parentHash!.toLowerCase() === b.hash));
+    if (linked) {
+      const a = await this.anchor(call, named[top].number, named[top].hash, prefetched);
+      for (let i = top; a && i > 0; i--) this.anchors.parent({ ...a, number: named[i].number, hash: named[i].hash }, named[i].parentHash!);
+    } else {
+      await Promise.all(named.map((b, i) => this.anchor(call, b.number, b.hash, i === top ? prefetched : this.prefetch({ number: b.number }))));
+    }
+    return traceFiltered(filter, verified.map((v) => (v!.proven as TraceProven).result));
   }
 
   // ---------- fees (1.3.6 to 1.3.8) ----------
@@ -1115,7 +1321,11 @@ class Client implements WillowVerifier {
         replies.set(n, p);
       }
       const out: string[] = [];
-      for (let n = top; n >= f.next; n--) out.unshift((await this.block(call, at(n), false, { reply: replies.get(n), prefetch: false })).hash);
+      for (let n = top; n >= f.next; n--) {
+        const b = await this.block(call, at(n), false, { reply: replies.get(n), prefetch: false });
+        if (!b) throw new WillowVerificationError('missing', `block ${n} of the range is absent`, call.method);
+        out.unshift(b.hash);
+      }
       f.next = top + 1;
       return out;
     }

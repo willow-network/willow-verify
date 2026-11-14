@@ -242,9 +242,19 @@ export function mockState(world: World): new (chainId: number) => StateVerifier 
         if (!isAddress(p[0]) || !Array.isArray(p[1]) || p[1].length > 256) return fail('invalid-request', 'expected [address, storageKeys, block, {code}]');
         this.s = { kind, method: 'willow_getStateProof', params: p };
       } else if (kind === 'call' || kind === 'estimate') {
-        if (this.chainId !== 1) return fail('unsupported', `calls are verified on Ethereum only, not chain ${this.chainId}`);
-        if (!p[0] || typeof p[0] !== 'object' || p.slice(2).some((x: unknown) => x && typeof x === 'object' && Object.keys(x).length)) return fail('invalid-request', 'a call with state or block overrides is not proven');
+        // As state-verify's call_request: calls and estimates on Ethereum, Unichain and Robinhood Chain.
+        if (![1, 130, 4663].includes(this.chainId)) return fail('unsupported', `${kind}s are not verified on chain ${this.chainId}`);
+        if (!p[0] || typeof p[0] !== 'object') return fail('invalid-request', 'expected a call object');
+        const overrides = p.slice(2);
+        if (overrides.some((x: unknown) => x !== null && (typeof x !== 'object' || Array.isArray(x)))) return fail('invalid-request', 'overrides are objects');
+        if (Object.values(overrides[0] ?? {}).some((a: any) => a && a.movePrecompileToAddress)) return fail('unsupported', 'eth_call with movePrecompileToAddress: such calls are not run here');
         this.s = { kind, method: kind === 'call' ? 'willow_getCallProof' : 'willow_getEstimateGasProof', params: p };
+      } else if (kind === 'trace') {
+        // As trace-verify's request::parse, as far as the mock goes: traces on Ethereum and
+        // Unichain, calls' traces on Ethereum; the proofs themselves only with the real module.
+        const calls = p[0] === 'debug_traceCall' || p[0] === 'trace_call';
+        if (![1, 130].includes(this.chainId) || (calls && this.chainId !== 1)) return fail('unsupported', `${String(p[0])} is not proven on chain ${this.chainId}`);
+        return fail('internal', 'trace proofs are not in the mock');
       } else return fail('internal', `unknown kind ${kind}`);
       return out({ ok: true, method: this.s.method, params: p });
     }
@@ -260,7 +270,8 @@ export function mockState(world: World): new (chainId: number) => StateVerifier 
       }
       if (!r || typeof r !== 'object') return fail('malformed', 'no result');
       const k = (kind: string, message: string) => fail(kind, message);
-      if (s.kind === 'estimate' && r.algorithm !== 'geth-v1.17.10-estimate') return k('algorithm', `an estimate by ${String(r.algorithm)}`);
+      const algorithm = this.chainId === 4663 ? 'nitro-v3.12.2-estimate' : 'geth-v1.17.10-estimate';
+      if (s.kind === 'estimate' && r.algorithm !== algorithm) return k('algorithm', `an estimate by ${String(r.algorithm)}`);
       const b = s.kind === 'state' ? s.params[2] : s.params[1];
       const want = (() => {
         const o = b && typeof b === 'object' ? (b.blockHash ?? b.blockNumber) : b;
@@ -272,7 +283,7 @@ export function mockState(world: World): new (chainId: number) => StateVerifier 
       let expected: { result: any; proven: any; report: any } | null;
       if (s.kind === 'state') expected = world.state(this.chainId, s.params);
       else {
-        const entry = world.proofs.get(world.key(this.chainId, s.method, [s.params[0], world.blockHash(this.chainId, b) ?? b]));
+        const entry = world.proofs.get(world.key(this.chainId, s.method, [s.params[0], world.blockHash(this.chainId, b) ?? b, ...s.params.slice(2)]));
         expected = entry ? { result: entry.result, proven: entry.proven, report: entry.report } : null;
       }
       if (!expected) return k('malformed', 'no such proof in the fixtures');

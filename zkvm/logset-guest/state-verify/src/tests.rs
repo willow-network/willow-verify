@@ -85,6 +85,43 @@ fn estimates_equal_geths_at_the_same_block() {
     }
 }
 
+/// The search starts from the header's gas limit as the caller's block override makes it (geth's
+/// `MakeHeader`, and Nitro's): under what the swap needs, its first run at that gas fails (the
+/// router reverts when its own call runs out), so that is the response.
+#[test]
+fn an_estimate_starts_from_the_overridden_gas_limit() {
+    let f = fixture("call", "estimate-uniswap-swap.json");
+    let (w, env, c, _) = parts(&f);
+    let mut overrides = overrides::Overrides::default();
+    overrides.block.gas_limit = Some(100_000);
+    let run = call::Run {
+        engine: call::Engine::Ethereum,
+        witness: &w,
+        block: &env,
+        call: &c,
+        overrides: &overrides,
+        hash_of: &|_| None,
+        mode: call::Mode::Strict,
+    };
+    assert_eq!(
+        estimate::estimate_run(&run, &mut call::Reads::default()),
+        estimate::Estimated::Reverted(Bytes::new())
+    );
+    // Above what it needs, the same estimate as without the override.
+    let mut more = overrides.clone();
+    more.block.gas_limit = Some(1_000_000);
+    let run = call::Run {
+        overrides: &more,
+        ..run
+    };
+    assert_eq!(
+        wire::Estimate::of(&estimate::estimate_run(&run, &mut call::Reads::default())),
+        Some(wire::Estimate::Gas(
+            f["result"]["estimate"]["gas"].as_str().unwrap().into()
+        ))
+    );
+}
+
 /// The witness, environment and call of a call or estimate fixture.
 fn parts(f: &Value) -> (Witness, call::Block, call::Call, Named) {
     let r = &f["result"];
@@ -135,16 +172,18 @@ fn the_peak_is_geths_max_used_gas() {
     );
     assert!(matches!(x.ran, Ran::Returned(_)), "{:?}", x.ran);
     assert!(x.peak > x.used, "the swap has no refund");
+    let none_set = overrides::Overrides::default();
+    let run = Run {
+        engine: Engine::Ethereum,
+        witness: &w,
+        block: &env,
+        call: &c,
+        overrides: &none_set,
+        hash_of: &none,
+        mode: Mode::Strict,
+    };
     let with = |peak: &dyn Fn(&Exec) -> u64| {
-        let found = estimate::search(
-            &w,
-            &env,
-            &c,
-            &none,
-            Mode::Strict,
-            &mut Reads::default(),
-            peak,
-        );
+        let found = estimate::search(&run, &mut Reads::default(), peak);
         match found.unwrap_or_else(|e| e) {
             Estimated::Gas(g) => g,
             other => panic!("{other:?}"),
@@ -664,12 +703,32 @@ fn every_call_mutation_fails_with_its_kind() {
             Kind::Malformed,
         ),
         (
-            "overrides",
+            "an override the proof was not run under (another balance in the slot read)",
+            mutated(&balance, |f| {
+                let holder = "28c6c06298d514db089934071355e5743bf21d60";
+                let slot = keccak256(hex::decode(format!("{holder:0>64}{:064x}", 9)).unwrap());
+                let mut diff = serde_json::Map::new();
+                diff.insert(hx(slot.as_slice()), json!(format!("0x{:064x}", 5)));
+                let params = f["request"]["params"].as_array_mut().unwrap();
+                params.push(json!({USDC: {"stateDiff": diff}}));
+            }),
+            Kind::Outcome,
+        ),
+        (
+            "overrides that are not valid",
             mutated(&balance, |f| {
                 let params = f["request"]["params"].as_array_mut().unwrap();
-                params.push(json!({USDC: {"balance": "0x1"}}));
+                params.push(json!({USDC: {"state": {}, "stateDiff": {}}}));
             }),
             Kind::InvalidRequest,
+        ),
+        (
+            "overrides not run here",
+            mutated(&balance, |f| {
+                let params = f["request"]["params"].as_array_mut().unwrap();
+                params.push(json!({USDC: {"movePrecompileToAddress": NOBODY2}}));
+            }),
+            Kind::Unsupported,
         ),
     ];
     for (what, f, want) in calls {
@@ -804,5 +863,245 @@ fn malformed_witnesses_fail_without_panicking() {
         let mut f = balance.clone();
         change(&mut f);
         assert!(call_of(&f).is_err(), "change {i} verified");
+    }
+}
+
+/// The calls the log RPC served over recorded nodes' state, as its own tests wrote them
+/// (crates/indexer-node state/tests/proofs.rs with `WILLOW_WRITE_SERVED`): state and block
+/// overrides, gas prices as reth runs them, routers' swap quotes, Unichain's and Robinhood Chain's
+/// calls, Unichain's estimates, block hashes from each chain's history account. Each verifies on
+/// its chain to the very response the RPC's `eth_call` (or `eth_estimateGas`) served.
+#[test]
+fn served_calls_verify_to_the_served_response() {
+    let mut chains = std::collections::BTreeSet::new();
+    for (name, f) in fixtures("served", "") {
+        let chain = chain_of(&f);
+        chains.insert(chain);
+        let params = &f["request"]["params"];
+        let response = match f["request"]["method"].as_str().unwrap() {
+            "willow_getCallProof" => verify_call(chain, params, &f["result"]).map(|p| p.response),
+            _ => verify_estimate(chain, params, &f["result"]).map(|p| p.response),
+        };
+        let response = response.unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(response, f["expect"], "{name}");
+    }
+    assert_eq!(chains, [1, 130, 4663].into());
+}
+
+/// The served fixture `name`.
+fn served(name: &str) -> Value {
+    fixture("served", &format!("{name}.json"))
+}
+
+/// A served fixture checked as its proof method: the call's or the estimate's.
+fn served_of(f: &Value) -> Result<Value, Failure> {
+    let (chain, params) = (chain_of(f), &f["request"]["params"]);
+    match f["request"]["method"].as_str().unwrap() {
+        "willow_getCallProof" => verify_call(chain, params, &f["result"]).map(|p| p.response),
+        _ => verify_estimate(chain, params, &f["result"]).map(|p| p.response),
+    }
+}
+
+/// A fixture's request params.
+fn params_mut(f: &mut Value) -> &mut Vec<Value> {
+    f["request"]["params"].as_array_mut().unwrap()
+}
+
+const L1_BLOCK: &str = "0x4200000000000000000000000000000000000015";
+const ARBOS: &str = "0xa4b05fffffffffffffffffffffffffffffffffff";
+
+/// A call's own overrides decide its outcome and what its witness must hold; each L2's own state
+/// (L1Block's fee slots, ArbOS's) is proven like any other; block hashes come from the block's
+/// history account. Every mutation fails with its kind.
+#[test]
+fn every_served_mutation_fails_with_its_kind() {
+    let slot = served("eth-override-slot");
+    let block = served("eth-override-block");
+    let priced = served("eth-price-1559");
+    let quote = served("eth-quote");
+    let uni = served("unichain-l1-fee");
+    let uni_estimate = served("unichain-estimate-read");
+    let rh = served("robinhood-0-0");
+    let hashes = served("proof-hashes-eth");
+    let rh_hashes = served("proof-hashes-robinhood");
+    let rh_estimate = served("robinhood-estimate-token-transfer");
+    let cases: Vec<(&str, Value, Kind)> = vec![
+        (
+            "the overrides dropped: the slot they set is read, and never proven",
+            mutated(&slot, |f| {
+                params_mut(f).truncate(2);
+            }),
+            Kind::MissingRead,
+        ),
+        (
+            "another value in the slot the overrides set",
+            mutated(&slot, |f| {
+                let o = params_mut(f)[2].as_object_mut().unwrap();
+                let (_, account) = o.iter_mut().next().unwrap();
+                let diff = account["stateDiff"].as_object_mut().unwrap();
+                let (_, v) = diff.iter_mut().next().unwrap();
+                *v = json!(format!("0x{:064x}", 7));
+            }),
+            Kind::Outcome,
+        ),
+        (
+            "another time in the block overrides",
+            mutated(&block, |f| {
+                let t = proof::quantity(&params_mut(f)[3]["time"]).unwrap() + U256::from(1);
+                params_mut(f)[3]["time"] = json!(format!("{t:#x}"));
+            }),
+            Kind::Outcome,
+        ),
+        (
+            "another gas price",
+            mutated(&priced, |f| {
+                params_mut(f)[0]["maxPriorityFeePerGas"] = json!("0x4");
+            }),
+            Kind::Outcome,
+        ),
+        (
+            "another balance and allowance set for the quote",
+            mutated(&quote, |f| {
+                let o = params_mut(f)[2].as_object_mut().unwrap();
+                for a in o.values_mut() {
+                    if let Some(diff) = a.get_mut("stateDiff").and_then(Value::as_object_mut) {
+                        diff.values_mut()
+                            .for_each(|v| *v = json!(format!("0x{:064x}", 5)));
+                    }
+                }
+            }),
+            Kind::Outcome,
+        ),
+        (
+            "Unichain: an L1Block fee slot's value",
+            mutated(&uni, |f| {
+                account_mut(f, L1_BLOCK)["storageProof"][0]["value"] = json!("0x1234");
+            }),
+            Kind::Slot,
+        ),
+        (
+            "Unichain: L1Block dropped",
+            mutated(&uni, |f| {
+                let accounts = f["result"]["witness"]["accounts"].as_array_mut().unwrap();
+                accounts.retain(|a| a["address"] != L1_BLOCK);
+            }),
+            Kind::MissingRead,
+        ),
+        (
+            "Unichain: asked on Ethereum",
+            mutated(&uni, |f| f["askedOn"] = json!(1)),
+            Kind::WrongChain,
+        ),
+        (
+            "Unichain: another outcome",
+            mutated(&uni, |f| {
+                f["result"]["result"] = json!({"returned": format!("0x{:064x}", 1)});
+            }),
+            Kind::Outcome,
+        ),
+        (
+            "Unichain: estimate + 1",
+            mutated(&uni_estimate, |f| {
+                let g = proof::quantity(&f["result"]["estimate"]["gas"])
+                    .unwrap()
+                    .to::<u64>();
+                f["result"]["estimate"]["gas"] = json!(format!("0x{:x}", g + 1));
+            }),
+            Kind::Estimate,
+        ),
+        (
+            "Robinhood: ArbOS's state dropped",
+            mutated(&rh, |f| {
+                let accounts = f["result"]["witness"]["accounts"].as_array_mut().unwrap();
+                accounts.retain(|a| a["address"] != ARBOS);
+            }),
+            Kind::MissingRead,
+        ),
+        (
+            "Robinhood: an ArbOS slot dropped",
+            mutated(&rh, |f| {
+                account_mut(f, ARBOS)["storageProof"]
+                    .as_array_mut()
+                    .unwrap()
+                    .pop();
+            }),
+            Kind::MissingRead,
+        ),
+        (
+            "Robinhood: another outcome",
+            mutated(&rh, |f| {
+                f["result"]["result"] = json!({"returned": format!("0x{:064x}", 1)});
+            }),
+            Kind::Outcome,
+        ),
+        (
+            "a history slot's value",
+            mutated(&hashes, |f| {
+                let h = account_mut(f, HISTORY);
+                let v = h["storageProof"][0]["value"].as_str().unwrap().to_string();
+                h["storageProof"][0]["value"] = json!(flip_last_hex(&v));
+            }),
+            Kind::Slot,
+        ),
+        (
+            "Robinhood: a history slot dropped",
+            mutated(&rh_hashes, |f| {
+                account_mut(f, HISTORY)["storageProof"]
+                    .as_array_mut()
+                    .unwrap()
+                    .pop();
+            }),
+            Kind::MissingRead,
+        ),
+        (
+            "Robinhood: a call's proof read as an estimate's",
+            mutated(&rh, |f| {
+                f["request"]["method"] = json!("willow_getEstimateGasProof");
+            }),
+            Kind::Malformed,
+        ),
+        (
+            "Robinhood: estimate + 1",
+            mutated(&rh_estimate, |f| {
+                let g = proof::quantity(&f["result"]["estimate"]["gas"])
+                    .unwrap()
+                    .to::<u64>();
+                f["result"]["estimate"]["gas"] = json!(format!("0x{:x}", g + 1));
+            }),
+            Kind::Estimate,
+        ),
+        (
+            "Robinhood: an estimate by geth's search",
+            mutated(&rh_estimate, |f| {
+                f["result"]["algorithm"] = json!(wire::ESTIMATE_ALGORITHM);
+            }),
+            Kind::Algorithm,
+        ),
+        (
+            "Robinhood: the estimate's ArbOS slots dropped (L1 pricing, per-transaction gas limit)",
+            mutated(&rh_estimate, |f| {
+                account_mut(f, ARBOS)["storageProof"] = json!([]);
+            }),
+            Kind::MissingRead,
+        ),
+        (
+            "Robinhood: an ArbOS slot's value",
+            mutated(&rh_estimate, |f| {
+                account_mut(f, ARBOS)["storageProof"][0]["value"] = json!("0x1234");
+            }),
+            Kind::Slot,
+        ),
+        (
+            "Robinhood: a difficulty override",
+            mutated(&rh_estimate, |f| {
+                let p = params_mut(f);
+                p.resize(4, json!({}));
+                p[3] = json!({"difficulty": "0x2"});
+            }),
+            Kind::Unsupported,
+        ),
+    ];
+    for (what, f, want) in cases {
+        assert_eq!(kind(served_of(&f)), want, "{what}");
     }
 }

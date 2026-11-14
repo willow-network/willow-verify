@@ -4,7 +4,9 @@
 use alloy_primitives::{keccak256, B256};
 use alloy_rlp::{Decodable, Encodable, Header as RlpHeader};
 use bls12_381::hash_to_curve::{ExpandMsgXmd, HashToCurve};
-use bls12_381::{multi_miller_loop, G1Affine, G1Projective, G2Affine, G2Prepared, G2Projective, Gt};
+use bls12_381::{
+    multi_miller_loop, G1Affine, G1Projective, G2Affine, G2Prepared, G2Projective, Gt,
+};
 
 /// Longest `Extra` an attestation may carry.
 pub const MAX_EXTRA: usize = 256;

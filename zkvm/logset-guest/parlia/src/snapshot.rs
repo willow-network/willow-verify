@@ -56,7 +56,11 @@ pub enum Vote {
     /// The header carries no attestation.
     None,
     /// 2/3+ of the target's validators signed it (`voters` of `of`).
-    Verified { data: VoteData, voters: usize, of: usize },
+    Verified {
+        data: VoteData,
+        voters: usize,
+        of: usize,
+    },
     /// Not checkable here: the target's validator set or ancestry is older than the snapshots held.
     Unchecked(String),
     /// Invalid, before Plato, when the chain ignored bad attestations.
@@ -82,7 +86,9 @@ fn sorted(set: &EpochSet) -> Result<Vec<Validator>, Error> {
         .collect();
     v.sort_by(|a, b| a.address.cmp(&b.address));
     if v.windows(2).any(|w| w[0].address == w[1].address) {
-        return Err(Error::BadExtra("an epoch block names a validator twice".into()));
+        return Err(Error::BadExtra(
+            "an epoch block names a validator twice".into(),
+        ));
     }
     if v.is_empty() || v.len() > 64 {
         return Err(Error::BadExtra(format!(
@@ -188,7 +194,11 @@ impl Snapshot {
     /// Blocks `validator` sealed in the window the next block is checked against.
     fn sealed_recently(&self, validator: &Address) -> u64 {
         let cl = self.check_len();
-        let left = if self.number > cl { self.number - cl } else { 0 };
+        let left = if self.number > cl {
+            self.number - cl
+        } else {
+            0
+        };
         self.recents
             .iter()
             .filter(|(n, a)| **n > left && **a != Address::ZERO && *a == validator)
@@ -264,7 +274,11 @@ pub fn verify(
         return Err(Error::WrongDifficulty(format!(
             "block {n}: difficulty {} for a{} validator",
             header.difficulty,
-            if in_turn { "n in-turn" } else { "n out-of-turn" }
+            if in_turn {
+                "n in-turn"
+            } else {
+                "n out-of-turn"
+            }
         )));
     }
 
@@ -536,13 +550,11 @@ fn apply(
         if !skip {
             let set = match s.next.take() {
                 Some((at, set)) if at == n - cl => set,
-                other => {
-                    return Err(Error::Checkpoint(format!(
-                        "block {n} switches validators to epoch block {}'s, which is not held ({:?})",
-                        n - cl,
-                        other.map(|o| o.0)
-                    )))
-                }
+                other => return Err(Error::Checkpoint(format!(
+                    "block {n} switches validators to epoch block {}'s, which is not held ({:?})",
+                    n - cl,
+                    other.map(|o| o.0)
+                ))),
             };
             if let Some(tl) = set.turn_length {
                 s.turn_length = turn(tl)?;

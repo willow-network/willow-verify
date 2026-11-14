@@ -76,11 +76,12 @@ pub mod sepolia {
     pub const NEXT_SYNC_COMMITTEE_GINDEX: u64 = 2946;
     /// `signed_execution_payload_bid.message.parent_block_hash` under the body root.
     pub const EXECUTION_BLOCK_HASH_GINDEX: u64 = 2856;
-    /// The pin built in: slot 11,575,968's block root (2026-11-14), the same at publicnode and
-    /// ChainSafe's lodestar.
+    /// The pin built in: slot 11,577,216's block root (2026-11-14), lodestar-sepolia's finalized
+    /// block when Willow's Sepolia anchor service started from it; the service keeps its bootstrap
+    /// (beacon APIs serve only recent ones: slot 11,575,968's, the first pin, is gone).
     pub const PINNED_ROOT: Bytes32 =
-        hex32("35f9d71dbf378dce8387786beaeb03b7496bb245a2d88692a76fd38df40923fd");
-    pub const PINNED_SLOT: u64 = 11_575_968;
+        hex32("5d5b94c9c82d9f56409699948380d58de837f39a170e0de81c547642d3b58415");
+    pub const PINNED_SLOT: u64 = 11_577_216;
 }
 
 /// How a network's light-client data at a slot is checked: its fork's name and version, its

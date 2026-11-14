@@ -303,9 +303,13 @@ impl Header {
         self.base_fields(&mut payload, &self.extra[..unsealed], Some(chain_id));
         if let Some(pbr) = self.parent_beacon_root {
             self.base_fee.unwrap_or_default().encode(&mut payload);
-            self.withdrawals_hash.unwrap_or_default().encode(&mut payload);
+            self.withdrawals_hash
+                .unwrap_or_default()
+                .encode(&mut payload);
             self.blob_gas_used.unwrap_or_default().encode(&mut payload);
-            self.excess_blob_gas.unwrap_or_default().encode(&mut payload);
+            self.excess_blob_gas
+                .unwrap_or_default()
+                .encode(&mut payload);
             pbr.encode(&mut payload);
             if let Some(r) = self.requests_hash {
                 r.encode(&mut payload);

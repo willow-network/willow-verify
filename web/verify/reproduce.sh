@@ -45,12 +45,27 @@ else
     || { tail -40 "$work/build.log" >&2; exit 1; }
 fi
 
+# checkpoint.json is the build's {root, slot}; the server adds the other light clients' starts to it every day
+# (sepolia: a Sepolia beacon block, bnb: a BNB Smart Chain epoch block), which no build makes.
+# same_checkpoint <served file> <built file>: the served one is the built one, with only those starts added.
+same_checkpoint() {
+  local served built rest
+  served="$(tr -d '\n' <"$1")"
+  built="$(tr -d '\n' <"$2")"
+  [ "$served" = "$built" ] && return 0
+  rest="${served#"${built%\}},"}"
+  [ "$rest" != "$served" ] || return 1
+  [[ $rest =~ ^\"sepolia\":\{\"root\":\"0x[0-9a-f]{64}\",\"slot\":[0-9]+\},\"bnb\":\{\"number\":[0-9]+,\"hash\":\"0x[0-9a-f]{64}\",\"time\":[0-9]+\}\}$ ]]
+}
+
 # Every file the build makes, fetched as served and hashed here.
 bad=0
 while read -r sum name; do
   curl -fsS "$origin/verify/$name" -o "$work/served" || { echo "missing   $name"; bad=1; continue; }
   if [ "$(shasum -a 256 "$work/served" | cut -d' ' -f1)" = "$sum" ]; then
     echo "same      $name"
+  elif [ "$name" = checkpoint.json ] && same_checkpoint "$work/served" "$work/dist/checkpoint.json"; then
+    echo "same      $name (the build's checkpoint, with the server's daily light-client starts)"
   else
     echo "DIFFERENT $name"; bad=1
   fi

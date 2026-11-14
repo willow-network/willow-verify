@@ -392,6 +392,223 @@
    "branch": "feat/state-verify-crate",
    "commit": "8f6e62f77c000256338ddb817a48cf37bd5203ee",
    "path": "zkvm/logset-guest/state-verify/testdata/call/estimate-weth-deposit.json"
+  },
+  {
+   "file": "served/eth-override-block-priced.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/eth-override-block-priced.json"
+  },
+  {
+   "file": "served/eth-override-block.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/eth-override-block.json"
+  },
+  {
+   "file": "served/eth-override-nonce.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/eth-override-nonce.json"
+  },
+  {
+   "file": "served/eth-override-slot.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/eth-override-slot.json"
+  },
+  {
+   "file": "served/eth-price-1559.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/eth-price-1559.json"
+  },
+  {
+   "file": "served/eth-price-no-gas.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/eth-price-no-gas.json"
+  },
+  {
+   "file": "served/eth-price-under-base-fee.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/eth-price-under-base-fee.json"
+  },
+  {
+   "file": "served/eth-quote-replaced-storage.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/eth-quote-replaced-storage.json"
+  },
+  {
+   "file": "served/eth-quote-whole.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/eth-quote-whole.json"
+  },
+  {
+   "file": "served/eth-quote.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/eth-quote.json"
+  },
+  {
+   "file": "served/proof-hashes-eth.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/proof-hashes-eth.json"
+  },
+  {
+   "file": "served/proof-hashes-robinhood.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/proof-hashes-robinhood.json"
+  },
+  {
+   "file": "served/proof-hashes-unichain.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/proof-hashes-unichain.json"
+  },
+  {
+   "file": "served/robinhood-0-0.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/robinhood-0-0.json"
+  },
+  {
+   "file": "served/robinhood-0-5.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/robinhood-0-5.json"
+  },
+  {
+   "file": "served/robinhood-1-0.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/robinhood-1-0.json"
+  },
+  {
+   "file": "served/robinhood-2-0.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/robinhood-2-0.json"
+  },
+  {
+   "file": "served/robinhood-3-1.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/robinhood-3-1.json"
+  },
+  {
+   "file": "served/unichain-estimate-override.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/unichain-estimate-override.json"
+  },
+  {
+   "file": "served/unichain-estimate-read.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/unichain-estimate-read.json"
+  },
+  {
+   "file": "served/unichain-l1-fee.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/unichain-l1-fee.json"
+  },
+  {
+   "file": "served/unichain-override-block.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/unichain-override-block.json"
+  },
+  {
+   "file": "served/unichain-price.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/unichain-price.json"
+  },
+  {
+   "file": "served/unichain-revert.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/unichain-revert.json"
+  },
+  {
+   "file": "served/unichain-usdc-balance.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-calls-overrides",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/unichain-usdc-balance.json"
+  },
+  {
+   "file": "served/robinhood-estimate-eip1559-price.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-last-gaps",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/robinhood-estimate-eip1559-price.json"
+  },
+  {
+   "file": "served/robinhood-estimate-gas-left.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-last-gaps",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/robinhood-estimate-gas-left.json"
+  },
+  {
+   "file": "served/robinhood-estimate-never-ends.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-last-gaps",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/robinhood-estimate-never-ends.json"
+  },
+  {
+   "file": "served/robinhood-estimate-plain.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-last-gaps",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/robinhood-estimate-plain.json"
+  },
+  {
+   "file": "served/robinhood-estimate-token-revert.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-last-gaps",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/robinhood-estimate-token-revert.json"
+  },
+  {
+   "file": "served/robinhood-estimate-token-transfer.json",
+   "interface": "I3",
+   "branch": "feat/verifiable-last-gaps",
+   "commit": "written by crates/indexer-node state/tests/proofs.rs (WILLOW_WRITE_SERVED)",
+   "path": "zkvm/logset-guest/state-verify/testdata/served/robinhood-estimate-token-transfer.json"
   }
  ]
 }

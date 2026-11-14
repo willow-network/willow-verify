@@ -209,7 +209,12 @@ export class World {
       proven: f.expect,
       report: { method: f.request.method, chainId, block: { number: r.blockNumber, hash: r.blockHash, timestamp: h.timestamp, parentHash: h.parentHash }, ...(r.algorithm ? { algorithm: r.algorithm } : {}) },
     };
-    this.addProof([call, r.blockHash], entry);
+    // A call's overrides (its third and fourth params) are part of the request it is matched on;
+    // trailing empty ones are none, as the client leaves them out.
+    const overrides = f.request.params.slice(2);
+    const empty = (x: unknown) => x === null || x === undefined || (typeof x === 'object' && !Array.isArray(x) && Object.keys(x as object).length === 0);
+    while (overrides.length && empty(overrides[overrides.length - 1])) overrides.pop();
+    this.addProof([call, r.blockHash, ...overrides], entry);
     this.hashes.set(`${chainId}:${h.number}`, r.blockHash.toLowerCase());
   }
 

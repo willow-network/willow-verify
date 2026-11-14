@@ -1,5 +1,6 @@
 //! State, call and estimate proofs (`willow_getStateProof`, `willow_getCallProof`,
-//! `willow_getEstimateGasProof`) verified with [`state_verify`], compiled to wasm32 for the verify
+//! `willow_getEstimateGasProof`) verified with [`state_verify`], and trace proofs
+//! (`willow_getTraceProof`) with [`trace_verify`], compiled to wasm32 for the verify
 //! page's Web Worker and for `@willow-network/rpc` (web/client; interface I6 in its
 //! `src/verifiers.ts`). The caller's own request decides what a proof must show; the response is
 //! checked against it, never the other way round. As in the other modules, no method throws a
@@ -8,7 +9,7 @@
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use state_verify::wire::ESTIMATE_ALGORITHM;
+use state_verify::wire::estimate_algorithm;
 use state_verify::{
     call_request, proof, verify_call, verify_estimate, verify_state, At, Failure, Kind, Named,
     MAX_PROOF_SLOTS,
@@ -21,10 +22,13 @@ pub enum StateKind {
     /// `willow_getStateProof`: an account and storage slots (`eth_getBalance`,
     /// `eth_getTransactionCount`, `eth_getCode`, `eth_getStorageAt`, `eth_getProof`).
     State,
-    /// `willow_getCallProof`: `eth_call` on Ethereum.
+    /// `willow_getCallProof`: `eth_call` on Ethereum, Unichain and Robinhood Chain.
     Call,
-    /// `willow_getEstimateGasProof`: `eth_estimateGas` on Ethereum.
+    /// `willow_getEstimateGasProof`: `eth_estimateGas` on Ethereum, Unichain and Robinhood Chain.
     Estimate,
+    /// `willow_getTraceProof`: a trace method's response (`debug_traceTransaction`,
+    /// `trace_block`, ...) on Ethereum and Unichain.
+    Trace,
 }
 
 impl StateKind {
@@ -33,6 +37,7 @@ impl StateKind {
             "state" => Some(StateKind::State),
             "call" => Some(StateKind::Call),
             "estimate" => Some(StateKind::Estimate),
+            "trace" => Some(StateKind::Trace),
             _ => None,
         }
     }
@@ -42,6 +47,7 @@ impl StateKind {
             StateKind::State => "willow_getStateProof",
             StateKind::Call => "willow_getCallProof",
             StateKind::Estimate => "willow_getEstimateGasProof",
+            StateKind::Trace => "willow_getTraceProof",
         }
     }
 }
@@ -63,7 +69,10 @@ fn internal(m: impl Into<String>) -> Failure {
 /// the params to send, as given.
 /// - `state`: `[address, storageKeys, block, {"code": bool}]`, the last left out or not; at most
 ///   [`MAX_PROOF_SLOTS`] keys.
-/// - `call`, `estimate`: `[callObject, block]`, without overrides; Ethereum only (`unsupported`).
+/// - `call`, `estimate`: `[callObject, block, stateOverrides?, blockOverrides?]`, read as the log
+///   RPC reads `eth_call`'s; calls and estimates on Ethereum, Unichain and Robinhood Chain (else `unsupported`, as are overrides or calls the RPC doesn't run).
+/// - `trace`: `[method, params]`, a trace method a proof covers (`trace_verify::request`);
+///   Ethereum and Unichain only (`unsupported`).
 pub fn request(chain_id: u64, kind: StateKind, target: &str) -> Result<Value, Failure> {
     let params: Value = serde_json::from_str(target)
         .map_err(|e| invalid(format!("the params are not JSON: {e}")))?;
@@ -97,7 +106,28 @@ pub fn request(chain_id: u64, kind: StateKind, target: &str) -> Result<Value, Fa
             }
         }
         StateKind::Call | StateKind::Estimate => {
-            call_request(chain_id, &params)?;
+            let req = call_request(chain_id, &params)?;
+            if kind == StateKind::Estimate && !state_verify::estimate::estimated_on(req.engine) {
+                return Err(Failure::new(
+                    Kind::Unsupported,
+                    format!("estimates are not verified on chain {chain_id}"),
+                ));
+            }
+            if kind == StateKind::Estimate {
+                if let Some(why) = state_verify::estimate::not_searched(&req) {
+                    return Err(Failure::new(Kind::Unsupported, why));
+                }
+            }
+        }
+        StateKind::Trace => {
+            trace_verify::request::parse(chain_id, &params).map_err(|f| {
+                let kind = match f.kind {
+                    trace_verify::Kind::Unsupported => Kind::Unsupported,
+                    trace_verify::Kind::InvalidRequest => Kind::InvalidRequest,
+                    _ => Kind::Internal,
+                };
+                Failure::new(kind, f.message)
+            })?;
         }
     }
     Ok(params)
@@ -150,6 +180,7 @@ pub fn verify(
             let p = verify_estimate(chain_id, params, &r.result)?;
             (p.block, p.response)
         }
+        StateKind::Trace => return Err(internal("a trace proof is verified by verify_trace")),
     };
     let mut report = json!({
         "method": kind.method(),
@@ -157,9 +188,70 @@ pub fn verify(
         "block": block_json(&block),
     });
     if kind == StateKind::Estimate {
-        report["algorithm"] = json!(ESTIMATE_ALGORITHM);
+        report["algorithm"] = json!(estimate_algorithm(chain_id));
     }
     Ok(Verified { report, proven })
+}
+
+/// `response` (`willow_getTraceProof`'s response body) checked as the response to `params`
+/// (`[method, params]`) on chain `chain_id`: the report names the block to anchor, and `proven`
+/// is the trace method's standard response, `{"result"}`, from the client's own run.
+pub fn verify_trace(
+    chain_id: u64,
+    params: &Value,
+    response: &str,
+) -> Result<Verified, trace_verify::Failure> {
+    let r: Response = serde_json::from_str(response).map_err(|e| {
+        trace_verify::Failure::new(
+            trace_verify::Kind::Malformed,
+            format!("willow_getTraceProof response: {e}"),
+        )
+    })?;
+    let p = trace_verify::verify_trace(chain_id, params, &r.result)?;
+    let report = json!({
+        "method": StateKind::Trace.method(),
+        "chainId": chain_id,
+        "block": {
+            "number": format!("0x{:x}", p.number),
+            "hash": format!("0x{}", hex::encode(p.hash.as_slice())),
+            "timestamp": p.timestamp,
+            "parentHash": format!("0x{}", hex::encode(p.parent_hash.as_slice())),
+        },
+        "traced": p.method,
+        "algorithm": trace_verify::ALGORITHM,
+    });
+    Ok(Verified {
+        report,
+        proven: json!({"result": p.result}),
+    })
+}
+
+/// Where two JSON values differ, at most `room` places.
+fn differences(path: &str, a: &Value, b: &Value, room: usize, out: &mut Vec<String>) {
+    if out.len() >= room || a == b {
+        return;
+    }
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => {
+            for k in x.keys().chain(y.keys().filter(|k| !x.contains_key(*k))) {
+                let (u, v) = (
+                    x.get(k).unwrap_or(&Value::Null),
+                    y.get(k).unwrap_or(&Value::Null),
+                );
+                differences(&format!("{path}.{k}"), u, v, room, out);
+            }
+        }
+        (Value::Array(x), Value::Array(y)) if x.len() == y.len() => {
+            for (i, (u, v)) in x.iter().zip(y).enumerate() {
+                differences(&format!("{path}[{i}]"), u, v, room, out);
+            }
+        }
+        _ => out.push(format!(
+            "{path}: proven {}, the response {}",
+            shown(a),
+            shown(b)
+        )),
+    }
 }
 
 /// Text kept of each value a difference names.
@@ -406,6 +498,11 @@ fn compared<'a>(
         (StateKind::Estimate, "eth_estimateGas") => {
             outcome(method, As::Number, proven, &other, &mut differ)
         }
+        (StateKind::Trace, m) if trace_verify::request::PROVEN.contains(&m) => {
+            if let Some(r) = result(&other, &mut differ) {
+                differences(m, &proven["result"], r, 20, &mut differ);
+            }
+        }
         (k, m) => {
             return Err(internal(format!(
                 "compare {m} after a {} proof",
@@ -444,7 +541,7 @@ impl StateVerifier {
         }
     }
 
-    /// What to ask Willow for `kind` (`state`, `call`, `estimate`) and `target` (JSON text of the
+    /// What to ask Willow for `kind` (`state`, `call`, `estimate`, `trace`) and `target` (JSON text of the
     /// proof method's params): `{"ok": true, "method", "params"}`, or a failure
     /// (`invalid-request`, `unsupported`; `internal` for an unknown kind). The next `verify`
     /// checks the response against this request.
@@ -471,6 +568,16 @@ impl StateVerifier {
             return internal("verify called before request").json().to_string();
         };
         let k = *k;
+        if k == StateKind::Trace {
+            return match verify_trace(self.chain_id, params, response) {
+                Ok(v) => {
+                    let out = json!({"ok": true, "report": v.report, "proven": v.proven});
+                    self.verified = Some((k, v.proven));
+                    out.to_string()
+                }
+                Err(f) => f.json().to_string(),
+            };
+        }
         match verify(self.chain_id, k, params, response) {
             Ok(v) => {
                 let out = json!({"ok": true, "report": v.report, "proven": v.proven});
@@ -483,7 +590,7 @@ impl StateVerifier {
 
     /// Another server's standard response body for `method` (`eth_getBalance`,
     /// `eth_getTransactionCount`, `eth_getCode`, `eth_getProof`, `eth_getStorageAt:<i>` for the
-    /// i-th key asked, `eth_call`, `eth_estimateGas`) against the last passing `verify`:
+    /// i-th key asked, `eth_call`, `eth_estimateGas`, a trace method) against the last passing `verify`:
     /// `{"ok": true, "result": {"exact", "differ"}}`, or a failure (`internal` without a passing
     /// verify, `malformed` when `response` can't be read).
     pub fn compare(&self, method: &str, response: &str) -> String {

@@ -1,13 +1,15 @@
 //! State, call and estimate proofs: what Willow sends for `willow_getStateProof`,
 //! `willow_getCallProof` and `willow_getEstimateGasProof` ([`wire`]), and the checks a client runs
 //! on them ([`verify_state`], [`verify_call`], [`verify_estimate`]). Every check binds the proof
-//! to the client's own request and to the header it names; the client anchors that header's hash
-//! itself. The server runs the same EVM ([`call`], [`estimate`]) and checks what it sends with the
-//! same functions.
+//! to the client's own request (its call and overrides) and to the header it names; the client
+//! anchors that header's hash itself. The server runs the same EVMs ([`call`], [`estimate`]) and
+//! checks what it sends with the same functions. Calls are proven on Ethereum, Unichain and
+//! Robinhood Chain ([`call::engine`]), estimates on Ethereum and Unichain.
 
 pub mod call;
 pub mod estimate;
 pub mod history;
+pub mod overrides;
 pub mod proof;
 #[cfg(test)]
 mod tests;
@@ -15,8 +17,10 @@ pub mod wire;
 pub mod witness;
 
 use alloy_primitives::{keccak256, Bytes, B256, U256};
-use call::{Mode, Ran, Reads};
+use call::{Engine, Mode, Ran, Reads, Run};
 use estimate::Estimated;
+use history::History;
+use overrides::{Overrides, Unread};
 use proof::{hx, Proven};
 use revm::primitives::hardfork::SpecId;
 use serde_json::{json, Value};
@@ -32,7 +36,8 @@ pub enum Kind {
     InvalidRequest,
     /// The result can't be read (a field missing, not hex, the wrong length).
     Malformed,
-    /// Not verified here: calls on a chain other than Ethereum.
+    /// Not verified here: calls on a chain whose calls aren't proven, overrides or a call of a kind
+    /// not run here.
     Unsupported,
     /// The proof is for another chain.
     WrongChain,
@@ -303,30 +308,86 @@ pub fn verify_state(chain_id: u64, params: &Value, result: &Value) -> Result<Pro
     })
 }
 
-/// A call request: `[call, block]`, without overrides (the wasm's `request` reads it too).
-pub fn call_request(chain_id: u64, params: &Value) -> Result<(call::Call, At), Failure> {
-    if chain_id != 1 {
-        return Err(Failure::new(
-            Kind::Unsupported,
-            format!("calls are verified on Ethereum only, not chain {chain_id}"),
-        ));
-    }
-    let p = |i: usize| params.get(i).unwrap_or(&Value::Null);
-    let given = |o: &Value| !o.is_null() && o.as_object().is_none_or(|m| !m.is_empty());
-    if given(p(2)) || given(p(3)) {
-        return Err(invalid(
-            "a call with state or block overrides is not proven",
-        ));
-    }
-    let c = call::parse(p(0)).map_err(|e| match e {
-        call::Unrunnable::Invalid(m) | call::Unrunnable::NotServed(m) => invalid(m),
-    })?;
-    Ok((c, At::parse(p(1))?))
+/// A call request: `[call, block, stateOverrides?, blockOverrides?]` (the wasm's `request` reads
+/// it too).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallRequest {
+    pub engine: Engine,
+    pub call: call::Call,
+    pub at: At,
+    pub overrides: Overrides,
 }
 
-/// The witness of a call proof, verified against the block's state root.
-fn proven_witness(block: &Named, w: &wire::Witness) -> Result<call::Witness, Failure> {
-    witness::verify(block.header.state_root, w)
+/// `params` read as a call request on chain `chain_id`, as the log RPC reads `eth_call`'s (with
+/// the same parsers): `unsupported` where the RPC would refuse it as not served here.
+pub fn call_request(chain_id: u64, params: &Value) -> Result<CallRequest, Failure> {
+    let Some(engine) = call::engine(chain_id) else {
+        return Err(Failure::new(
+            Kind::Unsupported,
+            format!("calls are verified on Ethereum, Unichain and Robinhood Chain, not chain {chain_id}"),
+        ));
+    };
+    let unsupported = |m: String| Failure::new(Kind::Unsupported, m);
+    let p = |i: usize| params.get(i).unwrap_or(&Value::Null);
+    if engine == Engine::Nitro {
+        // Refused by Nitro's own words (the log RPC hands them back as the call's failure).
+        if ["beaconRoot", "withdrawals"]
+            .iter()
+            .any(|k| !p(3)[*k].is_null())
+        {
+            return Err(unsupported(
+                "a block override Nitro refuses for eth_call".into(),
+            ));
+        }
+        let arbos = willow_arb_exec::ARBOS_STATE;
+        if p(2).as_object().is_some_and(|m| {
+            m.keys()
+                .any(|k| proof::address(&json!(k)).ok() == Some(arbos))
+        }) {
+            return Err(unsupported(
+                "ArbOS's state account can't be overridden".into(),
+            ));
+        }
+    }
+    let c = call::parse_on(p(0), chain_id).map_err(|e| match e {
+        call::Unrunnable::Invalid(m) => invalid(m),
+        call::Unrunnable::NotServed(m) => unsupported(m),
+    })?;
+    let overrides = overrides::parse(p(2), p(3)).map_err(|e| match e {
+        Unread::Invalid(m) => invalid(m),
+        Unread::TooLarge(m) | Unread::NotServed(m) => unsupported(m),
+    })?;
+    Ok(CallRequest {
+        engine,
+        call: c,
+        at: At::parse(p(1))?,
+        overrides,
+    })
+}
+
+/// The witness of a call proof, verified against the block's state root (the code of an account
+/// the caller's overrides set may be left out). Public for proofs that run a call their own way
+/// (a call's trace).
+pub fn proven_witness(
+    req: &CallRequest,
+    block: &Named,
+    w: &wire::Witness,
+) -> Result<call::Witness, Failure> {
+    let history = History::of(block.chain_id);
+    witness::verify_on(
+        history,
+        block.header.state_root,
+        w,
+        &req.overrides.own_code(),
+    )
+}
+
+/// The environment of a proven block.
+pub fn env_of(block: &Named) -> call::Block {
+    call::Block::from_header(
+        &block.header,
+        &logset_blockproof::derive::BlobSchedule::builtin(block.chain_id),
+    )
 }
 
 /// A strict run's failure to complete over a verified witness.
@@ -339,6 +400,10 @@ fn unfinished(ran: &Ran) -> Option<Failure> {
         Ran::NoBlockHash(n) => Some(Failure::new(
             Kind::MissingRead,
             format!("the call read the hash of block {n}, which the witness does not prove"),
+        )),
+        Ran::Refused(m) => Some(Failure::new(
+            Kind::Unsupported,
+            format!("the call is not run here: {m}"),
         )),
         Ran::Internal(m) => Some(Failure::new(Kind::Internal, m.clone())),
         _ => None,
@@ -354,23 +419,29 @@ pub struct ProvenCall {
     pub response: Value,
 }
 
-/// `result` checked as the answer to `willow_getCallProof` `params` on chain `chain_id`: the
-/// client's own run over the witness comes to the result sent.
+/// `result` checked as the response to `willow_getCallProof` `params` on chain `chain_id`: the
+/// client's own run over the witness, under its own overrides, comes to the result sent.
 pub fn verify_call(chain_id: u64, params: &Value, result: &Value) -> Result<ProvenCall, Failure> {
-    let (c, at) = call_request(chain_id, params)?;
+    let req = call_request(chain_id, params)?;
     let r: wire::CallProof = parse(result)?;
     let block = named(
         chain_id,
-        at,
+        req.at,
         (&r.chain_id, &r.block_number, &r.block_hash, &r.header),
     )?;
-    let w = proven_witness(&block, &r.witness)?;
-    let env = call::Block::from_header(
-        &block.header,
-        &logset_blockproof::derive::BlobSchedule::builtin(1),
-    );
-    let hash_of = hashes(&w, &env);
-    let ran = call::run_with(&w, &env, &c, &hash_of, Mode::Strict, &mut Reads::default());
+    let w = proven_witness(&req, &block, &r.witness)?;
+    let env = env_of(&block);
+    let hash_of = hashes(chain_id, &w, &env);
+    let run = Run {
+        engine: req.engine,
+        witness: &w,
+        block: &env,
+        call: &req.call,
+        overrides: &req.overrides,
+        hash_of: &hash_of,
+        mode: Mode::Strict,
+    };
+    let ran = run.call(&mut Reads::default());
     if let Some(f) = unfinished(&ran) {
         return Err(f);
     }
@@ -382,7 +453,8 @@ pub fn verify_call(chain_id: u64, params: &Value, result: &Value) -> Result<Prov
             format!("the call comes to {outcome:?}, not {:?}", r.result),
         ));
     }
-    let response = outcome.response();
+    let response = wire::Outcome::response_of(&ran)
+        .ok_or_else(|| Failure::new(Kind::Internal, "no response"))?;
     Ok(ProvenCall {
         block,
         outcome,
@@ -390,12 +462,19 @@ pub fn verify_call(chain_id: u64, params: &Value, result: &Value) -> Result<Prov
     })
 }
 
-/// Block hashes as the call block's state holds them (EIP-2935): from Prague on, else none.
-fn hashes<'a>(w: &'a call::Witness, env: &'a call::Block) -> impl Fn(u64) -> Option<B256> + 'a {
-    let prague = call::spec(env.number, env.timestamp).is_enabled_in(SpecId::PRAGUE);
+/// Block hashes as the call block's state holds them (EIP-2935; on Ethereum from Prague, else
+/// none): `ArbSys.arbBlockHash`'s L2 hashes on Robinhood Chain.
+pub fn hashes<'a>(
+    chain_id: u64,
+    w: &'a call::Witness,
+    env: &'a call::Block,
+) -> impl Fn(u64) -> Option<B256> + 'a {
+    let history = History::of(chain_id);
+    let active =
+        chain_id != 1 || call::spec(env.number, env.timestamp).is_enabled_in(SpecId::PRAGUE);
     move |n| {
-        prague
-            .then(|| history::block_hash(w, env.number, n))
+        active
+            .then(|| history.block_hash(w, env.number, n))
             .flatten()
     }
 }
@@ -409,38 +488,50 @@ pub struct ProvenEstimate {
     pub response: Value,
 }
 
-/// `result` checked as the answer to `willow_getEstimateGasProof` `params` on chain `chain_id`:
-/// the client's own search over the witness comes to the estimate sent, and the call succeeds
-/// with the gas it names.
+/// `result` checked as the response to `willow_getEstimateGasProof` `params` on chain
+/// `chain_id`: the client's own search over the witness, under its own overrides, comes to the
+/// estimate sent, and the call succeeds with the gas it names.
 pub fn verify_estimate(
     chain_id: u64,
     params: &Value,
     result: &Value,
 ) -> Result<ProvenEstimate, Failure> {
-    let (c, at) = call_request(chain_id, params)?;
+    let req = call_request(chain_id, params)?;
+    if !estimate::estimated_on(req.engine) {
+        return Err(Failure::new(
+            Kind::Unsupported,
+            format!("estimates are not verified on chain {chain_id}"),
+        ));
+    }
+    if let Some(why) = estimate::not_searched(&req) {
+        return Err(Failure::new(Kind::Unsupported, why));
+    }
     let r: wire::EstimateProof = parse(result)?;
-    if r.algorithm != wire::ESTIMATE_ALGORITHM {
+    let algorithm = wire::estimate_algorithm(chain_id);
+    if r.algorithm != algorithm {
         return Err(Failure::new(
             Kind::Algorithm,
-            format!(
-                "an estimate by {:?}, not {}",
-                r.algorithm,
-                wire::ESTIMATE_ALGORITHM
-            ),
+            format!("an estimate by {:?}, not {algorithm}", r.algorithm),
         ));
     }
     let block = named(
         chain_id,
-        at,
+        req.at,
         (&r.chain_id, &r.block_number, &r.block_hash, &r.header),
     )?;
-    let w = proven_witness(&block, &r.witness)?;
-    let env = call::Block::from_header(
-        &block.header,
-        &logset_blockproof::derive::BlobSchedule::builtin(1),
-    );
-    let hash_of = hashes(&w, &env);
-    let found = estimate::estimate(&w, &env, &c, &hash_of, Mode::Strict, &mut Reads::default());
+    let w = proven_witness(&req, &block, &r.witness)?;
+    let env = env_of(&block);
+    let hash_of = hashes(chain_id, &w, &env);
+    let run = Run {
+        engine: req.engine,
+        witness: &w,
+        block: &env,
+        call: &req.call,
+        overrides: &req.overrides,
+        hash_of: &hash_of,
+        mode: Mode::Strict,
+    };
+    let found = estimate::estimate_run(&run, &mut Reads::default());
     let estimate = match &found {
         Estimated::Missing(m) => {
             return Err(Failure::new(
@@ -464,16 +555,16 @@ pub fn verify_estimate(
         ));
     }
     if let Estimated::Gas(gas) = found {
-        let mut at_gas = c.clone();
-        at_gas.gas = Some(gas);
-        let ran = call::run_with(
-            &w,
-            &env,
-            &at_gas,
-            &hash_of,
-            Mode::Strict,
-            &mut Reads::default(),
-        );
+        let at_gas = call::Call {
+            gas: Some(gas),
+            ..req.call.clone()
+        };
+        let ran = Run {
+            call: &at_gas,
+            ..run
+        }
+        .at_gas(gas, &mut Reads::default(), false)
+        .ran;
         if let Some(f) = unfinished(&ran) {
             return Err(f);
         }
@@ -484,7 +575,8 @@ pub fn verify_estimate(
             ));
         }
     }
-    let response = estimate.response();
+    let response = wire::Estimate::response_of(&found)
+        .ok_or_else(|| Failure::new(Kind::Internal, "no response"))?;
     Ok(ProvenEstimate {
         block,
         estimate,

@@ -4,9 +4,10 @@
 # (zkvm/logset-guest-openvm/verify-wasm: OpenVM's verifier cannot share SP1's dependency graph,
 # so it is a module of its own that the log verifier calls for each OpenVM proof), the
 # transaction, receipt, block and fee verifier (zkvm/logset-guest/items-wasm, Merkle-Patricia
-# proofs), the state, call and estimate verifier (zkvm/logset-guest/state-wasm, account proofs and
-# the EVM) and the block confirmation (zkvm/logset-guest/anchor-wasm, Ethereum's light client),
-# each its own wasm module. @willow-network/rpc (web/client) ships the same modules.
+# proofs), the state, call, estimate and trace verifier (zkvm/logset-guest/state-wasm, account
+# proofs, the EVMs and the tracers: Ethereum's, Unichain's from crates/op-exec, Robinhood Chain's
+# from crates/arb-exec) and the block confirmation (zkvm/logset-guest/anchor-wasm, Ethereum's light
+# client), each its own wasm module. @willow-network/rpc (web/client) ships the same modules.
 # Needs: the repo toolchain with the wasm32-unknown-unknown target, wasm-bindgen-cli 0.2.129
 # (cargo install wasm-bindgen-cli --version 0.2.129), and a C compiler and archiver for wasm32
 # (OpenVM's verifier links zstd's C code): WASM_CC / WASM_AR, by default clang and llvm-ar (Apple's
@@ -43,13 +44,13 @@ repo="$(cd "$here/../.." && pwd)"
 # What the five crates build from, relative to the repo. The OpenVM pins are the minted program
 # keys (program-keys.txt: MINT.txt's key tables, without the record's provenance), the verifying
 # keys (vk/) and the ELF hashes the trust module reads.
-SOURCES=(rust-toolchain.toml crates/network/src/beacon crates/receipts-trie zkvm/anchor-guest/core
+SOURCES=(rust-toolchain.toml crates/arb-exec crates/network/src/beacon crates/op-exec crates/receipts-trie zkvm/anchor-guest/core
   zkvm/beacon-cl-guest/core zkvm/window-anchor-guest/core zkvm/logset-guest/agg-core
   zkvm/logset-guest/anchor-verify zkvm/logset-guest/anchor-wasm zkvm/logset-guest/blockcheck
   zkvm/logset-guest/blockproof zkvm/logset-guest/chains zkvm/logset-guest/core
   zkvm/logset-guest/fixtures zkvm/logset-guest/items-wasm zkvm/logset-guest/parlia zkvm/logset-guest/query
   zkvm/logset-guest/query-verify zkvm/logset-guest/query-wasm zkvm/logset-guest/state-verify
-  zkvm/logset-guest/state-wasm zkvm/logset-guest/vkeys
+  zkvm/logset-guest/state-wasm zkvm/logset-guest/trace-verify zkvm/logset-guest/vkeys
   zkvm/logset-guest-openvm/verify zkvm/logset-guest-openvm/verify-wasm
   zkvm/logset-guest-openvm/pins/program-keys.txt zkvm/logset-guest-openvm/pins/vk
   zkvm/logset-guest-openvm/pins/logset-leaf.sha256 zkvm/logset-guest-openvm/pins/logset-idxagg.sha256

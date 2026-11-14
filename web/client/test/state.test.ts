@@ -1,5 +1,6 @@
 // State, calls and estimates (design 1.3.3 to 1.3.5) on W2's fixtures.
 import { afterEach, describe, expect, it } from 'vitest';
+import { toNumber } from '../src/hex.js';
 import { harness, methodsSent, type Harness } from './support/setup.js';
 import { fixture, fixtureNames } from './support/world.js';
 
@@ -105,6 +106,23 @@ describe('calls and estimates on Ethereum', () => {
     });
   }
 
+  it('a call with state and block overrides: they go with its proof request, and the proof is verified over them', async () => {
+    h = await ethereum();
+    const f = structuredClone(fixture('call/call-usdc-balance.json'));
+    const a = `0x${'11'.repeat(20)}`;
+    // An account the caller sets whole (never proven) and a block field the call doesn't read: the
+    // real verifier comes to the fixture's own outcome under them.
+    const overrides = [{ [a]: { balance: '0x1', nonce: '0x0', code: '0x' } }, { time: '0x5' }];
+    f.request.params = [f.request.params[0], f.request.params[1], ...overrides];
+    h.world.addCall(f);
+    await expect(h.client.request({ method: 'eth_call', params: [f.request.params[0], 'latest', ...overrides] })).resolves.toBe(f.expect.result);
+    const sent = h.world.log.flatMap((r) => r.items).filter((i) => i.method === 'willow_getCallProof');
+    expect(sent.map((i) => i.params)).toEqual([[f.request.params[0], { blockHash: W2_BLOCK.hash }, ...overrides]]);
+    expect(h.events.at(-1)).toMatchObject({ status: 'verified', block: W2_BLOCK });
+    // Empty overrides are none: the plain call's proof.
+    await expect(h.client.request({ method: 'eth_call', params: [f.request.params[0], 'latest', {}, null] })).resolves.toBe(f.expect.result);
+  });
+
   it('the same call at the same head is proven once', async () => {
     h = await ethereum();
     const f = fixture('call/call-usdc-balance.json');
@@ -113,4 +131,26 @@ describe('calls and estimates on Ethereum', () => {
     await h.client.request({ method: 'eth_call', params: p });
     expect(methodsSent(h.world).filter((m) => m === 'willow_getCallProof')).toHaveLength(1);
   });
+});
+
+describe('calls the RPC served, with their overrides, on Ethereum, Unichain and Robinhood Chain', () => {
+  // state-verify's testdata/served: proofs the RPC built over recorded nodes' state, each with the
+  // standard response its eth_call (or eth_estimateGas) served.
+  for (const file of fixtureNames('served')) {
+    it(file, async () => {
+      const f = fixture(`served/${file}`);
+      const r = f.result;
+      const chainId = toNumber(r.chainId)!;
+      const number = toNumber(r.blockNumber)!;
+      h = await harness({ chainId });
+      h.world.addCall(f, chainId);
+      h.world.anchor({ chainId, number, hash: r.blockHash, level: 'signed', path: chainId === 1 ? 'head' : 'sequencer', time: h.world.nowSec - 2 });
+      const method = f.request.method === 'willow_getCallProof' ? 'eth_call' : 'eth_estimateGas';
+      const [call, , ...overrides] = f.request.params;
+      const run = h.client.request({ method, params: [call, { blockHash: r.blockHash }, ...overrides] });
+      if ('result' in f.expect) await expect(run).resolves.toBe(f.expect.result);
+      else await expect(run).rejects.toMatchObject({ code: f.expect.error.code, message: f.expect.error.message, ...(f.expect.error.data ? { data: f.expect.error.data } : {}) });
+      expect(h.events.at(-1)).toMatchObject({ status: 'verified', block: { number, hash: r.blockHash } });
+    });
+  }
 });

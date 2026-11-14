@@ -129,7 +129,10 @@ fn hashes_and_seals_across_the_forks() {
     // A plain block names none; a header from before Luban carries no votes.
     assert!(by(1_000_001).validator_bytes(&MAINNET, 200).is_empty());
     assert_eq!(by(1_000_001).attestation(&MAINNET, 200), Ok(None));
-    assert!(matches!(by(30_720_096).attestation(&MAINNET, 200), Ok(Some(_))));
+    assert!(matches!(
+        by(30_720_096).attestation(&MAINNET, 200),
+        Ok(Some(_))
+    ));
 }
 
 #[test]
@@ -139,32 +142,31 @@ fn follows_the_validators_across_two_epoch_switches() {
     let mut verified = 0;
     let mut finalized_two_back = 0;
     let mut switches = vec![];
-    let ring = follow(
-        start.clone(),
-        &headers[201..],
-        |ring, h, c| {
-            let parent = ring.last().unwrap();
-            if addresses(parent) != addresses(&c.snapshot) {
-                switches.push(h.number);
+    let ring = follow(start.clone(), &headers[201..], |ring, h, c| {
+        let parent = ring.last().unwrap();
+        if addresses(parent) != addresses(&c.snapshot) {
+            switches.push(h.number);
+        }
+        match &c.vote {
+            Vote::Verified { voters, of, data } => {
+                assert!(voters * 3 >= of * 2 && *of == 21);
+                assert_eq!(data.target_number, h.number - 1);
+                verified += 1;
             }
-            match &c.vote {
-                Vote::Verified { voters, of, data } => {
-                    assert!(voters * 3 >= of * 2 && *of == 21);
-                    assert_eq!(data.target_number, h.number - 1);
-                    verified += 1;
-                }
-                Vote::Unchecked(_) => assert!(h.number <= FIRST + 204, "block {}", h.number),
-                v => panic!("block {}: {v:?}", h.number),
-            }
-            if c.snapshot.finalized().map(|f| f.0) == Some(h.number - 2) {
-                finalized_two_back += 1;
-            }
-        },
-    );
+            Vote::Unchecked(_) => assert!(h.number <= FIRST + 204, "block {}", h.number),
+            v => panic!("block {}: {v:?}", h.number),
+        }
+        if c.snapshot.finalized().map(|f| f.0) == Some(h.number - 2) {
+            finalized_two_back += 1;
+        }
+    });
     // The set changes 87 blocks after each epoch block ((21 / 2 + 1) × 8 − 1), to the set it named.
     assert_eq!(switches, vec![133_195_087, 133_196_087]);
     assert_eq!(start.check_len(), 87);
-    assert_eq!(addresses(ring.last().unwrap()), set_named(&headers, 133_196_000));
+    assert_eq!(
+        addresses(ring.last().unwrap()),
+        set_named(&headers, 133_196_000)
+    );
     assert_ne!(
         set_named(&headers, 133_195_000),
         set_named(&headers, 133_196_000)
@@ -206,11 +208,7 @@ fn the_pinned_checkpoint_matches_the_chain() {
 /// The snapshots held just before `n`, from the checkpoint 200 past its epoch.
 fn ring_before(headers: &[(Header, B256)], n: u64) -> Vec<Snapshot> {
     let start = checkpoint_at(&headers, FIRST + 200);
-    follow(
-        start,
-        &headers[201..(n - FIRST) as usize],
-        |_, _, _| {},
-    )
+    follow(start, &headers[201..(n - FIRST) as usize], |_, _, _| {})
 }
 
 #[test]
@@ -352,7 +350,12 @@ fn votes_need_the_justified_source_and_two_thirds() {
     };
     // The parent's justified block is not the vote's source.
     let mut r = ring.clone();
-    r.last_mut().unwrap().attestation.as_mut().unwrap().target_number -= 1;
+    r.last_mut()
+        .unwrap()
+        .attestation
+        .as_mut()
+        .unwrap()
+        .target_number -= 1;
     assert!(matches!(
         verify(&MAINNET, &r, &h, hash, None),
         Err(Error::Attestation(_))
@@ -380,8 +383,16 @@ fn votes_need_the_justified_source_and_two_thirds() {
         .map(|(_, v)| v.vote_key)
         .collect();
     assert!(fast_aggregate_verify(&keys, &a.signature, &a.data.hash()));
-    assert!(!fast_aggregate_verify(&keys[1..], &a.signature, &a.data.hash()));
-    assert!(!fast_aggregate_verify(&keys, &a.signature, &B256::repeat_byte(3)));
+    assert!(!fast_aggregate_verify(
+        &keys[1..],
+        &a.signature,
+        &a.data.hash()
+    ));
+    assert!(!fast_aggregate_verify(
+        &keys,
+        &a.signature,
+        &B256::repeat_byte(3)
+    ));
     let mut sig = a.signature;
     sig[50] ^= 1;
     assert!(!fast_aggregate_verify(&keys, &sig, &a.data.hash()));
@@ -455,7 +466,11 @@ fn turn_rules_are_kept() {
     let c = verify(&MAINNET, &[s.clone()], &h, h.hash(), None).unwrap();
     assert!(c.in_turn);
     let next = c.snapshot;
-    let diff = if next.in_turn() == address_of(&keys[in_turn]) { 2 } else { 1 };
+    let diff = if next.in_turn() == address_of(&keys[in_turn]) {
+        2
+    } else {
+        1
+    };
     let h2 = child(&next, &template, &keys[in_turn], diff);
     assert!(matches!(
         verify(&MAINNET, &[s, next.clone()], &h2, h2.hash(), None),
@@ -466,7 +481,11 @@ fn turn_rules_are_kept() {
         .iter()
         .find(|k| address_of(k) != address_of(&keys[in_turn]))
         .unwrap();
-    let diff = if next.in_turn() == address_of(k) { 2 } else { 1 };
+    let diff = if next.in_turn() == address_of(k) {
+        2
+    } else {
+        1
+    };
     let h3 = child(&next, &template, k, diff);
     assert!(verify(&MAINNET, &[next.clone()], &h3, h3.hash(), None).is_ok());
     // Too soon after its parent, and a mixHash that is not milliseconds.
@@ -493,6 +512,11 @@ fn a_snapshot_reads_back_from_its_record() {
     for n in [133_195_001, 133_196_050, 133_196_090] {
         let ring = ring_before(&headers, n);
         let s = ring.last().unwrap();
-        assert_eq!(&Snapshot::from_json(&s.to_json()).unwrap(), s, "after {}", n - 1);
+        assert_eq!(
+            &Snapshot::from_json(&s.to_json()).unwrap(),
+            s,
+            "after {}",
+            n - 1
+        );
     }
 }

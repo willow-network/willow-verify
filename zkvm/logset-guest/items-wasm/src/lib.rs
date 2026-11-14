@@ -435,7 +435,7 @@ impl ItemOutcome {
     pub fn compare(&self, which: &str, response: &str) -> Result<Value, Failure> {
         let full;
         let (proven, method) = match which {
-            "answer" => (&self.answer, "the plain"),
+            "answer" => (&self.answer, ""),
             "transactions" if self.is_block() => {
                 let b = self.verified.block(true).map_err(Failure::rejected)?;
                 full = Rendered {
@@ -454,7 +454,12 @@ impl ItemOutcome {
             },
             other => return Err(Failure::new(Kind::Internal, format!("compare {other}"))),
         };
-        let mut answer: Value = result_of(response, method)?;
+        let mut answer: Value = match method {
+            "" => serde_json::from_str::<Response<Value>>(response)
+                .map(|r| r.result)
+                .map_err(|e| Failure::new(Kind::MalformedInput, format!("the response: {e}")))?,
+            m => result_of(response, m)?,
+        };
         if which == "transactions" && !answer.is_null() {
             answer = match answer.get_mut("transactions").map(Value::take) {
                 Some(t @ Value::Array(_)) => t,

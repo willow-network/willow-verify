@@ -11,9 +11,11 @@ const ORIGIN = /^https?:$/.test(location.protocol) ? location.origin : 'https://
 // user enters none; `explorer`, `explorerName`: a block explorer, for a link to the transaction; `blockMb`: a
 // typical block's log records as hex, in MB, for the whole-block download estimate (Ethereum about
 // 120 KB of records; the others from the chains' measured composition); `poolManager`: Uniswap v4's
-// PoolManager, the example's address; `finalDays`: about how long an L2 block takes to be final on
-// Ethereum (its claim's challenge period); `claimEvery`: how often its claims go on Ethereum.
-// Every chain's gas is paid in ETH.
+// PoolManager, the example's address (absent where Uniswap lists none); `finalDays`: about how long
+// an L2 block takes to be final on its L1 (its claim's challenge period), or `finalIn` where that is
+// under a day; `claimEvery`: how often its claims go on its L1; `chainFinalMin`: about how many
+// minutes in the chain's own `finalized` block reaches it (20 when absent; null when not known, and
+// the page then says nothing of it). Gas is paid in ETH, or in `native`.
 const CHAINS = [
   { id: 1, name: 'Ethereum', a: 'an', slugs: ['ethereum', 'eth', 'mainnet'], nodes: ['https://ethereum-rpc.publicnode.com', 'https://rpc.mevblocker.io'], explorer: 'https://etherscan.io', explorerName: 'Etherscan', blockMb: 0.25, poolManager: '0x000000000004444c5dc75cb358380d2e3de08a90' },
   { id: 8453, name: 'Base', a: 'a', slugs: ['base'], nodes: ['https://base-rpc.publicnode.com', 'https://mainnet.base.org'], explorer: 'https://basescan.org', explorerName: 'Basescan', finalDays: 5, claimEvery: '20 minutes', blockMb: 0.32, poolManager: '0x498581ff718922c3f8e6a244956af099b2652b2b' },
@@ -22,7 +24,25 @@ const CHAINS = [
   { id: 10, name: 'OP Mainnet', a: 'an', slugs: ['optimism', 'op', 'op-mainnet'], nodes: ['https://optimism-rpc.publicnode.com', 'https://mainnet.optimism.io'], explorer: 'https://optimistic.etherscan.io', explorerName: 'OP Etherscan', finalDays: 7, claimEvery: 'hour', blockMb: 0.14, poolManager: '0x9a13f98cb987694c9f086b1f5eb990eea8264ec3' },
   { id: 130, name: 'Unichain', a: 'a', slugs: ['unichain'], nodes: ['https://unichain-rpc.publicnode.com', 'https://mainnet.unichain.org'], explorer: 'https://uniscan.xyz', explorerName: 'Uniscan', finalDays: 7, claimEvery: 'hour', blockMb: 0.004, poolManager: '0x1f98400000000000000000000000000000000004' },
   { id: 57073, name: 'Ink', a: 'an', slugs: ['ink'], nodes: ['https://ink-rpc.publicnode.com', 'https://rpc-gel.inkonchain.com'], explorer: 'https://explorer.inkonchain.com', explorerName: 'Ink Explorer', finalDays: 7, claimEvery: '12 hours', blockMb: 0.016, poolManager: '0x360e68faccca8ca495c1b759fd9eee466db9fb32' },
+  { id: 56, name: 'BNB Smart Chain', a: 'a', slugs: ['bnb', 'bsc', 'bnb-smart-chain'], nodes: ['https://bsc-rpc.publicnode.com', 'https://bsc-dataseed.bnbchain.org'], explorer: 'https://bscscan.com', explorerName: 'BscScan', native: 'BNB', poolManager: '0x28e2ea090877bf75740558f6bfb36a5ffee9e9df' },
+  { id: 480, name: 'World Chain', a: 'a', slugs: ['worldchain', 'world-chain', 'world'], nodes: ['https://worldchain-mainnet.g.alchemy.com/public', 'https://480.rpc.thirdweb.com'], explorer: 'https://worldscan.org', explorerName: 'Worldscan', finalDays: 7, claimEvery: 'hour', poolManager: '0xb1860d529182ac3bc1f51fa2abd56662b7d13f33' },
+  { id: 1868, name: 'Soneium', a: 'a', slugs: ['soneium'], nodes: ['https://soneium-rpc.publicnode.com', 'https://rpc.soneium.org'], explorer: 'https://soneium.blockscout.com', explorerName: 'Soneium Explorer', finalDays: 3.5, claimEvery: '3 hours', chainFinalMin: null, poolManager: '0x360e68faccca8ca495c1b759fd9eee466db9fb32' },
+  { id: 7777777, name: 'Zora', a: 'a', slugs: ['zora'], nodes: ['https://rpc.zora.energy', 'https://zora.drpc.org'], explorer: 'https://explorer.zora.energy', explorerName: 'Zora Explorer', finalDays: 7, claimEvery: '6 hours', chainFinalMin: null, poolManager: '0x0575338e4c17006ae181b47900a84404247ca30f' },
+  { id: 84532, name: 'Base Sepolia', a: 'a', slugs: ['base-sepolia'], nodes: ['https://base-sepolia-rpc.publicnode.com', 'https://sepolia.base.org'], explorer: 'https://sepolia.basescan.org', explorerName: 'Basescan', finalDays: 5, claimEvery: '20 minutes', poolManager: '0x05e73354cfdd6745c338b50bcfdfa3aa6fa03408' },
+  { id: 421614, name: 'Arbitrum Sepolia', a: 'an', slugs: ['arbitrum-sepolia', 'arb-sepolia'], nodes: ['https://arbitrum-sepolia-rpc.publicnode.com', 'https://sepolia-rollup.arbitrum.io/rpc'], explorer: 'https://sepolia.arbiscan.io', explorerName: 'Arbiscan', finalIn: '30 minutes', claimEvery: '30 minutes', poolManager: '0xfb3e0c6f74eb1a21cc1da29aec80d2dfe6c9a317' },
+  { id: 11155420, name: 'OP Sepolia', a: 'an', slugs: ['op-sepolia', 'optimism-sepolia'], nodes: ['https://optimism-sepolia-rpc.publicnode.com', 'https://sepolia.optimism.io'], explorer: 'https://sepolia-optimism.etherscan.io', explorerName: 'OP Etherscan', finalDays: 7, claimEvery: 'hour' },
+  { id: 1301, name: 'Unichain Sepolia', a: 'a', slugs: ['unichain-sepolia'], nodes: ['https://unichain-sepolia-rpc.publicnode.com', 'https://sepolia.unichain.org'], explorer: 'https://sepolia.uniscan.xyz', explorerName: 'Uniscan', finalDays: 7, claimEvery: 'hour', poolManager: '0x00b036b58a818b1bc34d502d3fe730db729e62ac' },
+  { id: 763373, name: 'Ink Sepolia', a: 'an', slugs: ['ink-sepolia'], nodes: ['https://ink-sepolia-rpc.publicnode.com', 'https://rpc-gel-sepolia.inkonchain.com'], explorer: 'https://explorer-sepolia.inkonchain.com', explorerName: 'Ink Explorer', finalDays: 7, claimEvery: 'hour', chainFinalMin: 30 },
+  { id: 46630, name: 'Robinhood Chain Testnet', a: 'a', slugs: ['robinhood-testnet', 'robinhood-chain-testnet'], nodes: ['https://rpc.testnet.chain.robinhood.com', 'https://robinhood-testnet.drpc.org'], explorer: 'https://explorer.testnet.chain.robinhood.com', explorerName: 'Robinhood Chain Explorer', finalIn: '30 minutes', claimEvery: '30 minutes' },
 ];
+/// Chains whose logs Willow proves (the log verifier's pinned keys, query-verify `PINNED_CHAINS`).
+const LOGS = new Set([1, 8453, 42161, 4663, 10, 130, 57073]);
+/// Chains with a fee formula (blockproof `fees::rules`).
+const FEES = new Set([1, 8453, 42161, 4663, 10, 130, 57073]);
+/// Chains whose traces are proven (trace-verify), and those whose calls' traces are: Ethereum's.
+const TRACED = new Set([1, 130]);
+const CALL_TRACED = new Set([1]);
+const noLogs = (ch) => `Willow does not prove logs on ${ch.name} yet.`;
 // Willow's keyless path: proofs of blocks already proven, nothing proven on request.
 const PUBLIC_KEY = 'public';
 // Days of blocks Willow holds in full, the ones it proves transactions and receipts from.
@@ -188,6 +208,8 @@ function el(tag, attrs = {}, ...kids) {
 // ---------- chains ----------
 
 const chainOf = (id) => CHAINS.find((c) => c.id === id) || null;
+/// The chain's own coin, which pays its gas.
+const nativeOf = (ch) => ch.native || 'ETH';
 /// The page opened from a link: no form, the keyless endpoint and the chain's public nodes.
 const linkMode = () => document.body.classList.contains('link-mode');
 /// The chain chosen on the page.
@@ -615,7 +637,8 @@ function ask(msg, onProgress, transfer = []) {
 
 async function showPinned() {
   try {
-    await startWorker(chosen().id, '', '');
+    // The published keys are the same on every chain; a chain without log proofs shows Ethereum's.
+    await startWorker(LOGS.has(chosen().id) ? chosen().id : CHAINS[0].id, '', '');
   } catch (e) {
     $('pinned').textContent = `(${e.message})`;
   }
@@ -1151,25 +1174,25 @@ async function run(ev) {
 }
 
 /// The nodes that confirm a block: the one entered; else none on a chain the browser confirms
-/// against Ethereum itself (null), else the chain's two public nodes.
+/// itself (null), else the chain's two public nodes.
 const nodesFor = (ch, typed) => (typed ? [typed] : TRUSTLESS.has(ch.id) ? null : ch.nodes);
 const hostsText = (list) => list.map(hostOf).join(' and ');
 /// The block step's label before its result: where the block is asked.
-const anchorLabel = (list, what) => (list ? `${what} on ${hostsText(list)}` : `${what} on Ethereum`);
+const anchorLabel = (list, what, ch) => (list ? `${what} on ${hostsText(list)}` : `${what} on ${anchorChain(ch)}`);
 /// The block step's label once its result is in.
-function anchorDoneLabel(a, ch, typed, what, verified = 'confirmed on Ethereum') {
+function anchorDoneLabel(a, ch, typed, what, verified = `confirmed on ${anchorChain(ch)}`) {
   if (a.signer) return `${what} signed by ${ch.name}'s sequencer`;
-  if (a.via === 'nodes') return anchorLabel(typed || ch.nodes, what);
-  return a.confirmed ? `${what} ${verified}` : `${what} on Ethereum`;
+  if (a.via === 'nodes') return anchorLabel(typed || ch.nodes, what, ch);
+  return a.confirmed ? `${what} ${verified}` : `${what} on ${anchorChain(ch)}`;
 }
 
-/// Block `number`'s hash against `hash`, by the browser against Ethereum (`list` null) or on the
-/// nodes of `list`: the result of `confirmOnEthereum` or `confirmOnNodes`. An L2 block Ethereum
-/// holds no commitment for yet is asked of the chain's public nodes instead, and says so.
+/// Block `number`'s hash against `hash`, by the browser against its L1 or its own validators
+/// (`list` null) or on the nodes of `list`: the result of `confirmOnEthereum` or `confirmOnNodes`.
+/// An L2 block its L1 holds no commitment for yet is asked of the chain's public nodes instead, and says so.
 async function confirmAnchor(ch, endpoint, list, number, hash) {
   if (list) return confirmOnNodes(ch, list, number, hash);
   const a = await confirmOnEthereum(endpoint, number, hash, ch);
-  if (ch.id === 1 || a.confirmed || a.mismatch.length || a.failed) return a;
+  if (isL1(ch) || a.confirmed || a.mismatch.length || a.failed) return a;
   const b = await confirmOnNodes(ch, ch.nodes, number, hash);
   b.pending = a.problems.map((x) => x.problem).join('; ');
   b.fallback = true;
@@ -1216,13 +1239,13 @@ async function confirmOnNodes(ch, list, number, hash) {
   return out;
 }
 
-/// What the nodes said about block `number`, or what the browser verified on Ethereum, for its step.
-function anchorNote(a, number, hash) {
+/// What the nodes said about block `number`, or what the browser verified, for its step.
+function anchorNote(a, number, hash, ch) {
   if (a.via === 'ethereum') return a.note;
   if (a.mismatch.length) return a.mismatch.map((m) => `Proven hash ${hash}, ${m.host} has ${m.hash}.`).join(' ');
   const parts = a.ok.length ? [`Block ${number} hash ${hash} matches on ${a.ok.join(' and ')}.`] : [];
   for (const p of a.problems) parts.push(sentence(fromHost(p)));
-  if (a.public && a.ok.length) parts.push(a.pending ? `They are run by others than Willow. Your browser could not verify this block against Ethereum yet: ${sentence(a.pending)}` : 'They are run by others than Willow; your browser does not verify this block against Ethereum yet.');
+  if (a.public && a.ok.length) parts.push(a.pending ? `They are run by others than Willow. Your browser could not verify this block against ${anchorChain(ch)} yet: ${sentence(a.pending)}` : `They are run by others than Willow; your browser does not verify this block against ${anchorChain(ch)} yet.`);
   return parts.join(' ');
 }
 /// A node's problem, naming the node unless the message already starts with it.
@@ -1231,36 +1254,38 @@ const anchorState = (a) => (a.mismatch.length || a.failed ? 'fail' : a.confirmed
 /// How the block was confirmed, for the facts list.
 const confirmedFact = (a, ch) =>
   a.signer
-    ? `signed by ${a.ok[0]}, whose key Ethereum names; not on Ethereum yet`
-    : a.via === 'ethereum' && ch.id !== 1
+    ? `signed by ${a.ok[0]}, whose key ${anchorChain(ch)} names; not on ${anchorChain(ch)} yet`
+    : a.via === 'ethereum' && !isL1(ch)
       ? a.level === 'final'
-        ? 'settled on Ethereum'
-        : `posted to Ethereum by ${claimer(ch)}, settles in about ${ch.finalDays} days`
+        ? `settled on ${anchorChain(ch)}`
+        : `posted to ${anchorChain(ch)} by ${claimer(ch)}, settles in about ${settleIn(ch)}`
       : `confirmed on ${a.ok.join(' and ')}${a.level === 'signed' ? ', not final yet' : ''}`;
 const mismatchHosts = (a) => a.mismatch.map((m) => m.host).join(' and ');
 const problemsText = (a) => (a.via === 'ethereum' ? a.problems.map((p) => p.problem).join('; ') : a.problems.map(fromHost).join('; '));
 /// How the block was confirmed, as the end of a verdict.
 function confirmedText(a, ch, what = 'The block', blockTime = null) {
-  const line = ch.id === 1 ? '' : ` ${chainFinalLine(ch, blockTime)}`;
-  if (a.via === 'ethereum' && ch.id !== 1 && a.level === 'signed') return `Your browser verified that ${what.toLowerCase()} is part of ${ch.name} as its sequencer signed it, the sequencer's key read from Ethereum; it is not on Ethereum yet.${line}`;
-  if (a.via === 'ethereum' && ch.id !== 1 && a.level === 'final') return `Your browser verified against Ethereum that ${what.toLowerCase()} is part of ${ch.name}, and settled on Ethereum.`;
-  if (a.via === 'ethereum' && ch.id !== 1) return `Your browser verified against Ethereum that ${what.toLowerCase()} is part of ${ch.name}: posted to Ethereum by ${claimer(ch)}, it settles in about ${ch.finalDays} days.${line}`;
-  if (a.via === 'ethereum') return `Your browser verified against Ethereum's validators that ${what.toLowerCase()} is part of Ethereum${a.level === 'final' ? ', and final' : "; it is not final yet"}.`;
-  if (a.public) return `${what} was confirmed by ${a.ok.length > 1 ? `two public ${ch.name} nodes` : `a public ${ch.name} node`} run by others (${a.ok.join(' and ')}), not yet against Ethereum.${line}`;
+  const line = isL1(ch) || !chainFinalLine(ch, blockTime) ? '' : ` ${chainFinalLine(ch, blockTime)}`;
+  const l1 = anchorChain(ch);
+  if (a.via === 'ethereum' && !isL1(ch) && a.level === 'signed') return `Your browser verified that ${what.toLowerCase()} is part of ${ch.name} as its sequencer signed it, the sequencer's key read from ${l1}; it is not on ${l1} yet.${line}`;
+  if (a.via === 'ethereum' && !isL1(ch) && a.level === 'final') return `Your browser verified against ${l1} that ${what.toLowerCase()} is part of ${ch.name}, and settled on ${l1}.`;
+  if (a.via === 'ethereum' && !isL1(ch)) return `Your browser verified against ${l1} that ${what.toLowerCase()} is part of ${ch.name}: posted to ${l1} by ${claimer(ch)}, it settles in about ${settleIn(ch)}.${line}`;
+  if (a.via === 'ethereum') return `Your browser verified against ${ch.name}'s validators that ${what.toLowerCase()} is part of ${ch.name}${a.level === 'final' ? ', and final' : "; it is not final yet"}.`;
+  if (a.public) return `${what} was confirmed by ${a.ok.length > 1 ? `two public ${ch.name} nodes` : `a public ${ch.name} node`} run by others (${a.ok.join(' and ')}), not yet against ${l1}.${line}`;
   return `${what} was confirmed on ${a.ok.join(' and ')}.${line}`;
 }
-/// Willow's data to confirm block `number` on Ethereum failed verification: the end of a verdict.
-const failedText = (a, number) => sentence(`Willow's data to confirm block ${number} on Ethereum failed verification: ${a.detail}`);
+/// Willow's data to confirm block `number` failed verification: the end of a verdict.
+const failedText = (a, number, ch) => sentence(`Willow's data to confirm block ${number} on ${anchorChain(ch)} failed verification: ${a.detail}`);
 /// A proven or reported other block at `number`: the verdict's title and text.
 function mismatchTitle(a, number) {
   return a.via === 'ethereum' ? `Not verified: ${a.mismatch[0].host.replace(/, as [^,]*,$/, '')} has another block ${number}` : `Not verified: block ${number} is not on the chain ${mismatchHosts(a)} ${a.mismatch.length === 1 ? 'follows' : 'follow'}`;
 }
-function mismatchText(a, number, what) {
+function mismatchText(a, number, what, ch) {
   const replaced = `If block ${number} is only seconds old, it may have been replaced by a reorganization; try again in a minute.`;
   const host = a.mismatch.length ? a.mismatch[0].host : '';
-  if (a.via === 'ethereum' && host.endsWith(', as its sequencer signed it,')) return `${what}, but ${host.replace(/, as [^,]*,$/, '')}'s sequencer signed another block ${number} (${a.mismatch[0].hash}): your browser verified its signature, its key read from Ethereum. ${replaced}`;
-  if (a.via === 'ethereum' && host !== 'Ethereum') return `${what}, but your browser verified against Ethereum that ${host.replace(/, as [^,]*,$/, '')}'s block ${number} has another hash (${a.mismatch[0].hash}). ${replaced}`;
-  if (a.via === 'ethereum') return `${what}, but your browser verified against Ethereum's validators that Ethereum's block ${number} has another hash (${a.mismatch[0].hash}). ${replaced}`;
+  const l1 = anchorChain(ch);
+  if (a.via === 'ethereum' && host.endsWith(', as its sequencer signed it,')) return `${what}, but ${host.replace(/, as [^,]*,$/, '')}'s sequencer signed another block ${number} (${a.mismatch[0].hash}): your browser verified its signature, its key read from ${l1}. ${replaced}`;
+  if (a.via === 'ethereum' && !isL1(ch)) return `${what}, but your browser verified against ${l1} that ${host.replace(/, as [^,]*,$/, '')}'s block ${number} has another hash (${a.mismatch[0].hash}). ${replaced}`;
+  if (a.via === 'ethereum') return `${what}, but your browser verified against ${ch.name}'s validators that ${ch.name}'s block ${number} has another hash (${a.mismatch[0].hash}). ${replaced}`;
   return `${what}, but it is for a block whose hash differs from ${mismatchHosts(a)}'s. ${replaced}`;
 }
 
@@ -1271,51 +1296,112 @@ function mismatchText(a, number, what) {
 /// (TRUSTLESS-ANCHOR.md). It is as much Willow's as the page's code: build.sh replaces this line
 /// at each build with a fresh one, read from two beacon APIs (checkpoint.py).
 const ETH_CHECKPOINT = { root: '0x44d5cf3ea4de47f80a300df272afa97b75c218ecefa4f7d87f83d085c41d80e1', slot: 15450112 };
-/// Chains whose blocks the browser confirms against Ethereum itself; the others still ask public nodes.
-const TRUSTLESS = new Set([1, 8453, 10, 130, 57073, 42161, 4663]);
-// Arbitrum Nitro chains: their claims on Ethereum are BoLD assertions by bonded validators.
-const NITRO = new Set([42161, 4663]);
-/// Who put an L2's claim on Ethereum, what stands behind it until it is final, and how the page
-/// names it. Robinhood Chain's validators are on a list its operator keeps (its bond is 1 ETH).
-const CLAIMERS = { 42161: ['a bonded Arbitrum One validator', "is backed by its validator's bond"], 4663: ["a validator on Robinhood Chain's list", "rests on a validator Robinhood Chain's operator approved"] };
+/// Where the other light clients start when checkpoint.json (beside this page, refreshed daily by
+/// Willow) holds no newer start: Sepolia's (the testnets'), a finalized block root, and BNB Smart
+/// Chain's, an epoch block, each the same at two operators on 2026-11-14. The verifier refuses a
+/// Sepolia start over 30 days old and a BNB start over 7 days old.
+const SEPOLIA_START = { root: '0x5d5b94c9c82d9f56409699948380d58de837f39a170e0de81c547642d3b58415', slot: 11577216 };
+const BNB_START = { number: 133547000, hash: '0x5256b501fc40848cc63455f3022f45332df90d2776e322470ff2432108015014' };
+/// Chains whose blocks the browser confirms itself; the others still ask public nodes.
+const TRUSTLESS = new Set([1, 8453, 10, 130, 57073, 42161, 4663, 56, 480, 1868, 7777777, 84532, 421614, 11155420, 1301, 763373, 46630]);
+/// The testnets, which settle on Sepolia (anchor-verify `l2::SEPOLIA_CHAINS`).
+const SEPOLIA_CHAINS = new Set([84532, 421614, 11155420, 1301, 763373, 46630]);
+/// Chains followed by their own validators, with no L1: Ethereum, and BNB Smart Chain.
+const isL1 = (ch) => ch.id === 1 || ch.id === 56;
+/// What the browser verifies a block against: an L2's L1 (Ethereum, or Sepolia for the testnets), or the chain itself.
+const anchorChain = (ch) => (isL1(ch) ? ch.name : SEPOLIA_CHAINS.has(ch.id) ? 'Sepolia' : 'Ethereum');
+/// The light client that anchors chain `id`: Ethereum's (null), Sepolia's or BNB Smart Chain's.
+const lightClientOf = (id) => (id === 56 ? 'bnb' : SEPOLIA_CHAINS.has(id) ? 'sepolia' : null);
+// Arbitrum Nitro chains: their claims on their L1 are BoLD assertions by bonded validators.
+const NITRO = new Set([42161, 4663, 421614, 46630]);
+// The OP stack chains, whose receipts may carry an L1 data fee.
+const OP_STACK = new Set([8453, 10, 130, 57073, 480, 1868, 7777777, 84532, 11155420, 1301, 763373]);
+/// Who put an L2's claim on its L1, what stands behind it until it is final, and how the page
+/// names it. Robinhood Chain's validators are on a list its operator keeps (its bond is 1 ETH), as
+/// are both Nitro testnets' (validatorWhitelistDisabled false on Sepolia, 2026-11-14).
+const CLAIMERS = {
+  42161: ['a bonded Arbitrum One validator', "is backed by its validator's bond"],
+  4663: ["a validator on Robinhood Chain's list", "rests on a validator Robinhood Chain's operator approved"],
+  421614: ["a validator on Arbitrum Sepolia's list", "rests on a validator Arbitrum Sepolia's operator approved"],
+  46630: ["a validator on Robinhood Chain Testnet's list", "rests on a validator Robinhood Chain Testnet's operator approved"],
+};
 const claimer = (ch) => (CLAIMERS[ch.id] ? CLAIMERS[ch.id][0] : `${ch.name}'s proposer`);
 const backing = (ch) => (CLAIMERS[ch.id] ? CLAIMERS[ch.id][1] : `rests on ${ch.name}'s proposer, who posted it`);
-/// An L2 block's levels in the page's words: past its claim's challenge period, settled on Ethereum;
-/// before, posted to Ethereum by whoever made the claim. Below settled, the chain's own view.
-const postedText = (ch) => `Posted to Ethereum by ${claimer(ch)}, settles in about ${ch.finalDays} days`;
+/// About how long an L2 claim takes to settle: "5 days", "30 minutes".
+const settleIn = (ch) => ch.finalIn || `${ch.finalDays} days`;
+/// An L2 block's levels in the page's words: past its claim's challenge period, settled on its L1;
+/// before, posted there by whoever made the claim. Below settled, the chain's own view.
+const postedText = (ch) => `Posted to ${anchorChain(ch)} by ${claimer(ch)}, settles in about ${settleIn(ch)}`;
 function chainFinalLine(ch, blockTime) {
-  const young = Number.isFinite(blockTime) && Date.now() / 1000 - blockTime < 20 * 60;
-  return `${ch.name} ${young ? 'will treat' : 'treats'} this block as final about 20 minutes in. This page doesn't verify that.`;
+  if (ch.chainFinalMin === null) return '';
+  const m = ch.chainFinalMin || 20;
+  const young = Number.isFinite(blockTime) && Date.now() / 1000 - blockTime < m * 60;
+  const when = m < 60 ? `${m} minutes` : `${m / 60} hour${m === 60 ? '' : 's'}`;
+  return `${ch.name} ${young ? 'will treat' : 'treats'} this block as final about ${when} in. This page doesn't verify that.`;
 }
 /// A block on a chain the browser verifies against Ethereum that only public nodes confirmed.
 const unanchored = (a, ch) => TRUSTLESS.has(ch.id) && a.via === 'nodes' && a.public;
 const claimName = (ch, a) => (NITRO.has(ch.id) ? `assertion ${shortHash(a.assertion)}` : `dispute game ${shortAddr(a.game)}`);
 /// The light-client data this browser verified (the bootstrap and each period's update), kept
 /// so the next visit downloads only what is new. It is verified again when read, never trusted.
+/// Ethereum's at this key, Sepolia's and BNB Smart Chain's at it plus `:sepolia` / `:bnb`.
 const LIGHT_CLIENT_KEY = 'willow-verify:light-client';
+const lightClientKey = (lc) => (lc ? `${LIGHT_CLIENT_KEY}:${lc}` : LIGHT_CLIENT_KEY);
 /// A block newer than Ethereum's newest signed one: ask again this many times, this far apart.
 const ANCHOR_RETRIES = 3;
 const ANCHOR_RETRY_MS = 4000;
-/// Light-client updates asked for at once (one per 27-hour period).
+/// Light-client updates asked for at once (one per 27-hour period; BNB Smart Chain's, one per epoch, 64).
 const UPDATES_PER_ASK = 16;
+const BNB_UPDATES_PER_ASK = 64;
 
-const anchorAsk = (msg) => ask({ ...msg, checkpoint: ETH_CHECKPOINT, now: Date.now() / 1000 });
-
-/// The light-client data kept from an earlier visit, verified again in the worker, once per worker.
-async function restoreLightClient() {
-  const wk = spawnWorker();
-  if (wk.lightClient) return;
-  wk.lightClient = true;
-  let saved = null;
-  try {
-    saved = localStorage.getItem(LIGHT_CLIENT_KEY);
-  } catch {}
-  if (saved) await anchorAsk({ type: 'anchor-restore', saved }).catch(() => {});
+let startsRead = null;
+/// Where the Sepolia and BNB Smart Chain light clients start: checkpoint.json's starts (beside this
+/// page) when they are newer than the ones above, read once. { sepolia: {root, slot}, bnb: {number, hash} }.
+function lightClientStarts() {
+  startsRead ??= (async () => {
+    const starts = { sepolia: { ...SEPOLIA_START }, bnb: { ...BNB_START } };
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), HEALTH_TIMEOUT_MS);
+    try {
+      const res = await fetch(new URL('./checkpoint.json', import.meta.url), { cache: 'no-cache', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
+      const c = await res.json();
+      const root = (x) => typeof x === 'string' && /^0x[0-9a-fA-F]{64}$/.test(x);
+      const s = c && c.sepolia;
+      if (s && root(s.root) && Number.isSafeInteger(s.slot) && s.slot > starts.sepolia.slot) starts.sepolia = { root: s.root.toLowerCase(), slot: s.slot };
+      const b = c && c.bnb;
+      if (b && root(b.hash) && Number.isSafeInteger(b.number) && b.number % 1000 === 0 && b.number > starts.bnb.number) starts.bnb = { number: b.number, hash: b.hash.toLowerCase() };
+    } catch {
+    } finally {
+      clearTimeout(timer);
+    }
+    return starts;
+  })();
+  return startsRead;
 }
 
-function keepLightClient(saved) {
+/// A message to the light clients; `lc` (sepolia, bnb) names another than Ethereum's, with its start.
+async function anchorAsk(msg, lc = null) {
+  const other = lc ? { lightClient: lc, start: (await lightClientStarts())[lc] } : {};
+  return ask({ ...msg, ...other, checkpoint: ETH_CHECKPOINT, now: Date.now() / 1000 });
+}
+
+/// The light-client data kept from an earlier visit, verified again in the worker, once per worker
+/// and light client (`lc`: null for Ethereum's).
+async function restoreLightClient(lc = null) {
+  const wk = spawnWorker();
+  wk.lightClients ??= new Set();
+  if (wk.lightClients.has(lc)) return;
+  wk.lightClients.add(lc);
+  let saved = null;
   try {
-    if (saved && saved !== 'null') localStorage.setItem(LIGHT_CLIENT_KEY, saved);
+    saved = localStorage.getItem(lightClientKey(lc));
+  } catch {}
+  if (saved) await anchorAsk({ type: 'anchor-restore', saved }, lc).catch(() => {});
+}
+
+function keepLightClient(saved, lc = null) {
+  try {
+    if (saved && saved !== 'null') localStorage.setItem(lightClientKey(lc), saved);
   } catch {}
 }
 
@@ -1339,34 +1425,42 @@ function wholeNumber(x) {
   return x;
 }
 
-/// Block `number`'s hash on chain `ch` against `hash`, verified in the browser against Ethereum:
-/// Willow's anchor for the block, and the light-client data the verifier asks for to reach the
-/// validators who signed it. On an L2 the anchor is the chain's dispute game or assertion on Ethereum.
-/// { via: 'ethereum', confirmed, level ('final' | 'signed' | 'committed'), finalized, mismatch,
-/// failed, problems, note }.
+/// Block `number`'s hash on chain `ch` against `hash`, verified in the browser: Willow's anchor for
+/// the block, and the light-client data the verifier asks for to reach the validators who signed
+/// it. On an L2 the anchor is the chain's dispute game or assertion on its L1 (Ethereum, or Sepolia
+/// for the testnets), whose light client follows it; BNB Smart Chain's own validators are followed
+/// from its start. Ethereum's light-client data comes from chain 1's path, the others' from the
+/// chain's own. { via: 'ethereum', confirmed, level ('final' | 'signed' | 'committed'), finalized,
+/// mismatch, failed, problems, note }.
 async function confirmOnEthereum(endpoint, number, hash, ch = CHAINS[0]) {
   const out = { via: 'ethereum', ok: [], mismatch: [], problems: [], confirmed: false, level: null, finalized: null, failed: false, note: '' };
-  const lc = withChain(endpoint, 1);
+  // The light client that anchors this chain (null: Ethereum's), and where a need-* is fetched.
+  const own = lightClientOf(ch.id);
+  const route = (lc) => (lc ? endpoint : withChain(endpoint, 1));
   try {
-    await restoreLightClient();
+    await restoreLightClient(own);
     const answer = await anchorAnswer(endpoint, number);
     let r;
     for (let round = 0; ; round++) {
-      const m = await anchorAsk({ type: 'anchor-verify', chainId: ch.id, number, hash, response: answer });
+      const m = await anchorAsk({ type: 'anchor-verify', chainId: ch.id, number, hash, response: answer }, own);
       r = m.result;
       if (r.ok) {
-        keepLightClient(m.saved);
+        keepLightClient(m.saved, own);
         break;
       }
       if (round >= 3) throw new CheckError("Willow's light-client data did not reach the validators who signed this block.");
+      const lc = r.lightClient ?? null;
+      if (lc !== own) throw new CheckError(`the verifier asked for another light client (${lc})`, { kind: 'internal' });
       if (r.kind === 'need-bootstrap') {
-        const b = await rpc(lc, 'willow_lightClientBootstrap', [ETH_CHECKPOINT.root]);
-        await anchorAsk({ type: 'anchor-bootstrap', response: b.text });
+        const starts = lc ? await lightClientStarts() : null;
+        const root = lc === 'bnb' ? starts.bnb.hash : lc === 'sepolia' ? starts.sepolia.root : ETH_CHECKPOINT.root;
+        const b = await rpc(route(lc), 'willow_lightClientBootstrap', [root]);
+        await anchorAsk({ type: 'anchor-bootstrap', response: b.text }, lc);
       } else {
         for (let from = wholeNumber(r.from), left = wholeNumber(r.count); left > 0; ) {
-          const k = Math.min(left, UPDATES_PER_ASK);
-          const u = await rpc(lc, 'willow_lightClientUpdates', [from, k]);
-          const done = await anchorAsk({ type: 'anchor-updates', response: u.text });
+          const k = Math.min(left, lc === 'bnb' ? BNB_UPDATES_PER_ASK : UPDATES_PER_ASK);
+          const u = await rpc(route(lc), 'willow_lightClientUpdates', [from, k]);
+          const done = await anchorAsk({ type: 'anchor-updates', response: u.text }, lc);
           if (done.result.period == null) throw new CheckError(`Willow sent no light-client update for period ${from}.`);
           from += k;
           left -= k;
@@ -1381,23 +1475,28 @@ async function confirmOnEthereum(endpoint, number, hash, ch = CHAINS[0]) {
     out.game = r.game || null;
     out.assertion = r.assertion || null;
     out.signer = r.signer || null;
+    const l1 = anchorChain(ch);
     if (!r.matches) {
-      out.mismatch.push({ host: ch.id === 1 ? 'Ethereum' : r.level === 'signed' ? `${ch.name}, as its sequencer signed it,` : `${ch.name}, as posted to Ethereum,`, hash: r.hash });
+      out.mismatch.push({ host: isL1(ch) ? ch.name : r.level === 'signed' ? `${ch.name}, as its sequencer signed it,` : `${ch.name}, as posted to ${l1},`, hash: r.hash });
       out.note =
-        ch.id !== 1 && r.level === 'signed'
-          ? `${ch.name}'s sequencer signed another block ${n(number)}, with hash ${r.hash}, not ${hash}: your browser verified its signature, its key read from Ethereum.`
-          : `${ch.id === 1 ? 'Ethereum' : ch.name}'s block ${n(number)} has hash ${r.hash}, not ${hash}: your browser verified this against Ethereum.`;
+        !isL1(ch) && r.level === 'signed'
+          ? `${ch.name}'s sequencer signed another block ${n(number)}, with hash ${r.hash}, not ${hash}: your browser verified its signature, its key read from ${l1}.`
+          : `${ch.name}'s block ${n(number)} has hash ${r.hash}, not ${hash}: your browser verified this against ${l1}.`;
     } else {
       out.confirmed = true;
-      out.ok.push(ch.id !== 1 && r.level === 'signed' ? `${ch.name}'s sequencer` : 'Ethereum');
+      out.ok.push(!isL1(ch) && r.level === 'signed' ? `${ch.name}'s sequencer` : l1);
       const claim = `${ch.name}'s claim for its block ${n(r.anchorBlock)} (${claimName(ch, r)})`;
       out.note =
-        ch.id !== 1 && r.level === 'signed'
-          ? `Signed by ${ch.name}'s sequencer, not on Ethereum yet. Your browser verified the sequencer's signature on block ${n(r.anchorBlock)}, its key read from Ethereum with Ethereum's validators' signatures and the contracts' own code, and found block ${n(number)} with this hash in ${ch.name}'s history from it.`
-          : ch.id !== 1
+        ch.id === 56
           ? r.level === 'final'
-            ? `Settled on Ethereum. Your browser verified, with Ethereum's validators' signatures and the contracts' own code, that ${claim} has passed its challenge period on Ethereum, and found block ${n(number)} with this hash in ${ch.name}'s history from it.`
-            : `${postedText(ch)}. Your browser verified ${claim} on Ethereum, with Ethereum's validators' signatures and the contracts' own code, and found block ${n(number)} with this hash in ${ch.name}'s history from it.`
+            ? `Final on ${ch.name}. Your browser verified the votes of ${r.signers} of its ${r.of} validators, which made block ${n(r.anchorBlock)} final, and found block ${n(number)} with this hash in its history.`
+            : `Sealed by one of ${ch.name}'s ${r.of} validators, not final yet. Your browser verified the seal on block ${n(number)} with this hash, by a validator of the set it followed from its starting point.`
+          : !isL1(ch) && r.level === 'signed'
+          ? `Signed by ${ch.name}'s sequencer, not on ${l1} yet. Your browser verified the sequencer's signature on block ${n(r.anchorBlock)}, its key read from ${l1} with ${l1}'s validators' signatures and the contracts' own code, and found block ${n(number)} with this hash in ${ch.name}'s history from it.`
+          : !isL1(ch)
+          ? r.level === 'final'
+            ? `Settled on ${l1}. Your browser verified, with ${l1}'s validators' signatures and the contracts' own code, that ${claim} has passed its challenge period on ${l1}, and found block ${n(number)} with this hash in ${ch.name}'s history from it.`
+            : `${postedText(ch)}. Your browser verified ${claim} on ${l1}, with ${l1}'s validators' signatures and the contracts' own code, and found block ${n(number)} with this hash in ${ch.name}'s history from it.`
           : r.level === 'final'
             ? `Final on Ethereum. Your browser verified the signatures of Ethereum's validators (${r.signers} of 512) and found block ${n(number)} with this hash in the history of block ${n(r.finalized)}, which they finalized.`
             : `Signed by Ethereum's validators (${r.signers} of 512), not final yet. Your browser verified their signatures and found block ${n(number)} with this hash in the history of the block they signed, ${n(r.head)}.`;
@@ -1405,20 +1504,21 @@ async function confirmOnEthereum(endpoint, number, hash, ch = CHAINS[0]) {
   } catch (e) {
     out.failed = e.kind === 'rejected' || e.kind === 'malformed-input';
     out.detail = e.message;
-    out.problems.push({ host: 'Ethereum', problem: anchorProblem(e, ch) });
-    out.note = sentence(`Your browser could not confirm this block against Ethereum: ${anchorProblem(e, ch)}`);
+    out.problems.push({ host: anchorChain(ch), problem: anchorProblem(e, ch) });
+    out.note = sentence(`Your browser could not confirm this block against ${anchorChain(ch)}: ${anchorProblem(e, ch)}`);
   }
   return out;
 }
 
-/// Why a block could not be confirmed on Ethereum, by the verifier's kind (its message only shown).
+/// Why a block could not be confirmed, by the verifier's kind (its message only shown).
 function anchorProblem(e, ch = CHAINS[0]) {
+  const l1 = anchorChain(ch);
   if (e.kind === 'rejected' || e.kind === 'malformed-input') return `the data from Willow to confirm it failed verification (${e.message})`;
-  if (e.kind === 'unknown-fork') return "Ethereum's latest upgrade is newer than this page, which needs an update to follow it";
-  if (e.kind === 'stale-checkpoint') return "this page's starting point on Ethereum is more than 30 days old, too old to start from safely; the page needs an update";
+  if (e.kind === 'unknown-fork') return `${l1}'s latest upgrade is newer than this page, which needs an update to follow it`;
+  if (e.kind === 'stale-checkpoint') return `this page's starting point on ${l1} is more than ${ch.id === 56 ? 7 : 30} days old, too old to start from safely; the page needs an update`;
   if (e.kind === 'unreachable') return `the data Willow sent cannot be followed from this page's starting point (${e.message})`;
-  if (e.kind === 'declined') return `the claim on Ethereum Willow sent is not one this page relies on (${e.message})`;
-  if (e.kind === 'disputed') return `the claim on Ethereum that covers this block is being disputed (${e.message})`;
+  if (e.kind === 'declined') return `the claim on ${l1} Willow sent is not one this page relies on (${e.message})`;
+  if (e.kind === 'disputed') return `the claim on ${l1} that covers this block is being disputed (${e.message})`;
   if (e.kind === 'not-covered') return `Willow's data does not reach this block (${e.message})`;
   if (e.kind === 'stale-head' && ch.id !== 1) return `${e.message}, too old to use; try again in a minute`;
   if (e.kind === 'stale-head') return `${e.message}, too old to say whether a block that is not final yet is part of Ethereum; try again in a minute`;
@@ -1433,6 +1533,7 @@ async function runLogs() {
   let filterIn, ch, endpoint, nodes, other;
   try {
     ({ ch, endpoint, nodes, other } = readCommon());
+    if (!LOGS.has(ch.id)) throw new CheckError(noLogs(ch));
     filterIn = readFilter();
   } catch (e) {
     $('formError').textContent = e.message;
@@ -1453,7 +1554,7 @@ async function runLogs() {
   const plainCompare = !linkMode();
   if (plainCompare) list.push(['compare', `Willow's eth_getLogs response`]);
   if (other) list.push(['other', `eth_getLogs response from ${hostOf(other)}`]);
-  list.push(['anchor', anchorLabel(nodes, 'Last block')]);
+  list.push(['anchor', anchorLabel(nodes, 'Last block', ch)]);
   setupSteps(list);
   const t0 = performance.now();
   const facts = [];
@@ -1644,10 +1745,10 @@ async function runLogs() {
     current = 'anchor';
     const last = r.lastProvenBlock;
     const lastNum = hexNum(last.number);
-    step('anchor', 'active', nodes ? `Asking for block ${lastNum}…` : `Verifying block ${lastNum} against Ethereum's validators…`);
+    step('anchor', 'active', nodes ? `Asking for block ${lastNum}…` : `Verifying block ${lastNum} against ${anchorChain(ch)}'s validators…`);
     const anchor = await confirmAnchor(ch, endpoint, nodes, lastNum, last.hash);
     relabel('anchor', anchorDoneLabel(anchor, ch, nodes, 'Last block'));
-    step('anchor', anchorState(anchor), anchorNote(anchor, lastNum, last.hash));
+    step('anchor', anchorState(anchor), anchorNote(anchor, lastNum, last.hash, ch));
     facts.push(['Last proven block', `${lastNum}, hash ${last.hash} (${anchor.confirmed ? confirmedFact(anchor, ch) : 'not confirmed'})`]);
     facts.push(['Time', secs(performance.now() - t0)]);
     facts.push(['Endpoint', hostOf(endpoint)]);
@@ -1677,11 +1778,11 @@ async function runLogs() {
     if (anchor.mismatch.length) {
       tone = 'bad';
       title = mismatchTitle(anchor, lastNum);
-      text = mismatchText(anchor, lastNum, 'The proofs are valid');
+      text = mismatchText(anchor, lastNum, 'The proofs are valid', ch);
     } else if (anchor.failed) {
       tone = 'bad';
       title = 'Not verified: the data to confirm the last block failed verification';
-      text = `The proofs are valid and show ${logsText} matching the filter in ${range}, but ${failedText(anchor, lastNum)}`;
+      text = `The proofs are valid and show ${logsText} matching the filter in ${range}, but ${failedText(anchor, lastNum, ch)}`;
     } else if (unreadable) {
       tone = 'bad';
       title = "Not verified: Willow's response failed verification";
@@ -1711,7 +1812,7 @@ async function runLogs() {
         text = `${customText} ${body}`;
       } else if (unanchored(anchor, ch)) {
         tone = 'warn';
-        title = 'Proofs valid, but the last block is not verified against Ethereum';
+        title = `Proofs valid, but the last block is not verified against ${anchorChain(ch)}`;
         // A link's checklist says it, in gold.
         text = linkMode() ? '' : body;
       } else if (linkMode()) {
@@ -1916,7 +2017,7 @@ async function runItems() {
   ];
   if (kind === 'blockReceipts') list.push(['compareTxs', "Willow's eth_getBlockByHash transactions"]);
   if (other) list.push(['other', `${k.plain} response from ${hostOf(other)}`]);
-  list.push(['anchor', anchorLabel(nodes, 'The block')]);
+  list.push(['anchor', anchorLabel(nodes, 'The block', ch)]);
   setupSteps(list);
   const t0 = performance.now();
   const facts = [];
@@ -2021,10 +2122,10 @@ async function runItems() {
 
     // 4. The proof is about the block whose hash it carries; confirm that block on the user's node.
     current = 'anchor';
-    step('anchor', 'active', nodes ? `Asking for block ${blockNum}…` : `Verifying block ${blockNum} against Ethereum's validators…`);
+    step('anchor', 'active', nodes ? `Asking for block ${blockNum}…` : `Verifying block ${blockNum} against ${anchorChain(ch)}'s validators…`);
     const anchor = await confirmAnchor(ch, endpoint, nodes, blockNum, blockHash);
     relabel('anchor', anchorDoneLabel(anchor, ch, nodes, 'The block'));
-    step('anchor', anchorState(anchor), anchorNote(anchor, blockNum, blockHash));
+    step('anchor', anchorState(anchor), anchorNote(anchor, blockNum, blockHash, ch));
     facts.push(['Block hash confirmed', anchor.confirmed ? confirmedFact(anchor, ch) : 'no']);
     facts.push(['Time', secs(performance.now() - t0)]);
     facts.push(['Endpoint', hostOf(endpoint)]);
@@ -2037,11 +2138,11 @@ async function runItems() {
     if (anchor.mismatch.length) {
       tone = 'bad';
       title = mismatchTitle(anchor, blockNum);
-      text = mismatchText(anchor, blockNum, 'The proof is valid');
+      text = mismatchText(anchor, blockNum, 'The proof is valid', ch);
     } else if (anchor.failed) {
       tone = 'bad';
       title = 'Not verified: the data to confirm the block failed verification';
-      text = `The proof of ${thing} is valid, but ${failedText(anchor, blockNum)}`;
+      text = `The proof of ${thing} is valid, but ${failedText(anchor, blockNum, ch)}`;
     } else if (unreadable) {
       tone = 'bad';
       title = "Not verified: Willow's response failed verification";
@@ -2066,7 +2167,7 @@ async function runItems() {
     } else if (unanchored(anchor, ch)) {
       verified = true;
       tone = 'warn';
-      title = 'Proof valid, but the block is not verified against Ethereum';
+      title = `Proof valid, but the block is not verified against ${anchorChain(ch)}`;
       text = `Every field the proof covers matches block ${blockNum}, and Willow's plain response reports each of them the same way. ${confirmedText(anchor, ch, 'The block', rep.block.timestamp)}${uncovered}`;
     } else {
       verified = true;
@@ -2151,13 +2252,49 @@ const PROOF_KINDS = {
   estimate: {
     coverage: "Proven: your browser ran geth's gas estimation (v1.17.10) in its own EVM over every account, storage slot and code it reads, each proven against the state root of a header that hashes to the block hash, and the call succeeds with the gas found. The estimate is its own search's.",
   },
+  trace: {
+    coverage: "Proven: your browser ran the block's transactions in its own EVM over every account, storage slot and code they read, each proven against the state root of the block's parent, and each run matches its receipt. The trace is its own run's, written by the same tracer. A read the proof does not hold fails verification.",
+  },
+  traceCall: {
+    coverage: 'Proven: your browser ran the call in its own EVM over every account, storage slot and code it reads, each proven against the state root of a header that hashes to the block hash, and traced it with the same tracer. The trace is its own run, as eth_call runs the call. A read the proof does not hold fails verification.',
+  },
   fees: {
     coverage: "Proven: the headers and transactions the fee formula reads, against block hashes chained by their parent hashes up to the block. Your browser computes eth_gasPrice, eth_maxPriorityFeePerGas and eth_blobBaseFee from them itself, by the published formula willow-fee-v1. On Ethereum it samples 4 blocks where geth samples 20, and it prices the next block's base fee, so a node's own suggestion can differ.",
   },
 };
-const isProofKind = (k) => k === 'block' || k === 'account' || k === 'call' || k === 'fees';
-/// State kinds a failed state proof reports: what failed, never the page's or the browser's fault.
-const STATE_FAILED = new Set(['malformed', 'wrong-chain', 'header', 'wrong-block', 'limits', 'account', 'slot', 'code', 'history', 'missing-read', 'outcome', 'estimate', 'algorithm']);
+const isProofKind = (k) => k === 'block' || k === 'account' || k === 'call' || k === 'fees' || k === 'trace';
+/// State kinds a failed state proof reports: what failed, never the page's or the browser's fault
+/// (a trace proof's too: trace-verify's `Kind`).
+const STATE_FAILED = new Set(['malformed', 'wrong-chain', 'header', 'wrong-block', 'limits', 'account', 'slot', 'code', 'history', 'missing-read', 'outcome', 'estimate', 'algorithm', 'parent', 'transactions', 'receipts', 'disagrees', 'no-trace']);
+/// Each trace method a proof covers: what it names (a transaction, a block by number or by hash,
+/// or a call) and the tracer it takes (geth's, as its options; parity's trace types; none).
+const TRACE_METHODS = {
+  debug_traceTransaction: { at: 'tx', tracer: 'geth' },
+  debug_traceBlockByNumber: { at: 'block', tracer: 'geth' },
+  debug_traceBlockByHash: { at: 'hash', tracer: 'geth' },
+  debug_traceCall: { at: 'call', tracer: 'geth' },
+  trace_transaction: { at: 'tx', tracer: null },
+  trace_block: { at: 'block', tracer: null },
+  trace_replayTransaction: { at: 'tx', tracer: 'types' },
+  trace_replayBlockTransactions: { at: 'block', tracer: 'types' },
+  trace_call: { at: 'call', tracer: 'types' },
+};
+/// The tracers offered: geth's built-in ones (its default, the struct logger, last), and parity's trace types.
+const TRACERS = {
+  geth: [
+    ['callTracer', { tracer: 'callTracer' }],
+    ['callTracer, with logs', { tracer: 'callTracer', tracerConfig: { withLog: true } }],
+    ['prestateTracer', { tracer: 'prestateTracer' }],
+    ['prestateTracer, diff mode', { tracer: 'prestateTracer', tracerConfig: { diffMode: true } }],
+    ['4byteTracer', { tracer: '4byteTracer' }],
+    ['flatCallTracer', { tracer: 'flatCallTracer' }],
+    ['noopTracer', { tracer: 'noopTracer' }],
+    ['Struct logger (opcodes)', {}],
+  ],
+  types: [['trace'], ['trace', 'stateDiff'], ['trace', 'vmTrace'], ['stateDiff'], ['vmTrace'], ['trace', 'stateDiff', 'vmTrace']].map((t) => [t.join(', '), t]),
+};
+/// The trace method chosen.
+const traceMethod = () => (TRACE_METHODS[$('traceMethod').value] ? $('traceMethod').value : 'debug_traceTransaction');
 /// Storage slots one account check asks for (the server's limit is 256), and compares one by one.
 const MAX_SLOTS = 64;
 const COMPARED_SLOTS = 16;
@@ -2174,6 +2311,15 @@ function stateBlock(text) {
 
 /// A block typed for a block or fee proof: as typed (the verifier reads it), latest when empty.
 const itemBlock = (text) => (text || '').trim() || 'latest';
+
+/// A block typed for a trace by number: a 0x number, or latest.
+function traceBlock(text) {
+  const s = (text || '').trim() || 'latest';
+  if (s === 'latest') return 'latest';
+  if (/^\d{1,15}$/.test(s)) return toHex(Number(s));
+  if (/^0x[0-9a-fA-F]{1,13}$/.test(s)) return toHex(hexNum(s));
+  throw new CheckError('Enter a block: its number, or latest.');
+}
 
 /// The slots typed: 0x keys, separated by commas or spaces.
 function slotsOf(text) {
@@ -2257,8 +2403,10 @@ function readProof(kind, ch, endpoint) {
     return { module: 'items', kind: 'block', target: itemBlock($('item').value), label: 'The block' };
   }
   if (kind === 'fees') {
+    if (!FEES.has(ch.id)) throw new CheckError(`Willow does not prove fees on ${ch.name} yet.`);
     return { module: 'items', kind: 'fees', target: itemBlock($('at').value), label: 'The block' };
   }
+  if (kind === 'trace') return readTrace(ch, endpoint);
   if (isPublic(endpoint)) {
     throw new CheckError(`Willow proves ${kind === 'account' ? 'accounts' : 'calls'} only for an API key: under Advanced, enter your Willow RPC endpoint ending in your key.`);
   }
@@ -2273,6 +2421,33 @@ function readProof(kind, ch, endpoint) {
   const call = callOf($('call').value);
   const estimate = $('estimate').checked;
   return { module: 'state', kind: estimate ? 'estimate' : 'call', target: JSON.stringify([call, at]), call, at, label: 'The block' };
+}
+
+/// A trace method and its params, read from the form: [method, params] goes to willow_getTraceProof.
+function readTrace(ch, endpoint) {
+  const method = traceMethod();
+  const m = TRACE_METHODS[method];
+  if (!TRACED.has(ch.id)) throw new CheckError('Traces are verified on Ethereum and Unichain only. Choose one of them.');
+  if (m.at === 'call' && !CALL_TRACED.has(ch.id)) throw new CheckError("Calls' traces are verified on Ethereum only. Choose Ethereum.");
+  if (isPublic(endpoint)) throw new CheckError('Willow proves traces only for an API key: under Advanced, enter your Willow RPC endpoint ending in your key.');
+  const choice = m.tracer ? TRACERS[m.tracer][Number($('tracer').value)] || TRACERS[m.tracer][0] : null;
+  const tracer = choice ? choice[1] : null;
+  const typed = $('item').value.trim();
+  let params;
+  let call;
+  if (m.at === 'tx' || m.at === 'hash') {
+    if (!TX_HASH.test(typed)) throw new CheckError(m.at === 'tx' ? 'Enter a transaction hash: 0x and 64 hex digits.' : 'Enter a block hash: 0x and 64 hex digits.');
+    params = [typed.toLowerCase()];
+  } else if (m.at === 'block') params = [traceBlock(typed)];
+  else {
+    call = callOf($('call').value);
+    params = [call, stateBlock($('at').value)];
+  }
+  if (tracer) {
+    if (method === 'trace_call') params.splice(1, 0, tracer);
+    else params.push(tracer);
+  }
+  return { module: 'state', kind: 'trace', method, at: m.at, params, call, tracerText: choice ? choice[0] : null, target: JSON.stringify([method, params]), label: 'The block', coverage: m.at === 'call' ? 'traceCall' : 'trace' };
 }
 
 /// The standard methods compared with the proven response, at the proven block.
@@ -2299,6 +2474,13 @@ function comparisons(p, rep) {
     out.push(['eth_getProof', [p.address, p.slots, at], { type: 'state-compare', method: 'eth_getProof' }]);
     return out;
   }
+  if (p.kind === 'trace') {
+    // The block the proof is for, not "latest"; a transaction or a block hash already names it.
+    const params = structuredClone(p.params);
+    if (p.at === 'block') params[0] = rep.block.number;
+    else if (p.at === 'call') params[p.method === 'trace_call' ? 2 : 1] = rep.block.number;
+    return [[p.method, params, { type: 'state-compare', method: p.method }]];
+  }
   const method = p.kind === 'call' ? 'eth_call' : 'eth_estimateGas';
   return [[method, [p.call, at], { type: 'state-compare', method }]];
 }
@@ -2324,7 +2506,7 @@ async function runProof() {
   $('result').hidden = true;
   const list = [
     ['proof', 'Proof from Willow'],
-    ['verify', p.module === 'state' ? (p.kind === 'state' ? "Verifying the account against the block's state root" : `${p.kind === 'call' ? 'Running the call' : 'Estimating its gas'} over proven state`) : p.kind === 'fees' ? 'Verifying the blocks and computing the fees' : 'Verifying the block against its hash'],
+    ['verify', p.module === 'state' ? (p.kind === 'state' ? "Verifying the account against the block's state root" : p.kind === 'trace' ? `Tracing the ${p.at === 'call' ? 'call' : p.at === 'tx' ? 'transaction' : 'block'} over proven state` : `${p.kind === 'call' ? 'Running the call' : 'Estimating its gas'} over proven state`) : p.kind === 'fees' ? 'Verifying the blocks and computing the fees' : 'Verifying the block against its hash'],
   ];
   setupSteps(list);
   const t0 = performance.now();
@@ -2377,6 +2559,7 @@ async function runProof() {
     facts.push(['Block', `${blockNum}, hash ${blockHash}`]);
     if (Number.isSafeInteger(rep.block.timestamp)) facts.push(['Block time', new Date(rep.block.timestamp * 1000).toISOString().replace('.000Z', ' UTC').replace('T', ' ')]);
     if (p.kind === 'state') facts.push(['Account', p.address]);
+    if (p.kind === 'trace') facts.push(['Trace', p.tracerText ? `${p.method}, ${p.tracerText}` : p.method]);
     if (rep.algorithm) facts.push(['Algorithm', rep.algorithm]);
     if (rep.formula) facts.push(['Formula', rep.formula]);
     facts.push(['Proof', `${req.method}, ${bytes(proofSize)}, verified in ${secs(ms)}`]);
@@ -2443,13 +2626,13 @@ async function runProof() {
     }
 
     // The proof is about the block whose hash it carries: verify that block against Ethereum.
-    list.push(['anchor', anchorLabel(nodes, 'The block')]);
+    list.push(['anchor', anchorLabel(nodes, 'The block', ch)]);
     setupStepsKeep(list);
     current = 'anchor';
-    step('anchor', 'active', nodes ? `Asking for block ${blockNum}…` : `Verifying block ${blockNum} against Ethereum's validators…`);
+    step('anchor', 'active', nodes ? `Asking for block ${blockNum}…` : `Verifying block ${blockNum} against ${anchorChain(ch)}'s validators…`);
     const anchor = await confirmAnchor(ch, endpoint, nodes, blockNum, blockHash);
     relabel('anchor', anchorDoneLabel(anchor, ch, nodes, 'The block'));
-    step('anchor', anchorState(anchor), anchorNote(anchor, blockNum, blockHash));
+    step('anchor', anchorState(anchor), anchorNote(anchor, blockNum, blockHash, ch));
     facts.push(['Block hash confirmed', anchor.confirmed ? confirmedFact(anchor, ch) : 'no']);
     facts.push(['Time', secs(performance.now() - t0)]);
     facts.push(['Endpoint', hostOf(endpoint)]);
@@ -2462,11 +2645,11 @@ async function runProof() {
     if (anchor.mismatch.length) {
       tone = 'bad';
       title = mismatchTitle(anchor, blockNum);
-      text = mismatchText(anchor, blockNum, 'The proof is valid');
+      text = mismatchText(anchor, blockNum, 'The proof is valid', ch);
     } else if (anchor.failed) {
       tone = 'bad';
       title = 'Not verified: the data to confirm the block failed verification';
-      text = `The proof of ${thing} is valid, but ${failedText(anchor, blockNum)}`;
+      text = `The proof of ${thing} is valid, but ${failedText(anchor, blockNum, ch)}`;
     } else if (unreadable) {
       tone = 'bad';
       title = "Not verified: Willow's response failed verification";
@@ -2491,7 +2674,7 @@ async function runProof() {
     } else if (unanchored(anchor, ch)) {
       verified = true;
       tone = 'warn';
-      title = 'Proof valid, but the block is not verified against Ethereum';
+      title = `Proof valid, but the block is not verified against ${anchorChain(ch)}`;
       text = `${cap(thing)} is proven at block ${blockNum}${comparisons(p, rep).length ? ", and Willow's standard responses report it the same way" : ''}. ${confirmedText(anchor, ch, 'The block', rep.block.timestamp)}${uncovered}`;
     } else {
       verified = true;
@@ -2503,7 +2686,7 @@ async function runProof() {
     showVerdict(tone, title, text);
     showFacts(facts);
     $('proofCoverage').hidden = false;
-    $('proofCoverageText').textContent = PROOF_KINDS[p.kind === 'state' ? 'account' : p.kind].coverage;
+    $('proofCoverageText').textContent = PROOF_KINDS[p.coverage || (p.kind === 'state' ? 'account' : p.kind)].coverage;
     $('proofUncovered').textContent = unproven.length ? `Not covered by this proof: ${unproven.join(', ')}.` : '';
     showResponseDiffs(diffs);
     showProven(p, v, full, verified, ch, blockNum);
@@ -2546,6 +2729,8 @@ function verifiedNote(p, v, blockNum, ms) {
   if (p.kind === 'block') return `The header hashes to block ${blockNum}'s hash, and its ${n(rep.transactions)} transactions, withdrawals and uncles rebuild its roots (${secs(ms)}).`;
   if (p.kind === 'fees') return `The headers chain up to block ${blockNum}, each body rebuilds its roots, and the formula gives the fees (${secs(ms)}).`;
   if (p.kind === 'state') return `The account and ${n(p.slots.length)} slot${p.slots.length === 1 ? '' : 's'} are proven against block ${blockNum}'s state root (${secs(ms)}).`;
+  if (p.kind === 'trace' && p.at === 'call') return `Your browser ran the call over state proven against block ${blockNum}'s state root and traced it (${secs(ms)}).`;
+  if (p.kind === 'trace') return `Your browser ran block ${blockNum}'s transactions${p.at === 'tx' ? ' up to this one' : ''} over state proven against its parent's state root, each matching its receipt, and traced ${p.at === 'tx' ? 'it' : 'them'} (${secs(ms)}).`;
   const out = v.proven.error ? `ends in ${v.proven.error.code === 3 ? 'a revert' : 'an error'}` : p.kind === 'call' ? 'returns' : 'needs';
   return `Your browser ${p.kind === 'call' ? 'ran the call' : "ran geth's gas estimation"} over state proven against block ${blockNum}'s state root: it ${out}${v.proven.error ? '' : ` ${p.kind === 'call' ? 'the proven result' : `${n(hexNum(v.proven.result))} gas`}`} (${secs(ms)}).`;
 }
@@ -2555,12 +2740,13 @@ function proofThing(p, v, blockNum) {
   if (p.kind === 'block') return `block ${blockNum}`;
   if (p.kind === 'fees') return `the fees at block ${blockNum}`;
   if (p.kind === 'state') return `account ${shortHash(p.address)}`;
+  if (p.kind === 'trace') return p.at === 'call' ? "the call's trace" : p.at === 'tx' ? `the trace of transaction ${shortHash(p.params[0])}` : `the traces of block ${blockNum}`;
   return p.kind === 'call' ? `the call's ${v.proven.error ? 'revert' : 'result'}` : `the gas estimate${v.proven.error ? "'s error" : ''}`;
 }
 
-const weiText = (hex) => {
+const weiText = (hex, native = 'ETH') => {
   const w = big(hex);
-  return w === null ? String(hex) : `${w.toLocaleString('en-US')} wei (${amountText(w, 18)} ETH)`;
+  return w === null ? String(hex) : `${w.toLocaleString('en-US')} wei (${amountText(w, 18)} ${native})`;
 };
 const gweiText = (hex) => {
   if (hex === null || hex === undefined) return 'none: this chain\'s blocks carry no blob gas';
@@ -2590,11 +2776,26 @@ function showProven(p, v, full, verified, ch, blockNum) {
     title = `fees at block ${blockNum}`;
   } else if (p.kind === 'state') {
     const s = v.proven;
-    rows.push(row('eth_getBalance', weiText(s.eth_getBalance)), row('eth_getTransactionCount', `${n(hexNum(s.eth_getTransactionCount))} (${s.eth_getTransactionCount})`));
+    rows.push(row('eth_getBalance', weiText(s.eth_getBalance, nativeOf(ch))), row('eth_getTransactionCount', `${n(hexNum(s.eth_getTransactionCount))} (${s.eth_getTransactionCount})`));
     rows.push(row('eth_getCode', s.eth_getCode === '0x' ? 'none (0x)' : `${n((s.eth_getCode.length - 2) / 2)} bytes: ${s.eth_getCode.slice(0, 130)}…`));
     p.slots.forEach((k, i) => rows.push(el('tr', {}, el('td', { class: 'mono', title: k }, `slot ${shortHash(k)}`), el('td', { class: 'value' }, el('div', { class: 'cell' }, s.eth_getStorageAt[i])))));
     rows.push(row('codeHash', s.eth_getProof.codeHash), row('storageHash', s.eth_getProof.storageHash));
     title = `account ${shortHash(p.address)}`;
+  } else if (p.kind === 'trace') {
+    const r = v.proven.result;
+    rows.push(row('method', p.method));
+    if (p.tracerText) rows.push(row(TRACE_METHODS[p.method].tracer === 'types' ? 'trace types' : 'tracer', p.tracerText));
+    if (p.at === 'block' || p.at === 'hash') rows.push(row('transactions', n(Array.isArray(r) ? r.length : 0)));
+    let shown;
+    try {
+      shown = clip(JSON.stringify(r));
+    } catch {
+      shown = 'Too deeply nested to show here: download the JSON.';
+    }
+    rows.push(row('result', shown));
+    if (v.report.algorithm) rows.push(row('algorithm', v.report.algorithm));
+    json = r;
+    title = 'trace';
   } else {
     const r = v.proven;
     const method = p.kind === 'call' ? 'eth_call' : 'eth_estimateGas';
@@ -2616,6 +2817,7 @@ function showProven(p, v, full, verified, ch, blockNum) {
 const USDC_ETHEREUM = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
 function useAccountExample() {
   $('formError').textContent = '';
+  if (!chosen().poolManager) return;
   $('address').value = chosen().poolManager;
   $('slots').value = '0x0';
   $('at').value = 'latest';
@@ -2623,6 +2825,10 @@ function useAccountExample() {
 function useCallExample() {
   $('formError').textContent = '';
   const ch = chosen();
+  if (kindOf() === 'trace' && !CALL_TRACED.has(ch.id)) {
+    $('formError').textContent = "Calls' traces are verified on Ethereum only. Choose Ethereum for the example.";
+    return;
+  }
   if (ch.id !== 1) {
     $('formError').textContent = 'Calls are verified on Ethereum only. Choose Ethereum for the example.';
     return;
@@ -2785,7 +2991,10 @@ const KNOWN_TOKENS = {
   10: { '0x0b2c639c533813f4aa9d7837caf62653d097ff85': ['USDC', 6], '0x4200000000000000000000000000000000000006': ['WETH', 18], '0x4200000000000000000000000000000000000042': ['OP', 18], '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58': ['USDT', 6] },
   130: { '0x078d782b760474a361dda0af3839290b0ef57ad6': ['USDC', 6], '0x4200000000000000000000000000000000000006': ['WETH', 18] },
   57073: { '0xf1815bd50389c46847f0bda824ec8da914045d14': ['USDC.e', 6], '0x4200000000000000000000000000000000000006': ['WETH', 18] },
+  56: { '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c': ['WBNB', 18], '0x55d398326f99059ff775485246999027b3197955': ['USDT', 18], '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d': ['USDC', 18] },
 };
+// The OP stack's WETH predeploy, the same on each OP stack chain.
+for (const id of OP_STACK) KNOWN_TOKENS[id] ??= { '0x4200000000000000000000000000000000000006': ['WETH', 18] };
 // Swap routers whose OrderFilled events (see ORDER_FILLED) the receipt shows as the settlement:
 // any contract can emit that event with any amounts, so only these are read.
 const FILL_ROUTERS = new Set(['0xb1f3a7b816b0681188f54dfa400991b93adf00ed']);
@@ -2822,6 +3031,7 @@ function linkOf(search) {
     if (!TX_HASH.test(tx) && !AT_INDEX.test(tx)) throw new CheckError("The link's transaction is not a transaction hash, or a block and an index such as 1234567:5.");
     return { ch, tx: tx.toLowerCase() };
   }
+  if (!LOGS.has(ch.id)) throw new CheckError(noLogs(ch));
   const from = blockParam(q.get('from'), 'first block (from)');
   const to = blockParam(q.get('to'), 'last block (to)');
   if (from > to) throw new CheckError("The link's first block is after its last.");
@@ -3020,7 +3230,7 @@ async function runTxLink(link) {
     const blockHash = rep.block.hash;
     v.step('verify', 'done', `Block hash ${shortHash(blockHash)} · ${secs(ms)}`);
     const trustless = TRUSTLESS.has(ch.id);
-    v.step('anchor', 'active', trustless ? `Verifying block ${n(blockNum)} against Ethereum…` : `Asking ${hostsText(ch.nodes)} for block ${n(blockNum)}…`);
+    v.step('anchor', 'active', trustless ? `Verifying block ${n(blockNum)} against ${anchorChain(ch)}…` : `Asking ${hostsText(ch.nodes)} for block ${n(blockNum)}…`);
     const moves = movementsOf(receipt);
     const orders = ordersOf(receipt);
     const named = [...orders.flatMap((o) => [o.tokenIn, o.tokenOut]), ...moves.filter((m) => m.kind !== 'nft').map((m) => m.token)];
@@ -3038,18 +3248,20 @@ async function runTxLink(link) {
 }
 
 /// The checklist's block row: the block's level in the page's words, green when the browser
-/// verified it against Ethereum, gold when it did not; `sub`, small lines under it. Below settled,
-/// an L2 row says when the chain itself treats the block as final.
+/// verified it, gold when it did not; `sub`, small lines under it. Below settled, an L2 row says
+/// when the chain itself treats the block as final.
 function levelOf(a, ch, blockTime = null) {
-  const l2Line = ch.id === 1 ? [] : [chainFinalLine(ch, blockTime)];
+  const l2Line = isL1(ch) || !chainFinalLine(ch, blockTime) ? [] : [chainFinalLine(ch, blockTime)];
   if (a.mismatch.length) return { ok: false, text: `${ch.name} has another block at this height` };
   if (a.failed) return { ok: false, text: "Willow's data for the block failed verification" };
   if (!a.confirmed) return { ok: false, text: 'Block not confirmed' };
   if (a.via === 'nodes') return { ok: false, text: a.public ? `Confirmed by public ${ch.name} nodes` : `Confirmed on ${a.ok.join(' and ')}`, sub: l2Line };
   if (ch.id === 1) return a.level === 'final' ? { ok: true, text: "Finalized on Ethereum, can't be reversed" } : { ok: true, text: "Signed by Ethereum's validators, not finalized yet", sub: ['Ethereum finalizes blocks about 13 minutes after they are made.'] };
-  if (a.level === 'final') return { ok: true, text: "Settled on Ethereum, can't be reversed" };
-  if (a.level === 'signed') return { ok: true, text: `Signed by ${ch.name}'s sequencer, not on Ethereum yet`, sub: l2Line };
-  return { ok: true, text: `Posted to Ethereum, settles in about ${ch.finalDays} days`, sub: l2Line };
+  if (ch.id === 56) return a.level === 'final' ? { ok: true, text: `Finalized on ${ch.name}, can't be reversed` } : { ok: true, text: `Sealed by a ${ch.name} validator, not finalized yet` };
+  const l1 = anchorChain(ch);
+  if (a.level === 'final') return { ok: true, text: `Settled on ${l1}, can't be reversed` };
+  if (a.level === 'signed') return { ok: true, text: `Signed by ${ch.name}'s sequencer, not on ${l1} yet`, sub: l2Line };
+  return { ok: true, text: `Posted to ${l1}, settles in about ${settleIn(ch)}`, sub: l2Line };
 }
 
 /// The checklist's last row, once a proof verified: what it rests on is the browser, not Willow.
@@ -3067,14 +3279,15 @@ function checkRows(rows) {
 /// sentence.
 function anchorSentence(a, ch, what, number, hash) {
   if (a.via === 'ethereum' && a.confirmed) {
+    if (ch.id === 56 && a.level === 'signed') return `Your browser verified a ${ch.name} validator sealed ${what}.`;
     if (a.level === 'signed') return `Your browser verified ${ch.name}'s sequencer signed ${what}.`;
-    return `Your browser verified ${what} against Ethereum.`;
+    return `Your browser verified ${what} against ${anchorChain(ch)}.`;
   }
   if (a.via === 'nodes' && a.confirmed) {
     const who = a.public ? `${a.ok.length > 1 ? 'Two public' : 'A public'} ${ch.name} node${a.ok.length > 1 ? 's' : ''}, run by others,` : a.ok.join(' and ');
-    return `${who} ${a.ok.length > 1 ? 'have' : 'has'} ${what} with this hash. Your browser could not verify it against Ethereum${a.pending ? `: ${sentence(a.pending)}` : '.'}`;
+    return `${who} ${a.ok.length > 1 ? 'have' : 'has'} ${what} with this hash. Your browser could not verify it against ${anchorChain(ch)}${a.pending ? `: ${sentence(a.pending)}` : '.'}`;
   }
-  return anchorNote(a, n(number), hash);
+  return anchorNote(a, n(number), hash, ch);
 }
 
 /// The receipt card, shown while the check runs: { step, label, show, fail }. Folded, it shows the
@@ -3094,7 +3307,7 @@ function receiptSkeleton(ch) {
   for (const [key, what] of [
     ['proof', 'Proof from Willow'],
     ['verify', 'Verified in your browser'],
-    ['anchor', TRUSTLESS.has(ch.id) ? 'Block on Ethereum' : `Block on ${ch.name}`],
+    ['anchor', TRUSTLESS.has(ch.id) ? `Block on ${anchorChain(ch)}` : `Block on ${ch.name}`],
   ]) {
     const note = el('div', { class: 'note' });
     const li = el('li', { 'data-state': 'pending' }, el('span', { class: 'mark', 'aria-hidden': 'true' }), el('div', {}, el('div', { class: 'what' }, what), note));
@@ -3170,10 +3383,10 @@ function receiptSkeleton(ch) {
       const what = orders.length && ok ? 'Swap' : 'Transaction';
       // The checklist says how far the block is; the seal's own words are kept for what went wrong.
       if (anchor.mismatch.length) setSeal('bad', 'Not verified', `The proof is valid, but ${mismatchHosts(anchor)} ${anchor.mismatch.length === 1 ? 'has' : 'have'} a different block ${n(blockNum)}. If it is seconds old, it may have been replaced; try again in a minute.`);
-      else if (anchor.failed) setSeal('bad', 'Not verified', `Willow's proof is valid, but ${failedText(anchor, n(blockNum))}`);
-      else if (!anchor.confirmed && anchor.via === 'ethereum') setSeal('warn', 'Proof valid, block not confirmed', `Willow's proof is valid, but your browser could not confirm block ${n(blockNum)} on Ethereum just now: ${sentence(problemsText(anchor))}`);
+      else if (anchor.failed) setSeal('bad', 'Not verified', `Willow's proof is valid, but ${failedText(anchor, n(blockNum), ch)}`);
+      else if (!anchor.confirmed && anchor.via === 'ethereum') setSeal('warn', 'Proof valid, block not confirmed', `Willow's proof is valid, but your browser could not confirm block ${n(blockNum)} on ${anchorChain(ch)} just now: ${sentence(problemsText(anchor))}`);
       else if (!anchor.confirmed) setSeal('warn', 'Proof valid, block not confirmed', `Willow's proof is valid, but no public node could confirm block ${n(blockNum)} just now (${problemsText(anchor)}). Try again in a minute.`);
-      else if (unanchored(anchor, ch)) setSeal('warn', 'Proof valid, block not verified against Ethereum', '');
+      else if (unanchored(anchor, ch)) setSeal('warn', `Proof valid, block not verified against ${anchorChain(ch)}`, '');
       else setSeal('ok', [`${what} `, el('em', {}, 'verified')], '');
 
       // The sender's own movements, netted per token: what the transaction settled for them.
@@ -3190,7 +3403,7 @@ function receiptSkeleton(ch) {
       // ETH and listed tokens by name; any other by the name its contract gives, with its address,
       // and by address alone when its decimals are unknown (the amount is then in raw units).
       const tokenName = (t) => {
-        if (t === ZERO) return 'ETH';
+        if (t === ZERO) return nativeOf(ch);
         if (known[t]) return known[t][0];
         const sym = names[t] && names[t].symbol;
         if (decimalsOf(t) == null) return `units of ${shortAddr(t)}`;
@@ -3236,12 +3449,12 @@ function receiptSkeleton(ch) {
       // them. What is not added (an L1 fee the proof does not cover, an OP operator fee) is said.
       const gas = big(receipt.gasUsed);
       const price = big(receipt.effectiveGasPrice);
-      const opStack = [8453, 10, 130, 57073].includes(ch.id);
+      const opStack = OP_STACK.has(ch.id);
       const l1 = big(receipt.l1Fee);
       const blob = (big(receipt.blobGasUsed) || 0n) * (big(receipt.blobGasPrice) || 0n);
       const fee = gas != null && price != null ? gas * price + blob + (l1 || 0n) : null;
       const left = [opStack && l1 == null && 'the L1 data fee, which this proof does not cover', receipt.operatorFeeScalar != null && "the chain's operator fee"].filter(Boolean);
-      const feeText = fee == null ? null : left.length ? `At least ${amountText(fee, 18, 8)} ETH, plus ${left.join(' and ')}` : `${amountText(fee, 18, 8)} ETH`;
+      const feeText = fee == null ? null : left.length ? `At least ${amountText(fee, 18, 8)} ${nativeOf(ch)}, plus ${left.join(' and ')}` : `${amountText(fee, 18, 8)} ${nativeOf(ch)}`;
       // Who and what, once each: From and To only where they add to the trader and the router.
       const trader = orders.length ? orders[0].sender : null;
       const routers = new Set(orders.map((o) => o.by));
@@ -3264,7 +3477,7 @@ function receiptSkeleton(ch) {
           const who = (a) => (a === trader ? 'trader' : a === sender ? 'sender' : shortAddr(a));
           if (m.kind === 'erc20') return el('li', {}, el('span', { class: 'move-amt' }, `${amountText(m.amount, decimalsOf(m.token))} `, el('span', { class: 'settle-sym', title: m.token }, sym)), el('span', { class: 'move-way' }, `${who(m.from)} → ${who(m.to)}`));
           if (m.kind === 'nft') return el('li', {}, el('span', { class: 'move-amt' }, `#${m.id.toString()} `, el('span', { class: 'settle-sym', title: m.token }, shortAddr(m.token))), el('span', { class: 'move-way' }, `${who(m.from)} → ${who(m.to)}`));
-          return el('li', {}, el('span', { class: 'move-amt' }, `${amountText(m.amount, 18)} `, el('span', { class: 'settle-sym', title: m.token }, m.kind === 'wrap' ? 'ETH → WETH' : 'WETH → ETH')), el('span', { class: 'move-way' }, `${m.kind === 'wrap' ? 'wrapped' : 'unwrapped'} by ${who(m.by)}`));
+          return el('li', {}, el('span', { class: 'move-amt' }, `${amountText(m.amount, 18)} `, el('span', { class: 'settle-sym', title: m.token }, m.kind === 'wrap' ? `${nativeOf(ch)} → W${nativeOf(ch)}` : `W${nativeOf(ch)} → ${nativeOf(ch)}`)), el('span', { class: 'move-way' }, `${m.kind === 'wrap' ? 'wrapped' : 'unwrapped'} by ${who(m.by)}`));
         })));
         movesGroup.hidden = false;
       }
@@ -3514,6 +3727,10 @@ function setFilter(f) {
 async function useExample() {
   const ch = chosen();
   $('formError').textContent = '';
+  if (!LOGS.has(ch.id)) {
+    $('formError').textContent = noLogs(ch);
+    return;
+  }
   const endpoint = $('endpoint').value.trim();
   const ex = await provenExample(httpUrl(endpoint) ? endpoint : defaultEndpoint(ch), ch);
   if (chosen() !== ch) return;
@@ -3549,30 +3766,35 @@ async function useExample() {
 async function useItemExample() {
   const ch = chosen();
   const kind = kindOf();
+  // A trace names a transaction by hash, or a block by number or by hash.
+  const at = kind === 'trace' ? TRACE_METHODS[traceMethod()].at : null;
   $('formError').textContent = '';
   const endpoint = $('endpoint').value.trim();
   const c = await healthOf(httpUrl(endpoint) ? endpoint : defaultEndpoint(ch), '', ch.id);
-  if (chosen() !== ch || kindOf() !== kind) return;
+  const same = () => chosen() === ch && kindOf() === kind && (kind !== 'trace' || TRACE_METHODS[traceMethod()].at === at);
+  if (!same()) return;
   const tip = c && Number.isSafeInteger(c.tip) && c.tip > 10 ? c.tip : null;
   if (tip == null) {
     $('formError').textContent = "Willow's status could not be read just now. Enter a transaction or a block yourself.";
     return;
   }
   const block = tip - 10;
-  if (kind === 'blockReceipts' || kind === 'block') {
+  if (kind === 'blockReceipts' || kind === 'block' || at === 'block') {
     $('item').value = String(block);
     return;
   }
-  let target = `${block}:0`;
+  let target = at ? null : `${block}:0`;
   if (httpUrl(endpoint)) {
     try {
       const { result } = await rpc(endpoint, 'eth_getBlockByNumber', [toHex(block), false]);
       const txs = result && Array.isArray(result.transactions) ? result.transactions : [];
-      const h = txs[Math.min(1, txs.length - 1)];
+      const h = at === 'hash' ? result && result.hash : txs[Math.min(1, txs.length - 1)];
       if (typeof h === 'string' && /^0x[0-9a-fA-F]{64}$/.test(h)) target = h;
     } catch {}
   }
-  if (chosen() === ch && kindOf() === kind) $('item').value = target;
+  if (!same()) return;
+  if (target) $('item').value = target;
+  else $('formError').textContent = "Willow's status could not be read just now. Enter a transaction or a block yourself.";
 }
 
 /// The fields for the chosen chain: the endpoint's /rpc/<id>/ path, the node typed for this chain
@@ -3583,12 +3805,16 @@ function showChain(prev) {
   if (prev) nodes[prev.id] = $('node').value.trim();
   $('node').value = nodes[ch.id] || '';
   const trustless = TRUSTLESS.has(ch.id);
-  $('node').placeholder = trustless ? 'Empty: verified against Ethereum' : `Empty: ${hostsText(ch.nodes)}`;
+  $('node').placeholder = trustless ? `Empty: verified against ${anchorChain(ch)}` : `Empty: ${hostsText(ch.nodes)}`;
   $('nodeLabel').textContent = `Your ${ch.name} node (optional)`;
+  // Uniswap lists no PoolManager on some testnets: no account example there.
+  $('accountExample').hidden = !ch.poolManager;
   $('nodeHint').textContent = trustless
     ? ch.id === 1
       ? "Used only to confirm the hash of the block the proof ends at. Left empty, your browser verifies that hash against Ethereum's validators itself, from a starting point built into this page, and relies on no node. A node entered here is asked instead."
-      : `Used only to confirm the hash of the block the proof ends at. Left empty, your browser verifies it against Ethereum: what ${ch.name} posted there, or for a newer block the signature of ${ch.name}'s sequencer, whose key Ethereum names. Only when Willow's data for that cannot be verified are two public nodes from different operators asked (${hostsText(ch.nodes)}), and the result then says so. A node entered here is asked instead.`
+      : ch.id === 56
+      ? `Used only to confirm the hash of the block the proof ends at. Left empty, your browser verifies that hash against ${ch.name}'s validators itself, from a starting point Willow publishes with this page, and relies on no node. A node entered here is asked instead.`
+      : `Used only to confirm the hash of the block the proof ends at. Left empty, your browser verifies it against ${anchorChain(ch)}: what ${ch.name} posted there, or for a newer block the signature of ${ch.name}'s sequencer, whose key ${anchorChain(ch)} names. Only when Willow's data for that cannot be verified are two public nodes from different operators asked (${hostsText(ch.nodes)}), and the result then says so. A node entered here is asked instead.`
     : `Used only to confirm the hash of the block the proof ends at. Left empty, two public nodes from different operators confirm it (${hostsText(ch.nodes)}), and you rely on them for that hash. ` +
       'Enter a node you run to rely on no one else.';
   const ep = $('endpoint').value.trim();
@@ -3610,31 +3836,49 @@ function showChain(prev) {
 
 // What was typed for a transaction (transaction and receipt checks) and for a block.
 const itemValues = { tx: '', block: '' };
-let shownKind = 'logs';
+let shownGroup = null;
+let shownTracers = null;
 
 /// The fields for the chosen kind of check.
 function showKind() {
   const kind = kindOf();
   const logs = kind === 'logs';
-  const block = kind === 'blockReceipts' || kind === 'block';
-  const item = block || kind === 'receipt' || kind === 'transaction';
-  const group = (k) => (k === 'blockReceipts' || k === 'block' ? 'block' : k === 'receipt' || k === 'transaction' ? 'tx' : null);
-  const was = group(shownKind);
-  const now = group(kind);
-  if (was) itemValues[was] = $('item').value;
-  if (now && now !== was) $('item').value = itemValues[now];
-  shownKind = kind;
+  const trace = kind === 'trace' ? TRACE_METHODS[traceMethod()] : null;
+  const block = kind === 'blockReceipts' || kind === 'block' || (!!trace && (trace.at === 'block' || trace.at === 'hash'));
+  const item = block || kind === 'receipt' || kind === 'transaction' || (!!trace && trace.at === 'tx');
+  const call = kind === 'call' || (!!trace && trace.at === 'call');
+  const now = block ? 'block' : item ? 'tx' : null;
+  if (shownGroup) itemValues[shownGroup] = $('item').value;
+  if (now && now !== shownGroup) $('item').value = itemValues[now];
+  shownGroup = now;
   if (logs && !$('pinned').textContent) showPinned();
   $('logsField').hidden = !logs;
   $('itemField').hidden = !item;
   $('addressField').hidden = kind !== 'account';
   $('slotsField').hidden = kind !== 'account';
-  $('callField').hidden = kind !== 'call';
-  $('atField').hidden = !(kind === 'account' || kind === 'call' || kind === 'fees');
+  $('callField').hidden = !call;
+  $('estimateRow').hidden = !!trace;
+  $('traceField').hidden = !trace;
+  $('tracerField').hidden = !(trace && trace.tracer);
+  if (trace && trace.tracer && shownTracers !== trace.tracer) {
+    // Geth's tracers or parity's trace types, the first chosen.
+    $('tracer').replaceChildren(...TRACERS[trace.tracer].map(([label], i) => el('option', { value: String(i) }, label)));
+    $('tracerLabel').textContent = trace.tracer === 'types' ? 'Trace types' : 'Tracer';
+    shownTracers = trace.tracer;
+  }
+  $('atField').hidden = !(kind === 'account' || call || kind === 'fees');
   $('atHint').textContent = kind === 'fees' ? 'Empty: the newest block. The fees are for the block after it.' : 'Empty: the newest block.';
   $('keysFields').hidden = !logs;
   $('itemLabel').textContent = block ? 'Block' : 'Transaction';
-  $('item').placeholder = block ? 'A block number, a block hash, or latest' : 'A transaction hash, or <block>:<index>';
+  $('item').placeholder = trace
+    ? trace.at === 'tx'
+      ? 'A transaction hash'
+      : trace.at === 'hash'
+        ? 'A block hash'
+        : 'A block number, or latest'
+    : block
+      ? 'A block number, a block hash, or latest'
+      : 'A transaction hash, or <block>:<index>';
   $('compareHint').textContent = logs
     ? 'Its eth_getLogs response for the same blocks is compared with the proven logs too. The provider must allow browser requests.'
     : isProofKind(kind)
@@ -3648,6 +3892,7 @@ const PROOF_COMPARE_HINTS = {
   account: 'Its eth_getBalance, eth_getTransactionCount, eth_getCode, eth_getStorageAt and eth_getProof responses at the same block are compared with the proven ones too. The provider must allow browser requests.',
   call: 'Its eth_call or eth_estimateGas response at the same block is compared with the proven one too. The provider must allow browser requests.',
   fees: "Its own eth_gasPrice, eth_maxPriorityFeePerGas and eth_blobBaseFee are shown beside the formula's. They can differ: each node suggests fees by its own rules, at its own newest block. The provider must allow browser requests.",
+  trace: 'Its response to the same trace method at the same block is compared with the proven trace too. The provider must allow browser requests.',
 };
 
 function remember() {
@@ -3721,6 +3966,7 @@ $('endpoint').addEventListener('change', () => {
 });
 $('node').addEventListener('input', () => (nodes[chosen().id] = $('node').value.trim()));
 for (const r of document.querySelectorAll('input[name=kind]')) r.addEventListener('change', showKind);
+$('traceMethod').addEventListener('change', showKind);
 // A link runs its check at once. Otherwise the log verifier loads with the page for a log check
 // (its published keys are shown under Advanced); a transaction or receipt check needs only the
 // smaller verifier.

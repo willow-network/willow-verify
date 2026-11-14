@@ -51,7 +51,9 @@ describe('the client', () => {
     const hashes = Array.from({ length: 130 }, (_, i) => `0x${i.toString(16).padStart(64, '0')}`);
     const out = await Promise.all(hashes.map((x) => h!.client.request({ method: 'eth_getTransactionReceipt', params: [x] })));
     expect(out.every((x) => x === null)).toBe(true);
-    expect(h.world.log.map((r) => r.items.length)).toEqual([100, 30]);
+    // Sent 100 first, then 30; the server may take the smaller request in first (the full suite's
+    // load made it 2 runs in 8): what is checked is the batches, not their order of arrival.
+    expect(h.world.log.map((r) => r.items.length).sort((a, b) => b - a)).toEqual([100, 30]);
   });
 
   it('eth_blockNumber called in a burst refreshes the head once', async () => {

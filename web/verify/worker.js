@@ -1,9 +1,11 @@
 // Runs the wasm verifiers off the main thread: the log verifier (SP1 proofs, and every check of
 // an answer but the OpenVM proofs' own), its OpenVM proof module, the transaction, receipt, block
-// and fee verifier, and the state, call and estimate verifier, each loaded on first use. The OpenVM module loads when an answer's proofs include an
-// OpenVM one; the log verifier calls it for each such proof, under the key it chose. `response` is
-// a JSON-RPC response body as the server sent it (the wasm parses it; the page never re-serialises
-// server data). Requests are answered in order. Messages:
+// and fee verifier, the state, call, estimate and trace verifier, and the light clients that
+// confirm blocks (Ethereum's, Sepolia's and BNB Smart Chain's), each loaded on first use. The
+// OpenVM module loads when a response's proofs include an OpenVM one; the log verifier calls it
+// for each such proof, under the key it chose. `response` is a JSON-RPC response body as the
+// server sent it (the wasm parses it; the page never re-serialises server data). Requests are
+// handled in order. Messages:
 //   {type:'init', chainId, segmentKeys, leafKeys}               -> {type:'ready', keys} | {type:'error'}
 //   {type:'cached', ids}                                        -> {type:'cached', ids} (the ones kept here)
 //   {type:'verify', response, filter, ids, proofs: {id: bytes}} -> {type:'checked', id, ms, error, system}* then {type:'verified', report, logs} | {type:'error'}
@@ -15,16 +17,17 @@
 //   {type:'items-verify', response}                             -> {type:'items-verified', report, proven, transactions, transaction, transactionUnproven} | {type:'error'}
 //   {type:'items-block', full}                                  -> {type:'items-block', proven, unproven} | {type:'error'} (the last block proof verified)
 //   {type:'items-compare', which, response}                     -> {type:'compared', result} | {type:'error'}
-// State, call and estimate proofs (kind: state, call, estimate; target: the proof method's params as JSON text):
+// State, call, estimate and trace proofs (kind: state, call, estimate, trace; target: the proof method's params as JSON text):
 //   {type:'state-request', chainId, kind, target}               -> {type:'state-requested', method, params} | {type:'error'}
 //   {type:'state-verify', response}                             -> {type:'state-verified', report, proven} | {type:'error'}
 //   {type:'state-compare', method, response}                    -> {type:'compared', result} | {type:'error'}
-// Block confirmation on Ethereum (every message carries checkpoint: {root, slot} and now, in seconds):
+// Block confirmation (every message carries checkpoint: {root, slot}, Ethereum's start, and now, in seconds; for a chain
+// another light client anchors, lightClient 'sepolia' or 'bnb' and start, where it starts: {root, slot} or {number, hash}):
 //   {type:'anchor-restore', saved}                              -> {type:'anchor-done', result} | {type:'error'} (saved: verified again)
 //   {type:'anchor-bootstrap', response}                         -> {type:'anchor-done', result} | {type:'error'}
 //   {type:'anchor-updates', response}                           -> {type:'anchor-done', result} | {type:'error'}
 //   {type:'anchor-verify', chainId, number, hash, response}     -> {type:'anchor-verified', result, saved} | {type:'error'}
-//     result.ok, or result.kind 'need-bootstrap' / 'need-updates' (from, count): what to fetch first.
+//     result.ok, or result.kind 'need-bootstrap' / 'need-updates' (from, count, lightClient): what to fetch first.
 // Errors carry the verifier's kind: 'rejected' or 'malformed-input' (Willow's answer failed a
 // check; an items error also carries the 'fault' that failed; a state error's kind is what failed,
 // such as 'account', 'slot', 'outcome'), 'invalid-filter', 'invalid-keys', 'invalid-request' (what was typed), 'unknown-fork',
@@ -48,8 +51,10 @@ let verifier = null;
 let openvm = null;
 let items = null;
 let state = null;
-// Ethereum's light client: the committees it verified live as long as the worker.
+// The light clients (Ethereum's, Sepolia's, BNB Smart Chain's): what they verified lives as long as the worker.
 let anchor = null;
+// The other light clients given their start, each once: a start forgets what that light client verified.
+const started = new Set();
 // Each module loads once, when a message first needs it. Every message awaits its module and reports a failed load.
 let logsReady = null;
 let openvmReady = null;
@@ -171,15 +176,22 @@ async function handle(m) {
   } else if (m.type.startsWith('anchor-')) {
     try {
       if (!anchor) anchor = new Anchor(m.checkpoint.root, m.checkpoint.slot);
+      const lc = m.lightClient || null;
+      if (lc && !started.has(lc)) {
+        const s = JSON.parse(anchor.start(lc, JSON.stringify(m.start)));
+        if (!s.ok) return refused(m.type, s);
+        started.add(lc);
+      }
       let r;
-      if (m.type === 'anchor-restore') r = JSON.parse(anchor.restore(m.saved, m.now));
-      else if (m.type === 'anchor-bootstrap') r = JSON.parse(anchor.bootstrap(m.response, m.now));
-      else if (m.type === 'anchor-updates') r = JSON.parse(anchor.updates(m.response));
+      if (m.type === 'anchor-restore') r = JSON.parse(lc ? anchor.restoreFor(lc, m.saved, m.now) : anchor.restore(m.saved, m.now));
+      else if (m.type === 'anchor-bootstrap') r = JSON.parse(lc ? anchor.bootstrapFor(lc, m.response, m.now) : anchor.bootstrap(m.response, m.now));
+      else if (m.type === 'anchor-updates') r = JSON.parse(lc ? anchor.updatesFor(lc, m.response) : anchor.updates(m.response));
       else if (m.type === 'anchor-verify') r = JSON.parse(anchor.verify(m.chainId, m.number, m.hash, m.response, m.now));
       else return crashed(m.type, 'unknown message');
       if (m.type === 'anchor-verify' && (r.ok || r.kind === 'need-bootstrap' || r.kind === 'need-updates')) {
-        if (r.kind === 'need-bootstrap') anchor.reset();
-        postMessage({ type: 'anchor-verified', result: r, saved: r.ok ? anchor.saved() : null });
+        // A need-bootstrap names the light client it is for (none: Ethereum's), which starts over.
+        if (r.kind === 'need-bootstrap') r.lightClient ? anchor.resetFor(r.lightClient) : anchor.reset();
+        postMessage({ type: 'anchor-verified', result: r, saved: r.ok ? (lc ? anchor.savedFor(lc) : anchor.saved()) : null });
       } else if (r.ok) postMessage({ type: 'anchor-done', result: r });
       else refused(m.type, r);
     } catch (e) {

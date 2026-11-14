@@ -10,7 +10,7 @@ export interface Running {
   close: () => Promise<void>;
 }
 
-const STATE_METHODS = new Set(['willow_getStateProof', 'willow_getCallProof', 'willow_getEstimateGasProof', 'eth_getBalance', 'eth_call', 'eth_estimateGas']);
+const STATE_METHODS = new Set(['willow_getStateProof', 'willow_getCallProof', 'willow_getEstimateGasProof', 'willow_getTraceProof', 'eth_getBalance', 'eth_call', 'eth_estimateGas']);
 
 export function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -57,7 +57,8 @@ export function respond(world: World, chainId: number, key: string, it: { id: un
     case 'willow_getFeeProof':
     case 'willow_getFeeHistoryProof':
     case 'willow_getCallProof':
-    case 'willow_getEstimateGasProof': {
+    case 'willow_getEstimateGasProof':
+    case 'willow_getTraceProof': {
       const e = world.proofs.get(world.key(chainId, it.method, params));
       if (e) return ok(e.result);
       if ((it.method === 'willow_getTransactionProof' || it.method === 'willow_getReceiptProof') && params.length === 1) {

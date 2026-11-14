@@ -321,6 +321,10 @@ fn another_answer_is_compared_field_by_field() {
     // Unreadable: malformed input, never a crash.
     let r = parse(&v.compare("answer", "not json"));
     assert_eq!(r["kind"], json!("malformed-input"));
+    assert!(
+        r["message"].as_str().unwrap().starts_with("the response: "),
+        "{r}"
+    );
     // A block's transactions: the block object's list, field by field.
     let c = case("uni-block");
     let mut v = asked(&c);
