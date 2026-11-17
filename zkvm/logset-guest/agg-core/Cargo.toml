@@ -1,0 +1,19 @@
+[package]
+name = "logset-agg-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+
+
+
+[dependencies]
+logset-core = { path = "../core" }
+
+[features]
+
+index = ["logset-core/index"]
+
+[dev-dependencies]
+sha2 = "0.10"
+logset-core = { path = "../core", features = ["synth"] }

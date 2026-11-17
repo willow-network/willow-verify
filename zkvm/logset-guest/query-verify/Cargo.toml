@@ -1,0 +1,63 @@
+[package]
+name = "willow-logs-verify"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[dependencies]
+logset-query = { path = "../query" }
+willow-logs-verify-openvm = { path = "../../logset-guest-openvm/verify", default-features = false }
+logset-blockproof = { path = "../blockproof", optional = true }
+anchor-verify = { path = "../anchor-verify", optional = true }
+willow-items-verify-wasm = { path = "../items-wasm", optional = true }
+willow-state-verify-wasm = { path = "../state-wasm", optional = true }
+sp1-verifier = "=6.8.1"
+sp1-primitives = "=6.8.1"
+slop-algebra = "=6.8.1"
+bincode = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+serde_json = "1"
+hex = "0.4"
+
+
+[dev-dependencies]
+logset-query = { path = "../query", features = ["fixtures"] }
+sha2 = "0.10"
+
+
+
+
+[features]
+default = ["cli"]
+cli = [
+  "dep:reqwest",
+  "dep:logset-blockproof",
+  "dep:anchor-verify",
+  "dep:willow-items-verify-wasm",
+  "dep:willow-state-verify-wasm",
+]
+
+[[bin]]
+name = "willow-logs-verify"
+path = "src/main.rs"
+required-features = ["cli"]
+
+
+
+[workspace]
+resolver = "2"

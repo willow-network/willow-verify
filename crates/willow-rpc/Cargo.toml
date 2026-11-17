@@ -1,0 +1,60 @@
+[package]
+name = "willow-rpc"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A verifying JSON-RPC client for Willow: every response is verified on your machine against proofs and a light client, with an alloy transport"
+repository = "https://github.com/willow-network/willow-verify"
+homepage = "https://api.willow.tech/verify/"
+readme = "README.md"
+keywords = ["ethereum", "rpc", "light-client", "verification", "alloy"]
+categories = ["cryptography::cryptocurrencies", "network-programming"]
+
+# The Rust counterpart of @willow-network/rpc (web/client): the same method table, refusals and
+# error kinds, with the verify page's own verifiers run natively (the items, state and log
+# modules' crates and anchor-verify). Its crates.io release publishes it and the
+# crates it needs under willow- names; here they are the repo's paths.
+[dependencies]
+anchor-verify = { path = "../../zkvm/logset-guest/anchor-verify" }
+willow-items-verify-wasm = { path = "../../zkvm/logset-guest/items-wasm" }
+willow-state-verify-wasm = { path = "../../zkvm/logset-guest/state-wasm" }
+willow-logs-verify = { path = "../../zkvm/logset-guest/query-verify", optional = true }
+willow-logs-verify-wasm = { path = "../../zkvm/logset-guest/query-wasm", optional = true }
+logset-query = { path = "../../zkvm/logset-guest/query", optional = true }
+willow-logs-verify-openvm = { path = "../../zkvm/logset-guest-openvm/verify", default-features = false, optional = true }
+alloy = { version = ">=1.1, <1.6", default-features = false, features = ["std", "consensus", "eips", "rlp", "k256"] }
+alloy-primitives = "1"
+serde_json = "1"
+hex = "0.4"
+futures = "0.3"
+tokio = { version = "1.49", features = ["rt", "sync", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "json"] }
+alloy-transport = { version = "2", optional = true }
+alloy-json-rpc = { version = "2", optional = true }
+alloy-transport-v1 = { package = "alloy-transport", version = "1", optional = true }
+alloy-json-rpc-v1 = { package = "alloy-json-rpc", version = "1", optional = true }
+tower = { version = "0.5", optional = true }
+
+[features]
+default = ["alloy", "logs"]
+# eth_getLogs over more than 8 blocks by log proofs (SP1's verifier; OpenVM's through its helper).
+logs = ["dep:willow-logs-verify", "dep:willow-logs-verify-wasm", "dep:logset-query", "dep:willow-logs-verify-openvm"]
+# The alloy 2 transport.
+alloy = ["dep:alloy-transport", "dep:alloy-json-rpc", "dep:tower"]
+# The alloy 1 transport.
+alloy-v1 = ["dep:alloy-transport-v1", "dep:alloy-json-rpc-v1", "dep:tower"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+alloy-rlp = "0.3"
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha2 = "0.10"
+willow-logs-verify-openvm = { path = "../../zkvm/logset-guest-openvm/verify", default-features = false }
+
+# The alloy provider tests (src/tests/transport.rs) need alloy-provider, which the repo's pinned
+# alloy can't build; the release check runs them.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(willow_provider_tests)", "cfg(willow_release_tests)"] }
+
+[workspace]
+resolver = "2"

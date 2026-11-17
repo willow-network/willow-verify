@@ -1,0 +1,46 @@
+[package]
+name = "willow-logs-verify-openvm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+
+
+
+
+
+
+
+[dependencies]
+logset-query = { path = "../../logset-guest/query" }
+hex = "0.4"
+openvm-verify-stark-host = { git = "https://github.com/openvm-org/openvm.git", tag = "v2.0.2", optional = true }
+openvm-stark-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.1", default-features = false, optional = true }
+openvm-stark-sdk = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.1", default-features = false, features = ["cpu-backend"], optional = true }
+bitcode = { version = "0.6", features = ["serde"], optional = true }
+zstd = { version = "0.13", optional = true }
+sha2 = { version = "0.10", optional = true }
+
+[features]
+default = ["verifier"]
+
+
+
+
+verifier = [
+  "dep:openvm-verify-stark-host",
+  "dep:openvm-stark-backend",
+  "dep:openvm-stark-sdk",
+  "dep:bitcode",
+  "dep:zstd",
+  "dep:sha2",
+]
+
+
+[[bin]]
+name = "willow-logs-verify-openvm"
+path = "src/main.rs"
+required-features = ["verifier"]
+
+[dev-dependencies]
+serde_json = "1"

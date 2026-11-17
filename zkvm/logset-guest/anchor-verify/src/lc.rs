@@ -1,0 +1,894 @@
+
+
+
+
+
+
+
+use crate::bls::{fast_aggregate_verify, BlsFailure};
+use crate::{Failure, Kind};
+use alloy_primitives::{keccak256, U256};
+use anchor_core::gindex::{finalized_root_gindex, next_sync_committee_gindex};
+use anchor_core::header::{
+    beacon_block_header_root, bit_set, compute_domain, compute_signing_root,
+    sync_committee_hash_tree_root, DOMAIN_SYNC_COMMITTEE, SYNC_COMMITTEE_SIZE,
+};
+use anchor_core::schedule::{fork_at_slot, fork_version_bytes, SLOTS_PER_SYNC_COMMITTEE_PERIOD};
+use beacon_cl_core::fork::{verify_branch, ForkVersion};
+use beacon_cl_core::ssz::{merkleize, mix_in_length, uint64_leaf, Bytes32};
+use serde_json::{Map, Value};
+use std::collections::BTreeMap;
+
+
+pub const GENESIS_VALIDATORS_ROOT: Bytes32 =
+    hex32("4b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe95");
+pub const GENESIS_TIME: u64 = 1_606_824_023;
+pub const SECONDS_PER_SLOT: u64 = 12;
+
+
+pub const MAX_START_AGE_SECS: u64 = 30 * 86_400;
+
+const EXECUTION_PAYLOAD_GINDEX: u64 = 25;
+
+pub const MIN_PARTICIPANTS: usize = SYNC_COMMITTEE_SIZE * 2 / 3 + 1;
+
+pub const MAX_UPDATES: usize = 16;
+
+const fn hex32(s: &str) -> Bytes32 {
+    let b = s.as_bytes();
+    let mut out = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        out[i] = (nib(b[2 * i]) << 4) | nib(b[2 * i + 1]);
+        i += 1;
+    }
+    out
+}
+
+const fn nib(c: u8) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        _ => panic!("not lowercase hex"),
+    }
+}
+
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Network {
+    #[default]
+    Mainnet,
+    Sepolia,
+}
+
+
+
+pub mod sepolia {
+    use super::{hex32, Bytes32};
+
+    pub const GENESIS_VALIDATORS_ROOT: Bytes32 =
+        hex32("d8ea171f3c94aea21ebc42a1ed61052acf3f9209c00e4efbaaddac09ed9b8078");
+    pub const GENESIS_TIME: u64 = 1_655_733_600;
+    pub const GLOAS_SLOT: u64 = 353_024 * 32;
+    pub const GLOAS_VERSION: [u8; 4] = [0x90, 0x00, 0x00, 0x76];
+    pub const FINALIZED_ROOT_GINDEX: u64 = 735;
+    pub const CURRENT_SYNC_COMMITTEE_GINDEX: u64 = 2945;
+    pub const NEXT_SYNC_COMMITTEE_GINDEX: u64 = 2946;
+
+    pub const EXECUTION_BLOCK_HASH_GINDEX: u64 = 2856;
+
+
+
+    pub const PINNED_ROOT: Bytes32 =
+        hex32("5d5b94c9c82d9f56409699948380d58de837f39a170e0de81c547642d3b58415");
+    pub const PINNED_SLOT: u64 = 11_577_216;
+}
+
+
+
+#[derive(Clone, Copy)]
+struct Rules {
+    name: &'static str,
+    version: [u8; 4],
+    current_committee: u64,
+    next_committee: u64,
+    finalized_root: u64,
+    fork: Option<ForkVersion>,
+}
+
+impl Network {
+    pub fn genesis_time(self) -> u64 {
+        match self {
+            Network::Mainnet => GENESIS_TIME,
+            Network::Sepolia => sepolia::GENESIS_TIME,
+        }
+    }
+
+    fn genesis_validators_root(self) -> &'static Bytes32 {
+        match self {
+            Network::Mainnet => &GENESIS_VALIDATORS_ROOT,
+            Network::Sepolia => &sepolia::GENESIS_VALIDATORS_ROOT,
+        }
+    }
+
+    pub fn slot_time(self, slot: u64) -> u64 {
+        self.genesis_time() + slot * SECONDS_PER_SLOT
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Network::Mainnet => "Ethereum",
+            Network::Sepolia => "Sepolia",
+        }
+    }
+
+
+    fn known(self) -> &'static [&'static str] {
+        match self {
+            Network::Mainnet => &["capella", "deneb", "electra", "fulu"],
+            Network::Sepolia => &["gloas"],
+        }
+    }
+
+
+    pub fn light_client(self) -> Option<&'static str> {
+        match self {
+            Network::Mainnet => None,
+            Network::Sepolia => Some("sepolia"),
+        }
+    }
+
+    fn rules(self, slot: u64) -> Result<Rules, Failure> {
+        match self {
+            Network::Mainnet => {
+                let fork = fork_of(slot)?;
+                Ok(Rules {
+                    name: fork_name(fork),
+                    version: fork_version_bytes(fork),
+                    current_committee: current_sync_committee_gindex(fork),
+                    next_committee: next_sync_committee_gindex(fork),
+                    finalized_root: finalized_root_gindex(fork),
+                    fork: Some(fork),
+                })
+            }
+            Network::Sepolia if slot < sepolia::GLOAS_SLOT => Err(Failure::new(
+                Kind::Unreachable,
+                format!("Sepolia slot {slot} is before Gloas, where this light client starts"),
+            )),
+            Network::Sepolia => Ok(Rules {
+                name: "gloas",
+                version: sepolia::GLOAS_VERSION,
+                current_committee: sepolia::CURRENT_SYNC_COMMITTEE_GINDEX,
+                next_committee: sepolia::NEXT_SYNC_COMMITTEE_GINDEX,
+                finalized_root: sepolia::FINALIZED_ROOT_GINDEX,
+                fork: None,
+            }),
+        }
+    }
+}
+
+pub fn period(slot: u64) -> u64 {
+    slot / SLOTS_PER_SYNC_COMMITTEE_PERIOD
+}
+
+pub fn slot_time(slot: u64) -> u64 {
+    GENESIS_TIME + slot * SECONDS_PER_SLOT
+}
+
+
+const fn current_sync_committee_gindex(fork: ForkVersion) -> u64 {
+    match fork {
+        ForkVersion::Capella | ForkVersion::Deneb => 54,
+        ForkVersion::Electra | ForkVersion::Fulu => 86,
+    }
+}
+
+const fn fork_name(fork: ForkVersion) -> &'static str {
+    match fork {
+        ForkVersion::Capella => "capella",
+        ForkVersion::Deneb => "deneb",
+        ForkVersion::Electra => "electra",
+        ForkVersion::Fulu => "fulu",
+    }
+}
+
+fn bad(message: impl Into<String>) -> Failure {
+    Failure::new(Kind::MalformedInput, message)
+}
+
+fn rejected(message: impl Into<String>) -> Failure {
+    Failure::new(Kind::Rejected, message)
+}
+
+fn field<'a>(v: &'a Value, name: &str) -> Result<&'a Value, Failure> {
+    v.get(name).ok_or_else(|| bad(format!("no {name}")))
+}
+
+fn text<'a>(v: &'a Value, name: &str) -> Result<&'a str, Failure> {
+    field(v, name)?
+        .as_str()
+        .ok_or_else(|| bad(format!("{name} is not a string")))
+}
+
+
+fn dec(v: &Value, name: &str) -> Result<u64, Failure> {
+    let s = text(v, name)?;
+    if s.is_empty() || s.len() > 20 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad(format!("{name} is not a decimal number")));
+    }
+    s.parse()
+        .map_err(|_| bad(format!("{name} is not a uint64")))
+}
+
+pub fn bytes_of(s: &str, name: &str) -> Result<Vec<u8>, Failure> {
+    let h = s
+        .strip_prefix("0x")
+        .ok_or_else(|| bad(format!("{name} is not 0x hex")))?;
+    hex::decode(h).map_err(|_| bad(format!("{name} is not hex")))
+}
+
+fn fixed<const N: usize>(v: &Value, name: &str) -> Result<[u8; N], Failure> {
+    bytes_of(text(v, name)?, name)?
+        .try_into()
+        .map_err(|_| bad(format!("{name} is not {N} bytes")))
+}
+
+fn branch(v: &Value, name: &str, depth: usize) -> Result<Vec<Bytes32>, Failure> {
+    let list = field(v, name)?
+        .as_array()
+        .ok_or_else(|| bad(format!("{name} is not a list")))?;
+    if list.len() != depth {
+        return Err(rejected(format!(
+            "{name} has {} nodes, not {depth}",
+            list.len()
+        )));
+    }
+    list.iter()
+        .map(|n| {
+            n.as_str()
+                .ok_or_else(|| bad(format!("{name} holds a non-string")))
+                .and_then(|s| bytes_of(s, name))
+                .and_then(|b| {
+                    b.try_into()
+                        .map_err(|_| bad(format!("{name} node is not 32 bytes")))
+                })
+        })
+        .collect()
+}
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Header {
+    pub slot: u64,
+    pub proposer_index: u64,
+    pub parent_root: Bytes32,
+    pub state_root: Bytes32,
+    pub body_root: Bytes32,
+}
+
+impl Header {
+    fn parse(v: &Value) -> Result<Self, Failure> {
+        Ok(Header {
+            slot: dec(v, "slot")?,
+            proposer_index: dec(v, "proposer_index")?,
+            parent_root: fixed(v, "parent_root")?,
+            state_root: fixed(v, "state_root")?,
+            body_root: fixed(v, "body_root")?,
+        })
+    }
+
+    pub fn root(&self) -> Bytes32 {
+        beacon_block_header_root(
+            self.slot,
+            self.proposer_index,
+            &self.parent_root,
+            &self.state_root,
+            &self.body_root,
+        )
+    }
+
+    fn is_zero(&self) -> bool {
+        *self
+            == Header {
+                slot: 0,
+                proposer_index: 0,
+                parent_root: [0; 32],
+                state_root: [0; 32],
+                body_root: [0; 32],
+            }
+    }
+}
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Execution {
+    pub number: u64,
+    pub hash: Bytes32,
+    pub state_root: Bytes32,
+    pub timestamp: u64,
+
+    pub gas_limit: u64,
+    pub base_fee: U256,
+    pub prev_randao: Bytes32,
+    pub fee_recipient: [u8; 20],
+}
+
+
+const PAYLOAD_FIELDS: [&str; 17] = [
+    "parent_hash",
+    "fee_recipient",
+    "state_root",
+    "receipts_root",
+    "logs_bloom",
+    "prev_randao",
+    "block_number",
+    "gas_limit",
+    "gas_used",
+    "timestamp",
+    "extra_data",
+    "base_fee_per_gas",
+    "block_hash",
+    "transactions_root",
+    "withdrawals_root",
+    "blob_gas_used",
+    "excess_blob_gas",
+];
+
+
+
+fn execution_root(fork: ForkVersion, v: &Value) -> Result<(Bytes32, Execution), Failure> {
+    let m: &Map<String, Value> = v
+        .as_object()
+        .ok_or_else(|| bad("execution is not an object"))?;
+    let count = match fork {
+        ForkVersion::Capella => 15,
+        ForkVersion::Deneb | ForkVersion::Electra | ForkVersion::Fulu => 17,
+    };
+    let names = &PAYLOAD_FIELDS[..count];
+    if m.len() != count || names.iter().any(|n| !m.contains_key(*n)) {
+        return Err(bad(format!(
+            "execution header does not have the {} fields of a {} header",
+            count,
+            fork_name(fork)
+        )));
+    }
+    let mut leaves = Vec::with_capacity(count);
+    for &n in names {
+        let leaf = match n {
+            "fee_recipient" => {
+                let a: [u8; 20] = fixed(v, n)?;
+                let mut l = [0u8; 32];
+                l[..20].copy_from_slice(&a);
+                l
+            }
+            "logs_bloom" => {
+                let b: [u8; 256] = fixed(v, n)?;
+                let chunks: Vec<Bytes32> =
+                    b.chunks_exact(32).map(|c| c.try_into().unwrap()).collect();
+                merkleize(&chunks, 3)
+            }
+            "block_number" | "gas_limit" | "gas_used" | "timestamp" | "blob_gas_used"
+            | "excess_blob_gas" => uint64_leaf(dec(v, n)?),
+            "extra_data" => {
+                let b = bytes_of(text(v, n)?, n)?;
+                if b.len() > 32 {
+                    return Err(bad("extra_data is over 32 bytes"));
+                }
+                let mut l = [0u8; 32];
+                l[..b.len()].copy_from_slice(&b);
+                mix_in_length(&l, b.len() as u64)
+            }
+            "base_fee_per_gas" => {
+                let s = text(v, n)?;
+                if s.is_empty() || s.len() > 78 || !s.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(bad("base_fee_per_gas is not a decimal number"));
+                }
+                U256::from_str_radix(s, 10)
+                    .map_err(|_| bad("base_fee_per_gas is not a uint256"))?
+                    .to_le_bytes::<32>()
+            }
+            _ => fixed(v, n)?,
+        };
+        leaves.push(leaf);
+    }
+    let depth = count.next_power_of_two().trailing_zeros() as usize;
+    let exec = Execution {
+        number: dec(v, "block_number")?,
+        hash: fixed(v, "block_hash")?,
+        state_root: fixed(v, "state_root")?,
+        timestamp: dec(v, "timestamp")?,
+        gas_limit: dec(v, "gas_limit")?,
+        base_fee: U256::from_le_bytes(leaves[11]),
+        prev_randao: fixed(v, "prev_randao")?,
+        fee_recipient: fixed(v, "fee_recipient")?,
+    };
+    Ok((merkleize(&leaves, depth), exec))
+}
+
+
+#[derive(Clone, Copy, Debug)]
+pub struct LcHeader {
+    pub beacon: Header,
+    pub execution: Execution,
+}
+
+fn fork_of(slot: u64) -> Result<ForkVersion, Failure> {
+    fork_at_slot(slot).ok_or_else(|| rejected(format!("slot {slot} is before Capella")))
+}
+
+impl LcHeader {
+    fn parse(net: Network, v: &Value) -> Result<Self, Failure> {
+        let beacon = Header::parse(field(v, "beacon")?)?;
+        let Some(fork) = net.rules(beacon.slot)?.fork else {
+            return Ok(LcHeader {
+                beacon,
+                execution: gloas_execution(v, &beacon)?,
+            });
+        };
+        let (root, execution) = execution_root(fork, field(v, "execution")?)?;
+        let b = branch(v, "execution_branch", 4)?;
+        if !verify_branch(&root, &b, EXECUTION_PAYLOAD_GINDEX, &beacon.body_root) {
+            return Err(rejected(format!(
+                "the execution block of slot {} is not under its body root",
+                beacon.slot
+            )));
+        }
+        Ok(LcHeader { beacon, execution })
+    }
+
+
+    fn beacon_only(v: &Value) -> Result<Header, Failure> {
+        Header::parse(field(v, "beacon")?)
+    }
+}
+
+
+
+fn gloas_execution(v: &Value, beacon: &Header) -> Result<Execution, Failure> {
+    let hash: Bytes32 = fixed(v, "execution_block_hash")?;
+    let g = sepolia::EXECUTION_BLOCK_HASH_GINDEX;
+    let b = branch(
+        v,
+        "execution_branch",
+        beacon_cl_core::fork::depth_for_gindex(g),
+    )?;
+    if !verify_branch(&hash, &b, g, &beacon.body_root) {
+        return Err(rejected(format!(
+            "the execution block of slot {} is not under its body root",
+            beacon.slot
+        )));
+    }
+    let rlp = bytes_of(text(v, "execution_header")?, "execution_header")?;
+    if keccak256(&rlp).0 != hash {
+        return Err(rejected(format!(
+            "the execution header sent for slot {} is not its block's",
+            beacon.slot
+        )));
+    }
+    execution_from_rlp(&rlp)
+}
+
+
+pub fn execution_from_rlp(rlp: &[u8]) -> Result<Execution, Failure> {
+    let f = crate::l2::rlp_items(rlp)?;
+    if f.len() < 16 {
+        return Err(bad("an execution header with too few fields"));
+    }
+    let b32 = |i: usize, what: &str| -> Result<Bytes32, Failure> {
+        f[i].try_into()
+            .map_err(|_| bad(format!("{what} is not 32 bytes")))
+    };
+    if f[15].len() > 32 || f[15].first() == Some(&0) {
+        return Err(bad("baseFeePerGas is not a canonical uint256"));
+    }
+    Ok(Execution {
+        number: crate::l2::uint(f[8], "number")?,
+        hash: keccak256(rlp).0,
+        state_root: b32(3, "stateRoot")?,
+        timestamp: crate::l2::uint(f[11], "timestamp")?,
+        gas_limit: crate::l2::uint(f[9], "gasLimit")?,
+        base_fee: U256::from_be_slice(f[15]),
+        prev_randao: b32(13, "mixHash")?,
+        fee_recipient: f[2].try_into().map_err(|_| bad("miner is not 20 bytes"))?,
+    })
+}
+
+
+#[derive(Clone)]
+pub struct Committee {
+    pub pubkeys: Box<[[u8; 48]; SYNC_COMMITTEE_SIZE]>,
+    pub aggregate: [u8; 48],
+}
+
+impl Committee {
+    fn parse(v: &Value) -> Result<Self, Failure> {
+        let keys = field(v, "pubkeys")?
+            .as_array()
+            .ok_or_else(|| bad("pubkeys is not a list"))?;
+        if keys.len() != SYNC_COMMITTEE_SIZE {
+            return Err(rejected(format!("a committee of {} keys", keys.len())));
+        }
+        let mut pubkeys = Box::new([[0u8; 48]; SYNC_COMMITTEE_SIZE]);
+        for (pk, k) in pubkeys.iter_mut().zip(keys) {
+            let s = k.as_str().ok_or_else(|| bad("a pubkey is not a string"))?;
+            *pk = bytes_of(s, "pubkey")?
+                .try_into()
+                .map_err(|_| bad("a pubkey is not 48 bytes"))?;
+        }
+        Ok(Committee {
+            pubkeys,
+            aggregate: fixed(v, "aggregate_pubkey")?,
+        })
+    }
+
+    pub fn root(&self) -> Bytes32 {
+        sync_committee_hash_tree_root(&self.pubkeys, &self.aggregate)
+    }
+}
+
+
+#[derive(Clone, Copy, Debug)]
+pub struct Finality {
+    pub attested: LcHeader,
+    pub finalized: LcHeader,
+    pub signers: usize,
+    pub period: u64,
+}
+
+
+#[derive(Clone)]
+pub struct LightClient {
+    pub net: Network,
+    pub checkpoint_root: Bytes32,
+    pub checkpoint_slot: u64,
+    pub committees: BTreeMap<u64, Committee>,
+
+
+    chain: Option<(Value, BTreeMap<u64, Value>)>,
+}
+
+
+fn versioned(net: Network, v: &Value) -> Result<(&'static str, &Value), Failure> {
+    let version = text(v, "version")?;
+    let Some(name) = net.known().iter().find(|k| **k == version) else {
+        return Err(Failure::new(
+            Kind::UnknownFork,
+            format!(
+                "{}'s light client data is from an upgrade newer than this page",
+                net.name()
+            ),
+        ));
+    };
+    Ok((name, field(v, "data")?))
+}
+
+fn check_version(net: Network, name: &str, slot: u64) -> Result<Rules, Failure> {
+    let r = net.rules(slot)?;
+    if r.name != name {
+        return Err(rejected(format!(
+            "a {name} response for slot {slot}, which is {}",
+            r.name
+        )));
+    }
+    Ok(r)
+}
+
+
+fn aggregate(v: &Value) -> Result<([u8; 64], [u8; 96]), Failure> {
+    let a = field(v, "sync_aggregate")?;
+    Ok((
+        fixed(a, "sync_committee_bits")?,
+        fixed(a, "sync_committee_signature")?,
+    ))
+}
+
+
+fn verify_signature(
+    net: Network,
+    committee: &Committee,
+    attested: &Header,
+    bits: &[u8; 64],
+    signature: &[u8; 96],
+    signature_slot: u64,
+) -> Result<usize, Failure> {
+    let signers = (0..SYNC_COMMITTEE_SIZE)
+        .filter(|&i| bit_set(bits, i))
+        .count();
+    if signers < MIN_PARTICIPANTS {
+        return Err(rejected(format!(
+            "{signers} of 512 validators signed, fewer than the {MIN_PARTICIPANTS} needed"
+        )));
+    }
+    let r = net.rules(signature_slot.saturating_sub(1))?;
+    let domain = compute_domain(
+        DOMAIN_SYNC_COMMITTEE,
+        r.version,
+        net.genesis_validators_root(),
+    );
+    let signing_root = compute_signing_root(&attested.root(), &domain);
+    fast_aggregate_verify(&committee.pubkeys[..], bits, signature, &signing_root).map_err(|e| {
+        rejected(match e {
+            BlsFailure::InvalidPublicKey(i) => format!("committee key {i} is not a valid key"),
+            BlsFailure::InvalidSignature => "the signature is not a valid BLS signature".into(),
+            BlsFailure::AggregateIsIdentity => "no signers".into(),
+            BlsFailure::VerificationFailed => format!(
+                "the validators' signature over slot {} does not verify",
+                attested.slot
+            ),
+        })
+    })
+}
+
+impl LightClient {
+    pub fn new(checkpoint_root: Bytes32, checkpoint_slot: u64) -> Self {
+        Self::on(Network::Mainnet, checkpoint_root, checkpoint_slot)
+    }
+
+
+    pub fn on(net: Network, checkpoint_root: Bytes32, checkpoint_slot: u64) -> Self {
+        LightClient {
+            net,
+            checkpoint_root,
+            checkpoint_slot,
+            committees: BTreeMap::new(),
+            chain: None,
+        }
+    }
+
+
+    pub fn check_age(&self, now: u64) -> Result<(), Failure> {
+        if now.saturating_sub(self.net.slot_time(self.checkpoint_slot)) > MAX_START_AGE_SECS {
+            return Err(Failure::new(
+                Kind::StaleCheckpoint,
+                format!(
+                    "this page's starting point on {} is more than 30 days old",
+                    self.net.name()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+
+
+    pub fn bootstrap(&mut self, v: &Value) -> Result<u64, Failure> {
+        let (name, d) = versioned(self.net, v)?;
+        let header = Header::parse(field(field(d, "header")?, "beacon")?)?;
+        if header.root() != self.checkpoint_root || header.slot != self.checkpoint_slot {
+            return Err(rejected("the bootstrap is not for this page's checkpoint"));
+        }
+        let rules = check_version(self.net, name, header.slot)?;
+        let committee = Committee::parse(field(d, "current_sync_committee")?)?;
+        let g = rules.current_committee;
+        let b = branch(
+            d,
+            "current_sync_committee_branch",
+            beacon_cl_core::fork::depth_for_gindex(g),
+        )?;
+        if !verify_branch(&committee.root(), &b, g, &header.state_root) {
+            return Err(rejected(
+                "the checkpoint's sync committee is not under its state root",
+            ));
+        }
+        let p = period(header.slot);
+        self.committees.clear();
+        self.committees.insert(p, committee);
+        self.chain = Some((v.clone(), BTreeMap::new()));
+        Ok(p)
+    }
+
+
+
+    pub fn apply_update(&mut self, v: &Value) -> Result<Option<u64>, Failure> {
+        let (_, d) = versioned(self.net, v)?;
+        let attested = Header::parse(field(field(d, "attested_header")?, "beacon")?)?;
+        if self.committees.contains_key(&(period(attested.slot) + 1)) {
+            return Ok(None);
+        }
+        let (p, next) = self.check_update(v)?;
+        self.committees.insert(p + 1, next);
+        if let Some((_, updates)) = self.chain.as_mut() {
+            updates.insert(p, v.clone());
+        }
+        Ok(Some(p + 1))
+    }
+
+
+
+    pub fn check_update(&self, v: &Value) -> Result<(u64, Committee), Failure> {
+        let (name, d) = versioned(self.net, v)?;
+        let attested = Header::parse(field(field(d, "attested_header")?, "beacon")?)?;
+        let rules = check_version(self.net, name, attested.slot)?;
+        let signature_slot = dec(d, "signature_slot")?;
+        let p = period(attested.slot);
+        if signature_slot <= attested.slot {
+            return Err(rejected(format!(
+                "the update for period {p} is signed before its slot"
+            )));
+        }
+        if period(signature_slot) != p {
+            return Err(Failure::new(
+                Kind::Unreachable,
+                format!("Willow's update for period {p} is signed in the next period, so it cannot hand over the committee"),
+            ));
+        }
+        let committee = self.committees.get(&p).ok_or_else(|| {
+            Failure::new(
+                Kind::Unreachable,
+                format!("an update for period {p}, which this light client has not reached"),
+            )
+        })?;
+        let (bits, signature) = aggregate(d)?;
+        verify_signature(
+            self.net,
+            committee,
+            &attested,
+            &bits,
+            &signature,
+            signature_slot,
+        )?;
+        let next = Committee::parse(field(d, "next_sync_committee")?)?;
+        let g = rules.next_committee;
+        let b = branch(
+            d,
+            "next_sync_committee_branch",
+            beacon_cl_core::fork::depth_for_gindex(g),
+        )?;
+        if !verify_branch(&next.root(), &b, g, &attested.state_root) {
+            return Err(rejected(format!(
+                "period {}'s committee is not under the signed state root",
+                p + 1
+            )));
+        }
+        let finalized = LcHeader::beacon_only(field(d, "finalized_header")?)?;
+        if !finalized.is_zero() {
+            let g = rules.finalized_root;
+            let fb = branch(
+                d,
+                "finality_branch",
+                beacon_cl_core::fork::depth_for_gindex(g),
+            )?;
+            if finalized.slot > attested.slot
+                || !verify_branch(&finalized.root(), &fb, g, &attested.state_root)
+            {
+                return Err(rejected(format!(
+                    "period {p}'s finalized header is not under the signed state root"
+                )));
+            }
+        }
+        Ok((p, next))
+    }
+
+
+    pub fn need(&self, sig_period: u64, now: u64) -> Result<(), Failure> {
+
+        let now_period = period(now.saturating_sub(self.net.genesis_time()) / SECONDS_PER_SLOT);
+        let named = |mut v: serde_json::Value| {
+            if let (Some(lc), Some(o)) = (self.net.light_client(), v.as_object_mut()) {
+                o.insert("lightClient".into(), lc.into());
+            }
+            v
+        };
+        if sig_period > now_period + 1 {
+            return Err(rejected(format!(
+                "signed in period {sig_period}, which has not begun"
+            )));
+        }
+        let (Some(&lo), Some(&hi)) = (
+            self.committees.keys().next(),
+            self.committees.keys().next_back(),
+        ) else {
+            let f = Failure::new(Kind::NeedBootstrap, "no committee yet");
+            return Err(match self.net.light_client() {
+                Some(lc) => f.with(serde_json::json!({"lightClient": lc})),
+                None => f,
+            });
+        };
+        if sig_period > hi {
+            return Err(
+                Failure::new(Kind::NeedUpdates, "updates needed").with(named(
+                    serde_json::json!({"from": hi, "count": sig_period - hi}),
+                )),
+            );
+        }
+        if sig_period < lo {
+            return Err(Failure::new(
+                Kind::Unreachable,
+                format!("signed in period {sig_period}, before this page's starting point"),
+            ));
+        }
+        Ok(())
+    }
+
+
+
+    pub fn finality(&self, v: &Value, now: u64) -> Result<Finality, Failure> {
+        let (name, d) = versioned(self.net, v)?;
+        let signature_slot = dec(d, "signature_slot")?;
+        let sig_period = period(signature_slot);
+        self.need(sig_period, now)?;
+        let attested = LcHeader::parse(self.net, field(d, "attested_header")?)?;
+        let rules = check_version(self.net, name, attested.beacon.slot)?;
+        let finalized = LcHeader::parse(self.net, field(d, "finalized_header")?)?;
+        if signature_slot <= attested.beacon.slot
+            || finalized.beacon.slot > attested.beacon.slot
+            || finalized.beacon.is_zero()
+        {
+            return Err(rejected("the finality update's slots are out of order"));
+        }
+        let (bits, signature) = aggregate(d)?;
+        let committee = &self.committees[&sig_period];
+        let signers = verify_signature(
+            self.net,
+            committee,
+            &attested.beacon,
+            &bits,
+            &signature,
+            signature_slot,
+        )?;
+        let g = rules.finalized_root;
+        let fb = branch(
+            d,
+            "finality_branch",
+            beacon_cl_core::fork::depth_for_gindex(g),
+        )?;
+        if !verify_branch(
+            &finalized.beacon.root(),
+            &fb,
+            g,
+            &attested.beacon.state_root,
+        ) {
+            return Err(rejected(
+                "the finalized header is not under the signed state root",
+            ));
+        }
+        if finalized.execution.number > attested.execution.number {
+            return Err(rejected("the finalized block is after the signed head"));
+        }
+        Ok(Finality {
+            attested,
+            finalized,
+            signers,
+            period: sig_period,
+        })
+    }
+
+
+
+    pub fn saved(&self) -> Value {
+        match &self.chain {
+            Some((bootstrap, updates)) => serde_json::json!({
+                "root": format!("0x{}", hex::encode(self.checkpoint_root)),
+                "bootstrap": bootstrap,
+                "updates": updates.values().collect::<Vec<_>>(),
+            }),
+            None => Value::Null,
+        }
+    }
+
+
+
+
+    pub fn restore(&mut self, v: &Value, now: u64) -> Result<Option<u64>, Failure> {
+        let root = format!("0x{}", hex::encode(self.checkpoint_root));
+        if v.get("root").and_then(Value::as_str) != Some(root.as_str()) {
+            return Ok(None);
+        }
+        self.check_age(now)?;
+        self.bootstrap(field(v, "bootstrap")?)?;
+        let updates = field(v, "updates")?
+            .as_array()
+            .ok_or_else(|| bad("kept updates are not a list"))?;
+        let mut newest = None;
+        for u in updates {
+            newest = self.apply_update(u)?.or(newest);
+        }
+        Ok(newest)
+    }
+
+
+    pub fn reset(&mut self) {
+        self.committees.clear();
+        self.chain = None;
+    }
+}

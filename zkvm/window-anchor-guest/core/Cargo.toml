@@ -1,0 +1,37 @@
+[package]
+name = "window-anchor-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[dependencies]
+beacon-cl-core = { path = "../../beacon-cl-guest/core" }
+
+[features]
+
+
+
+default = []
+synth = []
+
+[dev-dependencies]
+hex = "0.4"
+
+
+
+

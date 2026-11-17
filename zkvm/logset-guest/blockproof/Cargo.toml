@@ -1,0 +1,27 @@
+
+
+
+
+
+
+
+[workspace]
+resolver = "2"
+
+[package]
+name = "logset-blockproof"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+logset-blockcheck = { path = "../blockcheck" }
+alloy = { version = ">=1.1, <1.6", default-features = false, features = ["std", "consensus", "eips", "rlp", "k256"] }
+alloy-rlp = "0.3"
+alloy-primitives = "1"
+alloy-trie = "0.9"
+anyhow = "1"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

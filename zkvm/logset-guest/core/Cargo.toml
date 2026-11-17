@@ -1,0 +1,26 @@
+[package]
+name = "logset-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+willow-receipts-trie = { path = "../../../crates/receipts-trie", default-features = false }
+
+[features]
+default = []
+synth = []
+
+
+
+perblock = []
+
+index = []
+
+[dev-dependencies]
+hex = "0.4"
+flate2 = "1"
+serde_json = "1"
+alloy-trie = "0.9"
+alloy-primitives = "1"
