@@ -45,8 +45,8 @@ Modes (one):
   --block <block> [--full]                 a block (eth_getBlockByNumber; --full: every transaction)
   --state <address> [--slots k1,k2] [--code] --at <block>
                                            balance, nonce, code, storage, eth_getProof
-  --call '<call JSON>' --at <block>        eth_call, run here over proven state (Ethereum,
-                                           Unichain, Robinhood Chain)
+  --call '<call JSON>' --at <block>        eth_call, run here over proven state (Ethereum, OP
+                                           stack: 130 10 57073 480 1868; Arbitrum: 4663 42161)
   --estimate '<call JSON>' --at <block>    eth_estimateGas, searched here over proven state
   --trace '[<method>, <params>]'           a trace method's response, the block (or the call) run
                                            again here: debug_traceTransaction,

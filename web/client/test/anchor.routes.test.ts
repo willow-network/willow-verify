@@ -1,9 +1,11 @@
 // Where each light client's data is asked for, with a scripted backend: Ethereum's on
 // chain 1's route, Sepolia's and BNB's on the verified chain's own route, BNB's updates 64 at a time,
-// each kept under its own storage key; and BNB's newest block served at minLevel final.
+// each kept under its own storage key; and BNB's newest block served at minLevel final. Sepolia's
+// own blocks (11155111) as Ethereum's, on Sepolia's light client.
 import { describe, expect, it } from 'vitest';
 import { Anchors } from '../src/anchor.js';
-import type { Backend } from '../src/backend.js';
+import { lightClientOf, type Backend } from '../src/backend.js';
+import { chooseStarts, SHIPPED_STARTS } from '../src/checkpoint.js';
 import type { Reply } from '../src/http.js';
 import type { KeyValueStorage } from '../src/storage.js';
 import type { AnchorFailure, AnchorVerified, LightClientName } from '../src/verifiers.js';
@@ -55,7 +57,8 @@ function anchors(backend: Backend, rpc: ReturnType<typeof willow>['rpc'], storag
     backend,
     rpc,
     storage,
-    checkpointRoot: async (lc) => (lc === 'sepolia' ? '0xsepolia' : lc === 'bnb' ? '0xbnb' : '0xethereum'),
+    checkpointRoot: async (lc) => (lc === 'sepolia' ? '0xsepolia' : lc === 'bnb' ? '0xbnb' : lc === 'berachain' ? '0xberachain' : '0xethereum'),
+    startHeight: async (lc) => (lc === 'berachain' ? 28_955_000 : undefined),
     minLevel,
     headMaxAgeMs: () => 2_000,
     maxHeadAgeSec: 600,
@@ -105,6 +108,31 @@ describe('light clients on their routes', () => {
     expect([...storage.m.keys()]).toEqual(['willow-rpc:light-client']);
   });
 
+  it("opBNB's anchors rest on BNB's light client: asked on opBNB's route, kept under BNB's key", async () => {
+    const { backend, calls } = scripted([need('need-bootstrap', 'bnb'), need('need-updates', 'bnb', 133_511, 2), ok({ path: 'output', level: 'committed' })]);
+    const w = willow();
+    const storage = memory();
+    await anchors(backend, w.rpc, storage).verify(204, 16, `0x${'11'.repeat(32)}`, '{}');
+    expect(w.asked.map((x) => [x.chainId, x.method, x.params])).toEqual([
+      [204, 'willow_lightClientBootstrap', ['0xbnb']],
+      [204, 'willow_lightClientUpdates', [133_511, 2]],
+    ]);
+    expect(calls).toEqual(['bootstrap:bnb', 'updates:bnb']);
+    expect([...storage.m.keys()]).toEqual(['willow-rpc:light-client:bnb']);
+  });
+
+  it("ApeChain's anchors rest on Ethereum's light client, on chain 1's route", async () => {
+    const { backend } = scripted([need('need-bootstrap'), need('need-updates', undefined, 1906, 2), ok({ path: 'node', level: 'committed' })]);
+    const w = willow();
+    const storage = memory();
+    await anchors(backend, w.rpc, storage).verify(33139, 16, `0x${'11'.repeat(32)}`, '{}');
+    expect(w.asked.map((x) => [x.chainId, x.method, x.params])).toEqual([
+      [1, 'willow_lightClientBootstrap', ['0xethereum']],
+      [1, 'willow_lightClientUpdates', [1906, 2]],
+    ]);
+    expect([...storage.m.keys()]).toEqual(['willow-rpc:light-client']);
+  });
+
   it("each light client's kept data is restored with its own name", async () => {
     const { backend, calls } = scripted([ok()]);
     const storage = memory();
@@ -122,9 +150,75 @@ describe('light clients on their routes', () => {
     await expect(anchors(b, willow().rpc, null, 'final').head(1868, 'latest')).rejects.toMatchObject({ data: { kind: 'anchor-level' } });
   });
 
+  it("Berachain's start is asked by hash and height, its updates in one ask, on chain 80094's route", async () => {
+    const { backend, calls } = scripted([need('need-bootstrap', 'berachain'), need('need-updates', 'berachain', 28_955_000, 1_000_000), ok({ path: 'cometbft', anchorTime: 999_999_990 })]);
+    const w = willow();
+    const storage = memory();
+    await anchors(backend, w.rpc, storage).verify(80094, 16, `0x${'11'.repeat(32)}`, '{}');
+    expect(w.asked.map((x) => [x.chainId, x.method, x.params])).toEqual([
+      [80094, 'willow_lightClientBootstrap', ['0xberachain', 28_955_000]],
+      [80094, 'willow_lightClientUpdates', [28_955_000, 1_000_000]],
+    ]);
+    expect(calls).toEqual(['bootstrap:berachain', 'updates:berachain']);
+    expect([...storage.m.keys()]).toEqual(['willow-rpc:light-client:berachain']);
+  });
+
+  it("Berachain's newest block is final, aged by its header's time", async () => {
+    const { backend } = scripted([ok({ path: 'cometbft', level: 'final', anchorTime: 999_999_995 })]);
+    const head = await anchors(backend, willow().rpc, null, 'final').head(80094, 'latest');
+    expect([head.number, head.level, head.expires, head.time]).toEqual([16, 'final', Infinity, 999_999_995]);
+    const { backend: b } = scripted([ok({ path: 'cometbft', level: 'final', anchorTime: 999_000_000 })]);
+    await expect(anchors(b, willow().rpc, null, 'final').head(80094, 'latest')).rejects.toMatchObject({ data: { kind: 'anchor-stale-head' } });
+  });
+
+  it("Sepolia's own blocks use Sepolia's light client on chain 11155111's route", async () => {
+    const { backend, calls } = scripted([need('need-bootstrap', 'sepolia'), need('need-updates', 'sepolia', 1415, 1), ok({ path: 'hops' })]);
+    const w = willow();
+    const storage = memory();
+    await anchors(backend, w.rpc, storage).verify(11155111, 16, `0x${'11'.repeat(32)}`, '{}');
+    expect(w.asked.map((x) => [x.chainId, x.method, x.params])).toEqual([
+      [11155111, 'willow_lightClientBootstrap', ['0xsepolia']],
+      [11155111, 'willow_lightClientUpdates', [1415, 1]],
+    ]);
+    expect(calls).toEqual(['bootstrap:sepolia', 'updates:sepolia']);
+    expect([...storage.m.keys()]).toEqual(['willow-rpc:light-client:sepolia']);
+  });
+
+  it("Sepolia's newest block at minLevel final is its finalized one, its signed head counts 10 minutes, as Ethereum's", async () => {
+    const { backend } = scripted([ok({ path: 'history', level: 'final', finalized: 16, head: 40, headTime: 999_999_990 })]);
+    const w = willow();
+    const head = await anchors(backend, w.rpc, null, 'final').head(11155111, 'latest');
+    expect(w.asked.map((x) => [x.chainId, x.method, x.params])).toEqual([[11155111, 'willow_getBlockAnchor', ['finalized']]]);
+    expect([head.number, head.level, head.expires]).toEqual([16, 'final', Infinity]);
+    const { backend: b } = scripted([ok({ path: 'head', level: 'signed', finalized: 8, head: 16, headTime: 999_999_990 })]);
+    const signed = await anchors(b, willow().rpc, null).head(11155111, 'latest');
+    expect([signed.number, signed.level, signed.expires]).toEqual([16, 'signed', (999_999_990 + 600) * 1000]);
+  });
+
   it("a BNB block one validator sealed counts 10 minutes from its time", async () => {
     const { backend } = scripted([ok({ path: 'parlia', level: 'signed', anchorTime: 999_999_990 })]);
     const got = await anchors(backend, willow().rpc, null).block(56, 16, `0x${'11'.repeat(32)}`);
     expect(got.expires).toBe((999_999_990 + 600) * 1000);
   });
+});
+
+describe("Berachain's start", () => {
+  const newer = { height: SHIPPED_STARTS.berachain.height + 100_000, hash: `0x${'ab'.repeat(32)}`, time: SHIPPED_STARTS.berachain.time + 200_000 };
+  const fetchWith = (body: unknown) => (async () => ({ json: async () => body })) as unknown as typeof fetch;
+
+  it('is the shipped one while fresh, then checkpoint.json\'s newer one', async () => {
+    expect(lightClientOf(80094)).toBe('berachain');
+    const fresh = await chooseStarts({ fetch: fetchWith({ berachain: newer }), nowSec: () => SHIPPED_STARTS.berachain.time + 60, ...pinned() });
+    expect(fresh.berachain).toEqual(SHIPPED_STARTS.berachain);
+    const later = await chooseStarts({ fetch: fetchWith({ berachain: newer }), nowSec: () => SHIPPED_STARTS.berachain.time + 7 * 3600, ...pinned() });
+    expect(later.berachain).toEqual(newer);
+    // Not a start, or older: the shipped one stays.
+    const junk = await chooseStarts({ fetch: fetchWith({ berachain: { height: -1, hash: '0x12', time: 1 } }), nowSec: () => SHIPPED_STARTS.berachain.time + 7 * 3600, ...pinned() });
+    expect(junk.berachain).toEqual(SHIPPED_STARTS.berachain);
+  });
+
+  /** The other starts passed in, so only Berachain's is chosen. */
+  function pinned() {
+    return { sepolia: SHIPPED_STARTS.sepolia, bnb: SHIPPED_STARTS.bnb };
+  }
 });

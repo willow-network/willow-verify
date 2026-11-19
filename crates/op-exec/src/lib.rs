@@ -4,7 +4,11 @@
 
 
 
+
+
 pub mod block;
+mod memguard;
+pub mod precompiles;
 
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 pub use alloy_rpc_types_eth::{state::StateOverride, BlockOverrides};
@@ -22,24 +26,142 @@ use revm::{Database, DatabaseCommit, DatabaseRef, ExecuteEvm};
 
 pub const UNICHAIN: u64 = 130;
 
+pub const OP_MAINNET: u64 = 10;
+
+pub const INK: u64 = 57073;
+
+pub const WORLD_CHAIN: u64 = 480;
+
+pub const SONEIUM: u64 = 1868;
+
 pub const GAS_CAP: u64 = 50_000_000;
 
 
-const FORKS: [(u64, OpSpecId); 5] = [
-    (0, OpSpecId::GRANITE),
-    (1_736_445_601, OpSpecId::HOLOCENE),
-    (1_746_806_401, OpSpecId::ISTHMUS),
-    (1_764_691_201, OpSpecId::JOVIAN),
-    (1_783_526_401, OpSpecId::KARST),
+
+#[derive(Debug)]
+pub struct Chain {
+    pub id: u64,
+    pub name: &'static str,
+
+    forks: &'static [(u64, OpSpecId)],
+
+
+    next: Option<(&'static str, u64)>,
+}
+
+
+const KARST: u64 = 1_783_526_401;
+const LAGOON: Option<(&str, u64)> = Some(("Lagoon", 1_799_683_201));
+
+
+pub const CHAINS: [Chain; 5] = [
+
+    Chain {
+        id: UNICHAIN,
+        name: "Unichain",
+        forks: &[
+            (1_730_748_359, OpSpecId::GRANITE),
+            (1_736_445_601, OpSpecId::HOLOCENE),
+            (1_746_806_401, OpSpecId::ISTHMUS),
+            (1_764_691_201, OpSpecId::JOVIAN),
+            (KARST, OpSpecId::KARST),
+        ],
+        next: LAGOON,
+    },
+
+    Chain {
+        id: OP_MAINNET,
+        name: "OP Mainnet",
+        forks: &[
+            (1_686_068_903, OpSpecId::REGOLITH),
+            (1_704_992_401, OpSpecId::CANYON),
+            (1_710_374_401, OpSpecId::ECOTONE),
+            (1_720_627_201, OpSpecId::FJORD),
+            (1_726_070_401, OpSpecId::GRANITE),
+            (1_736_445_601, OpSpecId::HOLOCENE),
+            (1_746_806_401, OpSpecId::ISTHMUS),
+            (1_764_691_201, OpSpecId::JOVIAN),
+            (KARST, OpSpecId::KARST),
+        ],
+        next: LAGOON,
+    },
+
+    Chain {
+        id: INK,
+        name: "Ink",
+        forks: &[
+            (1_733_498_411, OpSpecId::GRANITE),
+            (1_742_396_400, OpSpecId::HOLOCENE),
+            (1_746_806_401, OpSpecId::ISTHMUS),
+            (1_764_691_201, OpSpecId::JOVIAN),
+            (KARST, OpSpecId::KARST),
+        ],
+        next: LAGOON,
+    },
+
+    Chain {
+        id: WORLD_CHAIN,
+        name: "World Chain",
+        forks: &[
+            (1_719_335_639, OpSpecId::ECOTONE),
+            (1_721_826_000, OpSpecId::FJORD),
+            (1_727_780_400, OpSpecId::GRANITE),
+            (1_738_238_400, OpSpecId::HOLOCENE),
+            (1_764_072_000, OpSpecId::ISTHMUS),
+            (1_777_593_600, OpSpecId::JOVIAN),
+            (1_789_992_000, OpSpecId::KARST),
+        ],
+        next: None,
+    },
+
+    Chain {
+        id: SONEIUM,
+        name: "Soneium",
+        forks: &[
+            (1_733_134_751, OpSpecId::GRANITE),
+            (1_738_573_200, OpSpecId::HOLOCENE),
+            (1_746_806_401, OpSpecId::ISTHMUS),
+            (1_764_691_201, OpSpecId::JOVIAN),
+            (KARST, OpSpecId::KARST),
+        ],
+        next: LAGOON,
+    },
 ];
 
 
-pub fn spec(timestamp: u64) -> OpSpecId {
-    FORKS
-        .iter()
-        .rev()
-        .find(|(at, _)| timestamp >= *at)
-        .map_or(OpSpecId::GRANITE, |f| f.1)
+pub fn chain(id: u64) -> Option<&'static Chain> {
+    CHAINS.iter().find(|c| c.id == id)
+}
+
+impl Chain {
+
+    pub fn spec(&self, timestamp: u64) -> Result<OpSpecId, String> {
+        if let Some((fork, at)) = self.next.filter(|(_, at)| timestamp >= *at) {
+            return Err(format!(
+                "{}'s {fork} rules (from time {at}) are not run here yet",
+                self.name
+            ));
+        }
+        self.forks
+            .iter()
+            .rev()
+            .find(|(at, _)| timestamp >= *at)
+            .map(|f| f.1)
+            .ok_or_else(|| {
+                format!(
+                    "{}'s blocks before its Bedrock genesis are not run here",
+                    self.name
+                )
+            })
+    }
+}
+
+
+
+pub fn spec(chain_id: u64, timestamp: u64) -> Result<OpSpecId, String> {
+    chain(chain_id)
+        .ok_or_else(|| format!("chain {chain_id}'s calls are not run on the OP stack here"))?
+        .spec(timestamp)
 }
 
 
@@ -91,6 +213,7 @@ pub trait State {
 
 #[derive(Clone, Debug)]
 pub struct Block {
+    pub chain_id: u64,
     pub number: u64,
     pub timestamp: u64,
     pub gas_limit: u64,
@@ -139,6 +262,8 @@ pub enum Outcome {
     Invalid(String),
 
     NoBlockHash(u64),
+
+    Refused(String),
 
     Internal(String),
 }
@@ -316,9 +441,12 @@ pub fn measured(
         out_of_gas: false,
         intrinsic: false,
     };
-    let spec = spec(block.timestamp);
+    let spec = match spec(block.chain_id, block.timestamp) {
+        Ok(spec) => spec,
+        Err(why) => return not_run(Outcome::Refused(why)),
+    };
     let mut cfg = CfgEnv::new()
-        .with_chain_id(UNICHAIN)
+        .with_chain_id(block.chain_id)
         .with_spec_and_mainnet_gas_params(spec);
     cfg.disable_nonce_check = true;
     cfg.disable_eip3607 = true;
@@ -407,7 +535,7 @@ pub fn measured(
         kind: call.to.map_or(TxKind::Create, TxKind::Call),
         value: call.value,
         data: call.data.clone(),
-        chain_id: Some(UNICHAIN),
+        chain_id: Some(block.chain_id),
         access_list: AccessList(
             call.access_list
                 .iter()
@@ -428,7 +556,9 @@ pub fn measured(
         .with_db(db)
         .with_block(block_env)
         .with_cfg(cfg)
-        .build_op();
+        .build_op()
+        .with_precompiles(precompiles::OpPrecompileSet::new(spec));
+    memguard::guard(&mut evm.0.instruction);
     match evm.transact(tx) {
         Ok(r) => {
             let gas = r.result.gas();
@@ -572,6 +702,164 @@ fn apply_account(
     db.commit(AddressMap::from_iter([(address, account)]));
     Ok(())
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

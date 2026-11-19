@@ -1300,9 +1300,9 @@ function mismatchText(a, number, what, ch) {
 const ETH_CHECKPOINT = { root: '0x44d5cf3ea4de47f80a300df272afa97b75c218ecefa4f7d87f83d085c41d80e1', slot: 15450112 };
 /// Where the other light clients start when checkpoint.json (beside this page, refreshed daily by
 /// Willow) holds no newer start: Sepolia's (the testnets'), a finalized block root, and BNB Smart
-/// Chain's, an epoch block, each the same at two operators on 2026-11-14. The verifier refuses a
+/// Chain's, an epoch block, each the same at two operators (Sepolia's 2026-11-17, BNB's 2026-11-14). The verifier refuses a
 /// Sepolia start over 30 days old and a BNB start over 7 days old.
-const SEPOLIA_START = { root: '0x5d5b94c9c82d9f56409699948380d58de837f39a170e0de81c547642d3b58415', slot: 11577216 };
+const SEPOLIA_START = { root: '0x9f8fea00eaa8dfa2562cf8f82cf80c03917665835a4523871d1d0bc2e7ba360a', slot: 11595392 };
 const BNB_START = { number: 133547000, hash: '0x5256b501fc40848cc63455f3022f45332df90d2776e322470ff2432108015014' };
 /// Chains whose blocks the browser confirms itself; the others still ask public nodes.
 const TRUSTLESS = new Set([1, 8453, 10, 130, 57073, 42161, 4663, 56, 480, 1868, 7777777, 84532, 421614, 11155420, 1301, 763373, 46630]);
@@ -2269,10 +2269,10 @@ const PROOF_KINDS = {
     coverage: "Proven: your browser ran the call in its own EVM over every account, storage slot and code it reads, each proven against the state root of a header that hashes to the block hash. The result is its own run, as the chain's own node runs eth_call. A read the proof does not hold fails verification.",
   },
   estimate: {
-    coverage: "Proven: your browser ran geth's gas estimation (v1.17.10) in its own EVM over every account, storage slot and code it reads, each proven against the state root of a header that hashes to the block hash, and the call succeeds with the gas found. The estimate is its own search's.",
+    coverage: "Proven: your browser recomputed the gas estimate the way a geth node does (v1.17.10), in its own EVM over every account, storage slot and code it reads, each proven against the state root of a header that hashes to the block hash, and the call succeeds with the gas found. The estimate is its own search's.",
   },
   estimateNitro: {
-    coverage: "Proven: your browser ran Nitro's gas estimation (v3.12.2) in its own EVM over every account, storage slot and code it reads, each proven against the state root of a header that hashes to the block hash, and the call succeeds with the gas found. The estimate is its own search's.",
+    coverage: "Proven: your browser recomputed the gas estimate the way a Nitro node does (v3.12.2), in its own EVM over every account, storage slot and code it reads, each proven against the state root of a header that hashes to the block hash, and the call succeeds with the gas found. The estimate is its own search's.",
   },
   trace: {
     coverage: "Proven: your browser ran the block's transactions in its own EVM over every account, storage slot and code they read, each proven against the state root of the block's parent, and each run matches its receipt. The trace is its own run's, written by the same tracer. A read the proof does not hold fails verification.",
@@ -2757,7 +2757,7 @@ function verifiedNote(p, v, blockNum, ms) {
   if (p.kind === 'trace' && p.at === 'call') return `Your browser ran the call over state proven against block ${blockNum}'s state root and traced it (${secs(ms)}).`;
   if (p.kind === 'trace') return `Your browser ran block ${blockNum}'s transactions${p.at === 'tx' ? ' up to this one' : ''} over state proven against its parent's state root, each matching its receipt, and traced ${p.at === 'tx' ? 'it' : 'them'} (${secs(ms)}).`;
   const out = v.proven.error ? `ends in ${v.proven.error.code === 3 ? 'a revert' : 'an error'}` : p.kind === 'call' ? 'returns' : 'needs';
-  return `Your browser ${p.kind === 'call' ? 'ran the call' : `ran ${p.nitro ? "Nitro's" : "geth's"} gas estimation`} over state proven against block ${blockNum}'s state root: it ${out}${v.proven.error ? '' : ` ${p.kind === 'call' ? 'the proven result' : `${n(hexNum(v.proven.result))} gas`}`} (${secs(ms)}).`;
+  return `Your browser ${p.kind === 'call' ? 'ran the call' : `recomputed the gas estimate the way a ${p.nitro ? 'Nitro' : 'geth'} node does`} over state proven against block ${blockNum}'s state root: it ${out}${v.proven.error ? '' : ` ${p.kind === 'call' ? 'the proven result' : `${n(hexNum(v.proven.result))} gas`}`} (${secs(ms)}).`;
 }
 
 /// What was verified, for the verdict.

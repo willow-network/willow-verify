@@ -54,18 +54,6 @@ own should each have their own `Verifier`.
 Without a key the client uses Willow's public path, which serves blocks, transactions, receipts
 and logs. State, calls and traces need a key.
 
-## Not verified in this release
-
-This release doesn't verify `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_blobBaseFee`,
-`eth_feeHistory` or `eth_estimateGas` on any chain, nor `eth_call` on Robinhood Chain (4663). Their
-verifiers (the `willow-fee-v1` fee formula, the gas-estimate search and Robinhood Chain's EVM) are
-held back from crates.io for now. Those requests are unverifiable (`no-verifier`, -32099), and under
-`Unverifiable::Flag` the server's value is returned, flagged. Every other method is verified as
-described below, and the verify page at <https://api.willow.tech/verify/> verifies all of them.
-alloy's default fillers ask for gas estimates and fees when they fill a transaction, so with the
-default `Unverifiable::Throw` give `send_transaction` its gas and fees yourself, or fill them from
-another provider.
-
 ## What it trusts
 
 Each response is verified in two steps:
@@ -161,9 +149,9 @@ validators: BNB Smart Chain (56).
 | `eth_getBlockByNumber`, `ByHash`, `eth_getBlockTransactionCountBy*` | `willow_getBlockProof`, cached by hash |
 | `eth_blockNumber` | the anchored head: `willow_getBlockAnchor ["latest"]` |
 | `eth_getBalance`, `eth_getTransactionCount`, `eth_getCode`, `eth_getStorageAt`, `eth_getProof` | `willow_getStateProof`; reads of one account at one block go as one proof |
-| `eth_call` (Ethereum, Unichain; Robinhood Chain's not in this release) | `willow_getCallProof`, with the call's state and block overrides laid over the proven state here |
-| `eth_estimateGas` | not in this release (the verify page: `willow_getEstimateGasProof`) |
-| `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_blobBaseFee`, `eth_feeHistory` | not in this release (the verify page: `willow_getFeeProof`, `willow_getFeeHistoryProof`, `willow-fee-v1`) |
+| `eth_call` (Ethereum; OP stack: Unichain, OP Mainnet, Ink, World Chain, Soneium; Arbitrum: Robinhood Chain, Arbitrum One) | `willow_getCallProof`, with the call's state and block overrides laid over the proven state here |
+| `eth_estimateGas` (the same chains) | `willow_getEstimateGasProof`: the chain's own gas estimate, run here over the proven state |
+| `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_blobBaseFee`, `eth_feeHistory` | `willow_getFeeProof`, `willow_getFeeHistoryProof`: Willow's published fee formula (`willow-fee-v1`), computed here over verified blocks |
 | `eth_getTransactionByHash`, `ByBlock*AndIndex`, `eth_getTransactionReceipt`, `eth_getBlockReceipts` | transaction and receipt proofs; an unknown hash is `null` |
 | `eth_getLogs` | up to 8 blocks: `willow_getBlockReceiptsProof` per block; more: `willow_getLogsProof` (plans with log proofs) |
 | `debug_traceTransaction`, `debug_traceBlockByNumber`, `debug_traceBlockByHash`, `trace_block`, `trace_transaction`, `trace_replayBlockTransactions`, `trace_replayTransaction` (Ethereum, Unichain) | `willow_getTraceProof`: the block run here over the proven parent state, each transaction verified against its receipt |
@@ -209,7 +197,7 @@ was cut off (a timeout, a runtime that ended). Decide by `error.kind()`, never b
 | `method` | -32099 | a value from a method or call with no proof |
 | `not-on-plan` | -32099 | the proof method is not served for this key or path |
 | `logs-range`, `logs-timeout`, `logs-job-failed` | -32099 | `eth_getLogs` over more than 8 blocks with no log proof |
-| `no-verifier` | -32099 | a verifier this build or machine doesn't have (the methods held back from this release, OpenVM's helper, or the `logs` feature off) |
+| `no-verifier` | -32099 | a verifier this machine or build doesn't have (OpenVM's helper, or the `logs` feature off) |
 | `anchor-level`, `anchor-waiting`, `anchor-stale-head`, `anchor-not-covered`, `anchor-declined`, `anchor-disputed`, `anchor-unreachable`, `anchor-stale-checkpoint`, `anchor-unknown-fork`, `anchor-refused` | -32099 | the block can't be anchored now |
 
 Absences and refusals pass through as they are: `null` receipts and transactions, every JSON-RPC
@@ -222,4 +210,11 @@ failed, and the fields the proofs don't cover, left out of the response (for exa
 
 ## License
 
-MIT
+MIT. `THIRD-PARTY-NOTICES.md` credits the MIT-licensed projects parts of the verifiers follow, with
+their notices.
+
+## Patents
+
+Willow Core, Inc. has patents pending on methods behind Willow's proofs. The MIT license covers using,
+copying, changing and distributing this software. Nothing here grants a license under those patents
+beyond that.

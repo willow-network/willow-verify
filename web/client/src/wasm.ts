@@ -20,9 +20,9 @@ export async function loadGlue<T extends GlueModule>(files: ModuleFiles): Promis
   return glue;
 }
 
-const NAMES = { items: 'items', state: 'state', anchor: 'anchor', logs: 'verifier', openvm: 'openvm' } as const;
+const NAMES = { items: 'items', state: 'state', anchor: 'anchor', logs: 'verifier', openvm: 'openvm', stellar: 'stellar' } as const;
 
-/** Modules from `files(name)`: `items`, `state`, `anchor`, `verifier` (logs), `openvm`. */
+/** Modules from `files(name)`: `items`, `state`, `anchor`, `verifier` (logs), `openvm`, `stellar`. */
 export function modulesFrom(files: (name: string) => ModuleFiles | Promise<ModuleFiles>): VerifierModules {
   const load = (name: string) => async () => loadGlue<any>(await files(name));
   return {
@@ -31,6 +31,7 @@ export function modulesFrom(files: (name: string) => ModuleFiles | Promise<Modul
     anchor: load(NAMES.anchor),
     logs: load(NAMES.logs),
     openvm: load(NAMES.openvm),
+    stellar: load(NAMES.stellar),
   };
 }
 

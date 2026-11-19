@@ -1,8 +1,11 @@
 
 
 
-use alloy_primitives::{keccak256, B256};
-use alloy_rlp::{Decodable, Encodable, Header as RlpHeader};
+
+
+
+use crate::codec::{next, open_list, ListWriter};
+use alloy_primitives::{keccak256, Bytes, B256};
 
 
 
@@ -24,83 +27,59 @@ pub struct VoteData {
 }
 
 impl VoteData {
-    fn rlp(&self) -> Vec<u8> {
-        let mut payload = Vec::with_capacity(84);
-        self.source_number.encode(&mut payload);
-        self.source_hash.encode(&mut payload);
-        self.target_number.encode(&mut payload);
-        self.target_hash.encode(&mut payload);
-        let mut out = Vec::with_capacity(payload.len() + 2);
-        RlpHeader {
-            list: true,
-            payload_length: payload.len(),
-        }
-        .encode(&mut out);
-        out.extend_from_slice(&payload);
-        out
-    }
-
 
     pub fn hash(&self) -> B256 {
-        keccak256(self.rlp())
+        let mut list = ListWriter::new();
+        list.item(&self.source_number)
+            .item(&self.source_hash)
+            .item(&self.target_number)
+            .item(&self.target_hash);
+        keccak256(list.finish())
     }
 }
 
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Attestation {
-
     pub voters: u64,
     pub signature: [u8; 96],
     pub data: VoteData,
     pub extra: Vec<u8>,
 }
 
-fn take_list<'a>(buf: &mut &'a [u8]) -> Result<&'a [u8], String> {
-    let h = RlpHeader::decode(buf).map_err(|e| e.to_string())?;
-    if !h.list || h.payload_length > buf.len() {
-        return Err("not a list".into());
-    }
-    let whole: &'a [u8] = buf;
-    let (inner, rest) = whole.split_at(h.payload_length);
-    *buf = rest;
-    Ok(inner)
-}
-
 impl Attestation {
 
     pub fn decode(bytes: &[u8]) -> Result<Attestation, String> {
-        let mut buf = bytes;
-        let mut p = take_list(&mut buf)?;
-        if !buf.is_empty() {
-            return Err(format!("{} bytes after it", buf.len()));
+        let mut input = bytes;
+        let mut outer = open_list(&mut input)?.ok_or_else(|| "not a list".to_string())?;
+        if !input.is_empty() {
+            return Err(format!("{} bytes after it", input.len()));
         }
-        let voters = u64::decode(&mut p).map_err(|e| e.to_string())?;
-        let sig = alloy_rlp::Bytes::decode(&mut p).map_err(|e| e.to_string())?;
-        let signature: [u8; 96] = sig[..]
+        let voters: u64 = next(&mut outer)?;
+        let sig: Bytes = next(&mut outer)?;
+        let signature: [u8; 96] = sig
+            .as_ref()
             .try_into()
             .map_err(|_| format!("signature is {} bytes", sig.len()))?;
-        let mut d = take_list(&mut p)?;
+        let mut inner = open_list(&mut outer)?.ok_or_else(|| "not a list".to_string())?;
         let data = VoteData {
-            source_number: u64::decode(&mut d).map_err(|e| e.to_string())?,
-            source_hash: B256::decode(&mut d).map_err(|e| e.to_string())?,
-            target_number: u64::decode(&mut d).map_err(|e| e.to_string())?,
-            target_hash: B256::decode(&mut d).map_err(|e| e.to_string())?,
+            source_number: next(&mut inner)?,
+            source_hash: next(&mut inner)?,
+            target_number: next(&mut inner)?,
+            target_hash: next(&mut inner)?,
         };
-        if !d.is_empty() {
+        if !inner.is_empty() {
             return Err("vote data has more than 4 fields".into());
         }
-        let extra = alloy_rlp::Bytes::decode(&mut p)
-            .map_err(|e| e.to_string())?
-            .to_vec();
-        if !p.is_empty() {
+        let extra: Bytes = next(&mut outer)?;
+        if !outer.is_empty() {
             return Err("more than 4 fields".into());
         }
         Ok(Attestation {
             voters,
             signature,
             data,
-            extra,
+            extra: extra.to_vec(),
         })
     }
 }

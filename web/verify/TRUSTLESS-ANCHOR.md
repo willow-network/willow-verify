@@ -19,8 +19,13 @@ the page trusts Ethereum's validators and nothing else.
 | Ethereum | Ethereum's light client (sync committee) from a checkpoint built into the page; then the block's hash in Ethereum's own block-hash history (EIP-2935, last 8,191 blocks), or for older blocks in the beacon state's `block_roots` / `historical_summaries` | **Signed** by Ethereum's validators (seconds), **Final** (about 13 to 19 minutes) | 10 to 16 KB, plus the light client's catch-up (about 60 KB per 27 hours since the checkpoint, once per browser) | Ethereum's current sync committee: a false chain needs 342 of its 512 members' signatures; the checkpoint, which ships with the page's code |
 | Base, OP Mainnet, Unichain, Ink | The Ethereum light client, then the chain's dispute games and SystemConfig on Ethereum (storage proofs, Ethereum's contract code run over them), the output root, and the L2's own block-hash history (EIP-2935 on the L2) back to the block | **Signed** by the chain's sequencer (seconds), **Committed** on Ethereum by the chain's proposer (20 minutes to 12 hours), **Final** on Ethereum (about 3.5 to 7 days) | 20 to 60 KB; up to 240 KB more for a sequencer-signed Base block | Ethereum as above; for Final, the chain's fault-proof system and its governance (guardian, game retirement), exactly as a withdrawal to Ethereum does |
 | Arbitrum One, Robinhood Chain | The Ethereum light client, then the chain's BoLD assertions on Ethereum, the assertion's block hash, and Arbitrum's block-hash history (EIP-2935 ring of 393,168 blocks) back to the block | **Signed** by the sequencer (feed `signatureV2`, seconds), **Committed** in an assertion on Ethereum (about an hour), **Final** when the assertion is confirmed (about 6.4 days) | 15 to 30 KB | Ethereum as above; for Final, BoLD and the chain's governance; Robinhood's validators are whitelisted |
+| Celo, X Layer | As Base above: the chain's OP Succinct Lite dispute games (type 42) on Ethereum, the output root, and the L2's EIP-2935 history | **Committed** by the chain's proposer (games every 30 minutes on Celo, every hour on X Layer), **Final** on Ethereum (Celo about 7 days, X Layer about 3.5 days); no **Signed** level yet | about 230 KB of JSON (measured), mostly the L1 witness; X Layer adds 1.3 KB per header of a descent down from the game's block, as no free RPC keeps its state (up to 3,600 headers, 4.6 MB, for a block just after a game) | Ethereum as above; for Final, the chain's fault-proof system (a challenged claim must be proven with SP1) and its governance |
+| Mantle, Katana | The Ethereum light client, then the chain's output oracle on Ethereum (Mantle's OPSuccinctL2OutputOracle, Katana's AggchainFEP in the AggLayer), read with its own code: the output root, then the L2's EIP-2935 history | Mantle: **Committed** when its output is posted with a validity proof (hourly), **Final** 12 hours later; Katana: **Final** when its output is posted (7 minutes to 1.6 hours apart, measured); no **Signed** level yet | about 100 KB of JSON (measured) | Ethereum as above; the SP1 proofs the contracts verify and the governance that can change their keys or upgrade them; on Mantle, its challenger can delete an output within its 12 hours |
 | BNB Smart Chain | BNB's own validators (Parlia), followed from an epoch block pinned in the page or a newer one in `checkpoint.json`: each new validator set from an epoch block that two thirds of the set before it voted final; then the block's header, linked by parent hashes to a block they voted final | **Sealed** by one validator (seconds), **Final** once two thirds of the set voted it, or a block after it, final (normally two blocks later) | 2 to 5 KB, plus about 5 KB per epoch (1,000 blocks, 12.5 minutes) since the start, once per browser | Two thirds of each validator set; the start, which comes from Willow and must be under 7 days old; for Sealed, the validator that sealed it |
+| opBNB | BNB's light client (as above), then opBNB's L2OutputOracle and OptimismPortal on BNB (storage proofs under a BNB block voted final, the contracts' code run over them), the output root, and opBNB's headers back to the block by parent hashes (opBNB keeps no block-hash history) | **Committed** on BNB by opBNB's proposer (about 15 minutes), **Final** past the oracle's 7-day finalization period | about 130 KB for the output's own block, plus about 1.1 KB per block between the block and its output (measured; up to 3,600 blocks, about 4 MB) | BNB's validators as above; opBNB's proposer for Committed; for Final, the oracle's challenger and opBNB's governance, as a withdrawal to BNB does |
+| ApeChain | Two hops: an Arbitrum One block anchored as Arbitrum One's own (its assertion on Ethereum, or its sequencer's signature), then ApeChain's Rollup on Arbitrum One (storage proofs under that block, the Rollup's code run over them), the node's block hash, and ApeChain's block-hash history (Nitro's) back to the block | the weaker of the two hops: **Signed** (the Arbitrum One block read is one its sequencer signed, seconds), **Committed** (a pending node read under an Arbitrum One block committed on Ethereum and under an hour old; Arbitrum One's assertions name blocks about an hour old, so this is seldom reached), **Final** (both confirmed: blocks about 13 days old) | about 1.7 MB (measured): Arbitrum One's state for each of the about 150 nodes pending since the confirmed one | Ethereum as above; Arbitrum One's level as above; ApeChain's whitelisted validator for Committed; for Final, ApeChain's (pre-BoLD) fraud proofs and governance |
 | Base Sepolia, OP Sepolia, Unichain Sepolia, Ink Sepolia, Arbitrum Sepolia, Robinhood Chain Testnet | As the mainnet rows above, with Sepolia in Ethereum's place: Sepolia's light client from a start pinned in the page or a newer one in `checkpoint.json`, then the chain's dispute games or assertions, and its sequencer's key, on Sepolia | **Signed** by the sequencer, **Posted** to Sepolia, **Settled** on Sepolia | 68 to 212 KB (measured), plus Sepolia's light-client catch-up | Sepolia's sync committee: a false chain needs 342 of its 512 members' signatures; the start, which comes from Willow and must be under 30 days old; for each level, as on mainnet |
+| Polygon PoS | The Ethereum light client, then the Heimdall checkpoint on Ethereum that covers the block (RootChain's `headerBlocks`, Ethereum's contract code run over storage proofs), and the block's leaf in the checkpoint's Merkle root: its number, time, transactions root and receipts root. **Not** its hash: a checkpoint does not commit it | **Final** once the checkpoint is in Ethereum's finalized state (about 30 to 100 minutes after the block), for the block's transactions, receipts and logs only; nothing for its hash, state or newer blocks | 49 to 54 KB (measured) | Ethereum as above; two thirds of Polygon's stake, which signs each checkpoint (StakeManager checks it on Ethereum), and Polygon's governance over RootChain, exactly as a withdrawal to Ethereum does |
 
 Robinhood Chain settles on Ethereum directly, not on Arbitrum One: its Rollup
 (`0x23A19d23e89166adedbDcB432518AB01e4272D94`), SequencerInbox and Bridge are Ethereum contracts.
@@ -288,6 +293,33 @@ the proposer (and its bond). For Signed, the sequencer. Not trusted: Willow, the
 
 ---
 
+## OP stack, other proof systems: Celo, X Layer, Mantle, Katana
+
+### Mechanism
+
+- **Celo, X Layer**: OP Succinct Lite games (type 42, `OPSuccinctFaultDisputeGame` 2.0.0) in the
+  chain's DisputeGameFactory, under an AnchorStateRegistry (3.5.0) the chain's OptimismPortal
+  uses. A game claims a v0 output root at an L2 block, as Base's do; a challenged game must be
+  proven with SP1 or lose. The browser checks them exactly as Base's (`OP_CHAINS`), with the
+  creator of each chain's games pinned (its AccessManager's proposer). X Layer's factory also holds
+  another type's games (1961, not respected), which the browser declines. X Layer is also rollup 3
+  in the AggLayer, an AggchainECDSAMultisig with one signer, which holds no state root.
+- **Mantle, Katana** (`ORACLE_CHAINS`): one oracle per chain holds the outputs,
+  `getL2Output(i) = (outputRoot, postedAt, l2Block)`. Willow names the output `i` (the first at or
+  after N); the browser runs `getL2Output(i)` over proven state at `F`, checks that `M`'s header
+  hashes into the v0 output root and that `M` is the output's block, and walks back to `N` as in 3.
+  - Mantle: its OptimismPortal's `L2_ORACLE()`, an OPSuccinctL2OutputOracle with optimistic mode
+    off, so each output is posted with an SP1 proof by an approved proposer. Its challenger may
+    delete an output for `FINALIZATION_PERIOD_SECONDS()` (12 hours) after it is posted, and the
+    portal pays withdrawals on it after that: **Committed** before, **Final** once `F`'s time is
+    past `postedAt + period`, the portal's own rule.
+  - Katana: its rollup in the AggLayer's manager, an AggchainFEP. Its outputs are pushed only by the
+    manager after it verifies the chain's proof (`onVerifyPessimistic`), nothing removes them, and
+    the AggLayer's bridge pays exits on them at once: **Final** when posted. Katana's OP
+    DisputeGameFactory has no games.
+- None of the four has a **Signed** level yet: their SystemConfigs name an `unsafeBlockSigner`,
+  but Willow does not follow their gossip. A block newer than the newest claim is not covered.
+
 ## Arbitrum Nitro: Arbitrum One, Robinhood Chain
 
 ### Mechanism
@@ -408,6 +440,106 @@ validator set, at its epoch block. The start, which comes from Willow, in the pa
 the one validator that sealed it, for at most 10 minutes. As on Ethereum, a block the browser
 cannot confirm is not confirmed; the page never falls back to public nodes for it. Not trusted:
 Willow, BNB's RPC nodes.
+
+## Polygon PoS
+
+Polygon PoS (Bor) settles its blocks on Ethereum in Heimdall checkpoints, not by block hash. Code:
+`zkvm/logset-guest/anchor-verify` (`polygon`).
+
+### Mechanism
+
+1. **The checkpoint.** Heimdall's validators sign each checkpoint, `(proposer, start, end, root)`,
+   and anyone submits it to RootChain (`0x86E4Dc95c7FBdBf52e33D563BbDB00823894C287`), whose
+   `submitCheckpoint` stores it in `headerBlocks[id]` only after StakeManager's `checkSignatures`
+   counts two thirds of the stake, and only when `start` is the previous checkpoint's `end + 1`.
+   Ids step by 10,000. Checkpoints land every 3 to 65 minutes (median 10) and cover 256 to 2,560
+   blocks (median 512; 300 checkpoints over 3 days to 2026-11-17), so a block is in one 14 to 83
+   minutes after it is made.
+2. **The leaf.** `keccak256(abi.encodePacked(uint256 number, uint256 time, transactionsRoot,
+   receiptsRoot))` per block, padded with zero leaves to a power of two, hashed in pairs (Bor's
+   `GetRootHash`; the bridge's `RootChainManager` proves exits against the same leaf).
+3. **The browser** reads `headerBlocks(id)` with RootChain's own code over Ethereum state under the
+   light client's finalized block (at most an hour old), checks the block is in `start..end`,
+   builds the leaf from the header Willow sends, and checks the Merkle proof against the root.
+
+What this proves is the header's number, time, transactions root and receipts root: the block's
+transactions, receipts and logs, including Polygon's state-sync transactions (type `0x7F`, in both
+roots since the Madhugiri fork, block 80,084,800). It does **not** prove the block's hash: another
+header with the same four fields and any other parent, state root or extra data hashes differently
+and passes the same check. So the result names no hash (`covers: "roots"`, `headerHash`,
+`rootsMatch`), and the client uses it only for transactions, receipts and logs, with their
+`blockHash` left out, never for a block's hash, state, a parent link or the newest block.
+
+### What Willow serves
+
+On Polygon's route (`/v1/rpc/137/...`), `willow_getBlockAnchor [blockNumber]`:
+`{blockNumber, update, l1, checkpoint, header, proof}` (the finality update, the Ethereum state
+witness for `headerBlocks(checkpoint)`, the block's header as RLP, the leaf's siblings);
+`["latest"]` is the newest block a checkpoint in Ethereum's finalized state covers.
+
+
+
+### What is left to trust
+
+Ethereum's sync committee, as above; two thirds of Polygon's stake, for each checkpoint; Polygon's
+governance, which can upgrade RootChain or, as its owner, delete checkpoints after an id
+(`setNextHeaderBlock`), as it can for withdrawals. Blocks after the newest finalized checkpoint
+(the last 30 to 100 minutes) are not covered. Proving a block's hash needs Heimdall's milestones (each
+names its end block's hash), which are voted in Heimdall's own consensus and not posted to
+Ethereum: a Heimdall light client (CometBFT commits by the validator set StakeManager holds, and
+the milestone's proof in Heimdall's state), not built.
+
+---
+
+## Chains that settle elsewhere: opBNB on BNB Smart Chain, ApeChain on Arbitrum One
+
+Their claims are on a chain that is itself anchored here, so the browser verifies two hops: that
+chain's block as its own anchor proves it, then the claim read under that block's state root.
+Code: `zkvm/logset-guest/anchor-verify` (`l2`'s output oracles, `orbit`).
+
+### opBNB
+
+1. **A BNB block voted final**, verified with BNB's light client as above, no more than an hour
+   old. A block sealed by one validator is not enough.
+2. **The output.** Under that block's state root, storage proofs of opBNB's OptimismPortal
+   (`0x1876EA7702C0ad0C6A2ae6036DE7733edfBca519`) and L2OutputOracle
+   (`0x153CAB79f4767E2ff862C94aa49573294B13D169`), and the contracts' own code run over them: the
+   portal must still pay withdrawals on that oracle (`L2_ORACLE()`); `getL2Output(i)` gives the
+   output's root, time and block, and reverts for an output deleted or never posted. **Final** when the BNB
+   block is past the output's time plus `FINALIZATION_PERIOD_SECONDS()` (7 days), as the portal
+   finalizes a withdrawal; **committed** before that, when `PROPOSER()` is the proposer pinned in the
+   page. opBNB has no dispute games.
+3. **The output's block.** Its header, with the L2ToL1MessagePasser's storage root, must hash to the
+   output root (version 0). opBNB's headers do not carry that root (opBNB is not on Isthmus), so
+   Willow sends it; the hash binds it.
+4. **Back to the block.** opBNB keeps no block-hash history (no code at EIP-2935's address), so the
+   headers from the output's block down to N, each its child's parent. Outputs come every 3,600
+   blocks (about 15 minutes).
+
+On opBNB's route, `willow_lightClientBootstrap` and `willow_lightClientUpdates` serve BNB's
+light-client data, and `willow_getBlockAnchor [N]` returns `{blockNumber, bnb, l1, outputIndex, messagePasserRoot,
+headers, descent}`, the output-oracle shape Mantle's and Katana's use, with BNB in Ethereum's place. There is no signed level: opBNB's blocks newer than its
+newest output are not confirmed until the next output.
+
+### ApeChain
+
+1. **An Arbitrum One block `A`**, from its own anchor inside ApeChain's (`parent.anchor`), verified
+   as an Arbitrum One block (assertion or sequencer signature, as above), and `A`'s header, which
+   must hash to it.
+2. **ApeChain's node.** Under `A`'s state root, storage proofs of ApeChain's Rollup
+   (`0x374de579AE15aD59eD0519aeAf1A23F348Df259c`, pre-BoLD: nodes, not assertions), its code run over
+   them. **Final** when the node is `latestConfirmed()`. **Committed** when it is pending: `A` under
+   an hour old, nothing rejected since the last confirmation (`firstUnresolvedNode()`), staked by the
+   validator pinned in the page (`nodeHasStaker`), and it and every pending node before it its
+   parent's only child (`getNode`: `prevNum`, `latestChildNumber`).
+3. **The node's block.** Its hash and send root (the header's extra data) must hash to the node's
+   `confirmData`; then ApeChain's history (Nitro's EIP-2935 ring) back to N.
+4. **The level** is the weaker of the two hops: a pending node under an Arbitrum One block only
+   committed on Ethereum is committed; under a block signed by Arbitrum One's sequencer, signed.
+
+On ApeChain's route, `willow_getBlockAnchor [N]` returns `{blockNumber, parent: {chainId, header,
+anchor}, parentState, node, headers, proofs}`; the light-client data is Ethereum's. ApeChain's own
+sequencer feed is not signed, so there is no level from it.
 
 ---
 

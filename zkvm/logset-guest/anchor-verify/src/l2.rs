@@ -30,7 +30,9 @@ pub struct OpChain {
 
 
 
-pub const OP_CHAINS: [OpChain; 11] = [
+
+
+pub const OP_CHAINS: [OpChain; 13] = [
     OpChain {
         chain_id: 8453,
         name: "Base",
@@ -78,6 +80,20 @@ pub const OP_CHAINS: [OpChain; 11] = [
         name: "World Chain",
         registry: address!("90BB48fe3310499Db36437dCAE642F721e32d094"),
         proposers: &[address!("2307278fC8aB0005974A6DeD2FA6d1187333a223")],
+        super_root: false,
+    },
+    OpChain {
+        chain_id: 42220,
+        name: "Celo",
+        registry: address!("8fE58d2168b5412Cf1Bd212cE6137f8b7300222d"),
+        proposers: &[address!("79D14553D6B3484F5612272B43c219A882415d33")],
+        super_root: false,
+    },
+    OpChain {
+        chain_id: 196,
+        name: "X Layer",
+        registry: address!("000590BB65ab1864a7AD46d6B957cC9a4F2C149d"),
+        proposers: &[address!("E43944421681170648E10007f73816e04F74394F")],
         super_root: false,
     },
     OpChain {
@@ -529,264 +545,311 @@ pub(crate) fn confirm_op_on(
 }
 
 
-pub struct NitroChain {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settles {
+
+
+    AfterPeriod,
+
+
+    AtOnce,
+}
+
+
+
+pub struct OracleChain {
     pub chain_id: u64,
     pub name: &'static str,
-    pub rollup: Address,
+
+    pub l1: u64,
+    pub oracle: Address,
+    pub settles: Settles,
+
+    pub portal: Option<Address>,
+
+    pub proposers: &'static [Address],
+
+    pub history: bool,
 }
 
 
 
 
-pub const NITRO_CHAINS: [NitroChain; 4] = [
-    NitroChain {
-        chain_id: 42161,
-        name: "Arbitrum One",
-        rollup: address!("4DCeB440657f21083db8aDd07665f8ddBe1DCfc0"),
+
+
+pub const OPBNB: OracleChain = OracleChain {
+    chain_id: 204,
+    name: "opBNB",
+    l1: crate::bnb::CHAIN_ID,
+    oracle: address!("153CAB79f4767E2ff862C94aa49573294B13D169"),
+    settles: Settles::AfterPeriod,
+    portal: Some(address!("1876EA7702C0ad0C6A2ae6036DE7733edfBca519")),
+    proposers: &[address!("c235c904ad9efcabff4628e3279994a4c0a9d591")],
+    history: false,
+};
+
+
+
+
+
+pub const ORACLE_CHAINS: [OracleChain; 3] = [
+    OracleChain {
+        chain_id: 5000,
+        name: "Mantle",
+        l1: 1,
+        oracle: address!("31d543e7BE1dA6eFDc2206Ef7822879045B9f481"),
+        settles: Settles::AfterPeriod,
+        portal: None,
+        proposers: &[],
+        history: true,
     },
-    NitroChain {
-        chain_id: 4663,
-        name: "Robinhood Chain",
-        rollup: address!("23A19d23e89166adedbDcB432518AB01e4272D94"),
+    OracleChain {
+        chain_id: 747474,
+        name: "Katana",
+        l1: 1,
+        oracle: address!("100d3ca4f97776A40A7D93dB4AbF0FEA34230666"),
+        settles: Settles::AtOnce,
+        portal: None,
+        proposers: &[],
+        history: true,
     },
-    NitroChain {
-        chain_id: 421614,
-        name: "Arbitrum Sepolia",
-        rollup: address!("042B2E6C5E99d4c521bd49beeD5E99651D9B0Cf4"),
-    },
-    NitroChain {
-        chain_id: 46630,
-        name: "Robinhood Chain testnet",
-        rollup: address!("dc5F8E399DBd8a9F5F87AeC4C23Beb12431b386D"),
-    },
+    OPBNB,
 ];
 
 
-
-pub const NITRO_RING: u64 = 393_168;
-pub const NITRO_HISTORY_CODE: &str = "3373fffffffffffffffffffffffffffffffffffffffe1460605760203603605c575f3563a3b1b31d5f5260205f6004601c60645afa15605c575f51600181038211605c57816205ffd0910311605c576205ffd09006545f5260205ff35b5f5ffd5b5f356205ffd0600163a3b1b31d5f5260205f6004601c60645afa15605c575f5103065500";
-
-const PENDING: u8 = 1;
-const CONFIRMED: u8 = 2;
-const FINISHED: u8 = 1;
-
-
-
-const MAX_PENDING: usize = 1024;
-
-
-fn status(node: &Bytes) -> Result<u8, Failure> {
-    match word(node, 4)? {
-        w if w[..31].iter().any(|&b| b != 0) => Err(rejected("an assertion status out of range")),
-        w => Ok(w[31]),
-    }
-}
-
-pub fn nitro_code_hash() -> alloy_primitives::B256 {
-    keccak256(hex::decode(NITRO_HISTORY_CODE).expect("constant hex"))
-}
-
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NitroConfirmed {
+pub struct OracleConfirmed {
+
 
     pub level: &'static str,
     pub hash: [u8; 32],
     pub anchor_block: u64,
-    pub assertion: [u8; 32],
+    pub output_index: u64,
     pub l1_block: u64,
 }
 
+fn word_u64(w: [u8; 32], what: &str) -> Result<u64, Failure> {
+    u64::try_from(alloy_primitives::U256::from_be_bytes(w))
+        .map_err(|_| rejected(format!("{what} is over 64 bits")))
+}
 
 
-pub fn confirm_nitro(
+pub fn confirm_oracle(
     lc: &LightClient,
     chain_id: u64,
     number: u64,
     answer: &Value,
     now: u64,
-) -> Result<NitroConfirmed, Failure> {
-    let chain = NITRO_CHAINS
+) -> Result<OracleConfirmed, Failure> {
+    let chain = ORACLE_CHAINS
         .iter()
-        .find(|c| c.chain_id == chain_id)
+        .find(|c| c.chain_id == chain_id && c.l1 == 1)
         .ok_or_else(|| {
             Failure::new(
                 Kind::Internal,
-                format!("chain {chain_id} is not a Nitro chain here"),
+                format!("chain {chain_id} has no output oracle on Ethereum here"),
             )
         })?;
     let (l1, state) = ethereum_at(lc, number, answer, now)?;
+    confirm_oracle_at(&l1, &state, chain, number, answer)
+}
 
 
-    let a = answer
-        .get("assertion")
-        .ok_or_else(|| bad("the anchor names no assertion"))?;
-    let w32 = |v: &Value, what: &str| -> Result<[u8; 32], Failure> {
-        bytes_of(
-            v.as_str()
-                .ok_or_else(|| bad(format!("{what} is not hex")))?,
-            what,
-        )?
-        .try_into()
-        .map_err(|_| bad(format!("{what} is not 32 bytes")))
-    };
-    let parent = w32(&a["parent"], "the parent assertion")?;
-    let acc = w32(&a["inboxAcc"], "the inbox accumulator")?;
-    let words = a["state"]
-        .as_array()
-        .filter(|w| w.len() == 6)
-        .ok_or_else(|| bad("the assertion state is not 6 words"))?
+
+
+pub fn confirm_oracle_on_bnb(
+    bnb: &crate::bnb::Bnb,
+    chain_id: u64,
+    number: u64,
+    answer: &Value,
+    now: u64,
+) -> Result<OracleConfirmed, Failure> {
+    let chain = ORACLE_CHAINS
         .iter()
-        .map(|w| w32(w, "an assertion state word"))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut pre = Vec::with_capacity(96);
-    pre.extend_from_slice(&parent);
-    pre.extend_from_slice(&keccak256(words.concat()).0);
-    pre.extend_from_slice(&acc);
-    let assertion = keccak256(&pre).0;
-    if words[4][..31].iter().any(|&b| b != 0) || words[4][31] != FINISHED {
-        return Err(rejected("the assertion did not finish its block"));
+        .find(|c| c.chain_id == chain_id && c.l1 == crate::bnb::CHAIN_ID)
+        .ok_or_else(|| {
+            Failure::new(
+                Kind::Internal,
+                format!("chain {chain_id} has no output oracle on BNB here"),
+            )
+        })?;
+    crate::asked_block(number, answer)?;
+    let a = answer
+        .get("bnb")
+        .ok_or_else(|| bad("the anchor has no BNB block"))?;
+    let b = a
+        .get("blockNumber")
+        .and_then(Value::as_str)
+        .and_then(|s| s.strip_prefix("0x"))
+        .and_then(|h| u64::from_str_radix(h, 16).ok())
+        .ok_or_else(|| bad("the BNB anchor has no blockNumber"))?;
+    let (c, h) = bnb.confirm_header(b, a, now)?;
+
+    if c.level != "final" {
+        return Err(Failure::new(
+            Kind::Declined,
+            format!("BNB block {b} is not final"),
+        ));
     }
-    let node = call::call(
-        &state,
-        &l1,
-        chain.rollup,
-        calldata("getAssertion(bytes32)", &[assertion]),
+    if now.saturating_sub(h.time) > MAX_L1_AGE_SECS {
+        return Err(Failure::new(
+            Kind::StaleHead,
+            format!(
+                "BNB's finalized block that Willow sent is {} minutes old",
+                now.saturating_sub(h.time) / 60
+            ),
+        ));
+    }
+    let l1 = crate::bnb::execution(&h);
+    let state = call::prove_state(
+        l1.state_root.into(),
+        answer
+            .get("l1")
+            .ok_or_else(|| bad("the anchor has no BNB state"))?,
     )?;
-    let level = match status(&node)? {
-        CONFIRMED => "final",
-        PENDING => "committed",
-        _ => {
-            return Err(rejected(format!(
-                "{} has no assertion {} on Ethereum",
-                chain.name,
-                alloy_primitives::B256::from(assertion)
-            )))
+    confirm_oracle_at(&l1, &state, chain, number, answer)
+}
+
+
+
+pub fn confirm_oracle_at(
+    l1: &Execution,
+    state: &call::State,
+    chain: &OracleChain,
+    number: u64,
+    answer: &Value,
+) -> Result<OracleConfirmed, Failure> {
+    let index = answer
+        .get("outputIndex")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| bad("the anchor names no output"))?;
+
+    let ask = |to: Address, sig: &str, args: &[[u8; 32]]| {
+        call::call_on(state, l1, chain.l1, to, calldata(sig, args))
+    };
+    let at = |sig: &str, args: &[[u8; 32]]| ask(chain.oracle, sig, args);
+    if let Some(portal) = chain.portal {
+        let paid_on = Address::from_slice(&word(&ask(portal, "L2_ORACLE()", &[])?, 0)?[12..]);
+        if paid_on != chain.oracle {
+            return Err(Failure::new(
+                Kind::Declined,
+                format!(
+                    "{}'s portal no longer pays withdrawals on its output oracle",
+                    chain.name
+                ),
+            ));
+        }
+    }
+
+    let out = at(
+        "getL2Output(uint256)",
+        &[alloy_primitives::U256::from(index).to_be_bytes::<32>()],
+    )?;
+    let root = word(&out, 0)?;
+    let posted = word_u64(word(&out, 1)?, "the output's time")?;
+    let block = word_u64(word(&out, 2)?, "the output's block")?;
+    let level = match chain.settles {
+        Settles::AtOnce => "final",
+        Settles::AfterPeriod => {
+            let period = word_u64(
+                word(&at("FINALIZATION_PERIOD_SECONDS()", &[])?, 0)?,
+                "the finalization period",
+            )?;
+
+            if l1.timestamp > posted.saturating_add(period) {
+                "final"
+            } else {
+                if !chain.proposers.is_empty() {
+                    let by = Address::from_slice(&word(&at("PROPOSER()", &[])?, 0)?[12..]);
+                    if !chain.proposers.contains(&by) {
+                        return Err(Failure::new(
+                            Kind::Declined,
+                            format!(
+                                "{}'s outputs are posted by {by}, not the proposer this page pins",
+                                chain.name
+                            ),
+                        ));
+                    }
+                }
+                "committed"
+            }
         }
     };
-
-
-    if level == "committed" {
-        let ancestors = a
-            .get("ancestors")
-            .and_then(Value::as_array)
-            .filter(|v| v.len() <= MAX_PENDING)
-            .ok_or_else(|| bad("the anchor has no list of the claims it builds on"))?;
-        pending_chain_stands(&state, &l1, chain, number, assertion, parent, ancestors)?;
-    }
-
-
     let headers = answer
         .get("headers")
         .and_then(Value::as_array)
-        .filter(|h| h.len() == 1)
-        .ok_or_else(|| bad("the anchor has no L2 header"))?;
+        .filter(|h| !h.is_empty() && h.len() <= MAX_HOPS + 1)
+        .ok_or_else(|| bad("the anchor has no L2 headers"))?;
     let top = header(
         headers[0]
             .as_str()
             .ok_or_else(|| bad("a header is not hex"))?,
     )?;
-    if top.hash != words[0] || top.extra_data != words[1] {
-        return Err(rejected(
-            "the asserted block's header is not the assertion's",
-        ));
+
+
+    let withdrawals = match answer.get("messagePasserRoot") {
+        Some(v) => bytes_of(
+            v.as_str()
+                .ok_or_else(|| bad("the message-passer root is not hex"))?,
+            "the message-passer root",
+        )?
+        .try_into()
+        .map_err(|_| bad("the message-passer root is not 32 bytes"))?,
+        None => top
+            .withdrawals_root
+            .ok_or_else(|| rejected("the output's block header has no message-passer root"))?,
+    };
+    let mut pre = [0u8; 128];
+    pre[32..64].copy_from_slice(&top.state_root);
+    pre[64..96].copy_from_slice(&withdrawals);
+    pre[96..].copy_from_slice(&top.hash);
+    if keccak256(pre).0 != root || top.number != block {
+        return Err(rejected(format!(
+            "the header is not {}'s output {index}",
+            chain.name
+        )));
     }
     if number > top.number {
         return Err(Failure::new(
             Kind::NotCovered,
-            format!("block {number} is after the asserted block"),
+            format!("block {number} is after output {index}'s block"),
         ));
     }
-
-    let low = descend(&top, number, answer)?;
-    let hash = if number == low.number {
-        low.hash
-    } else {
-        let proof = answer
-            .get("proofs")
-            .and_then(Value::as_array)
-            .and_then(|p| p.first())
-            .ok_or_else(|| bad("the anchor has no L2 history proof"))?;
-        history::block_hash(
-            low.state_root,
-            low.number,
+    let hash = if chain.history {
+        walk_back(
+            &top,
             number,
-            NITRO_RING,
-            nitro_code_hash(),
-            proof,
+            headers,
+            answer,
+            ETHEREUM_RING,
+            history::ethereum_code_hash(),
         )?
+    } else {
+        let low = descend(&top, number, answer)?;
+        if low.number != number {
+            return Err(Failure::new(
+                Kind::NotCovered,
+                format!(
+                    "{} keeps no block-hash history: the headers sent stop at block {}, above \
+                     block {number}",
+                    chain.name, low.number
+                ),
+            ));
+        }
+        low.hash
     };
-    Ok(NitroConfirmed {
+    Ok(OracleConfirmed {
         level,
         hash,
         anchor_block: top.number,
-        assertion,
+        output_index: index,
         l1_block: l1.number,
     })
 }
 
-
-
-
-
-pub(crate) fn pending_chain_stands(
-    state: &call::State,
-    l1: &Execution,
-    chain: &NitroChain,
-    number: u64,
-    assertion: [u8; 32],
-    parent: [u8; 32],
-    ancestors: &[Value],
-) -> Result<(), Failure> {
-    let ask = |sig: &str, h: [u8; 32]| call::call(state, l1, chain.rollup, calldata(sig, &[h]));
-    let w32 = |v: &Value, what: &str| -> Result<[u8; 32], Failure> {
-        bytes_of(
-            v.as_str()
-                .ok_or_else(|| bad(format!("{what} is not hex")))?,
-            what,
-        )?
-        .try_into()
-        .map_err(|_| bad(format!("{what} is not 32 bytes")))
-    };
-    let (mut x, mut p) = (assertion, parent);
-    let mut up = ancestors.iter();
-    loop {
-        if !as_bool(&ask("isFirstChild(bytes32)", x)?)?
-            || word(&ask("getSecondChildCreationBlock(bytes32)", p)?, 0)? != [0u8; 32]
-        {
-            return Err(Failure::new(
-                Kind::Disputed,
-                format!(
-                    "another claim on Ethereum contests {}'s claim for block {number}",
-                    chain.name
-                ),
-            ));
-        }
-        if !as_bool(&ask("isPending(bytes32)", p)?)? {
-            if status(&ask("getAssertion(bytes32)", p)?)? != CONFIRMED {
-                return Err(rejected("a claim builds on one Ethereum does not have"));
-            }
-            return Ok(());
-        }
-        let next = up.next().ok_or_else(|| {
-            Failure::new(
-                Kind::NotCovered,
-                format!(
-                    "Willow did not send every claim {}'s claim for block {number} builds on",
-                    chain.name
-                ),
-            )
-        })?;
-        let pp = w32(&next["parent"], "an earlier claim's parent")?;
-        let mut pre = Vec::with_capacity(96);
-        pre.extend_from_slice(&pp);
-        pre.extend_from_slice(&w32(&next["stateHash"], "an earlier claim's state")?);
-        pre.extend_from_slice(&w32(&next["inboxAcc"], "an earlier claim's inbox")?);
-        if keccak256(&pre).0 != p {
-            return Err(rejected(
-                "an earlier claim does not hash to its child's parent",
-            ));
-        }
-        (x, p) = (p, pp);
-    }
-}
+#[allow(unused_imports)]
+pub(crate) use crate::nitro::pending_chain_stands;
+pub use crate::nitro::{
+    confirm_nitro, nitro_code_hash, NitroChain, NitroConfirmed, NITRO_CHAINS, NITRO_HISTORY_CODE,
+    NITRO_RING,
+};

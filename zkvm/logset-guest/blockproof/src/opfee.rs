@@ -14,6 +14,8 @@ const ECOTONE: [u8; 4] = [0x44, 0x0a, 0x5e, 0x20];
 const ISTHMUS: [u8; 4] = [0x09, 0x89, 0x99, 0xbe];
 const JOVIAN: [u8; 4] = [0x3d, 0xb6, 0xbe, 0x2b];
 
+const MANTLE_ARSIA: [u8; 4] = [0x49, 0xe7, 0x23, 0x83];
+
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FeeFork {
@@ -112,6 +114,18 @@ impl L1Info {
 
 
 
+    pub fn parse_for(chain_id: u64, input: &[u8]) -> Option<Self> {
+        if logset_blockcheck::header::mantle(chain_id) && input.get(..4) == Some(&MANTLE_ARSIA[..])
+        {
+            let mut jovian = input.to_vec();
+            jovian[..4].copy_from_slice(&JOVIAN);
+            return Self::parse(&jovian);
+        }
+        Self::parse(input)
+    }
+
+
+
     pub fn fee_scalar_decimal(&self) -> String {
         format!(
             "{}",
@@ -158,70 +172,97 @@ impl L1Info {
     }
 }
 
-/// The FastLZ (level 1) compressed length of `ib`, as op-geth's `FlzCompressLen` and op-revm's
-/// `flz_compress_len` count it (both follow Solady's MIT-licensed `LibZip.flzCompress`).
-pub fn flz_compress_len(ib: &[u8]) -> u32 {
-    let len = ib.len() as u32;
-    let mut n = 0u32;
-    let mut ht = vec![0u32; 8192];
-    let u24 = |i: u32| {
-        let i = i as usize;
-        u32::from(ib[i]) | u32::from(ib[i + 1]) << 8 | u32::from(ib[i + 2]) << 16
+/// The FastLZ (level 1) compressed length of `input`: a port of op-revm's `flz_compress_len`
+/// (`op_revm::fast_lz`, MIT), which follows Solady's MIT-licensed `LibZip.flzCompress`.
+pub fn flz_compress_len(input: &[u8]) -> u32 {
+    let mut idx: u32 = 2;
+    let idx_limit: u32 = if input.len() < 13 {
+        0
+    } else {
+        input.len() as u32 - 13
     };
-    let hash = |v: u32| (2_654_435_769u32.wrapping_mul(v) >> 19) & 0x1fff;
-    let literals = |n: &mut u32, r: u32| {
-        *n += 0x21 * (r / 0x20);
-        if !r.is_multiple_of(0x20) {
-            *n += r % 0x20 + 1;
-        }
-    };
-    let ip_limit = len.saturating_sub(13);
-    let mut a = 0u32;
-    let mut ip = a + 2;
-    while ip < ip_limit {
-        let mut r;
+    let mut anchor = 0;
+    let mut size = 0;
+    let mut htab = vec![0u32; 8192];
+    while idx < idx_limit {
+        let mut r: u32;
+        let mut distance: u32;
         loop {
-            let s = u24(ip);
-            let h = hash(s) as usize;
-            r = ht[h];
-            ht[h] = ip;
-            let d = ip - r;
-            if ip >= ip_limit {
+            let seq = u24(input, idx);
+            let hash = fastlz_hash(seq);
+            r = htab[hash as usize];
+            htab[hash as usize] = idx;
+            distance = idx - r;
+            if idx >= idx_limit {
                 break;
             }
-            ip += 1;
-            if d <= 0x1fff && s == u24(r) {
+            idx += 1;
+            if distance < 8192 && seq == u24(input, r) {
                 break;
             }
         }
-        if ip >= ip_limit {
+        if idx >= idx_limit {
             break;
         }
-        ip -= 1;
-        if ip > a {
-            literals(&mut n, ip - a);
+        idx -= 1;
+        if idx > anchor {
+            size = literals(idx - anchor, size);
         }
-
-        let (p, q) = (r + 3, ip + 3);
-        let mut e = ip_limit + 9 - q;
-        let mut l = 0u32;
-        while l < e {
-            if ib[(p + l) as usize] != ib[(q + l) as usize] {
-                e = 0;
-            }
-            l += 1;
-        }
-        let m = l - 1;
-        n += 3 * (m / 262) + if m % 262 >= 6 { 3 } else { 2 };
-        ip += l;
-        for _ in 0..2 {
-            ht[hash(u24(ip)) as usize] = ip;
-            ip += 1;
-        }
-        a = ip;
+        let len = cmp(input, r + 3, idx + 3, idx_limit + 9);
+        size = flz_match(len, size);
+        idx = set_next_hash(&mut htab, input, idx + len);
+        idx = set_next_hash(&mut htab, input, idx);
+        anchor = idx;
     }
-    literals(&mut n, len - a);
-    n
+    literals(input.len() as u32 - anchor, size)
+}
+
+const fn literals(r: u32, size: u32) -> u32 {
+    let size = size + 0x21 * (r / 0x20);
+    let r = r % 0x20;
+    if r != 0 {
+        size + r + 1
+    } else {
+        size
+    }
+}
+
+fn cmp(input: &[u8], p: u32, q: u32, r: u32) -> u32 {
+    let mut l = 0;
+    let mut r = r - q;
+    while l < r {
+        if input[(p + l) as usize] != input[(q + l) as usize] {
+            r = 0;
+        }
+        l += 1;
+    }
+    l
+}
+
+const fn flz_match(l: u32, size: u32) -> u32 {
+    let l = l - 1;
+    let size = size + (3 * (l / 262));
+    if l % 262 >= 6 {
+        size + 3
+    } else {
+        size + 2
+    }
+}
+
+fn set_next_hash(htab: &mut [u32], input: &[u8], idx: u32) -> u32 {
+    htab[fastlz_hash(u24(input, idx)) as usize] = idx;
+    idx + 1
+}
+
+const fn fastlz_hash(v: u32) -> u16 {
+    let hash = (v as u64 * 2654435769) >> 19;
+    hash as u16 & 0x1fff
+}
+
+fn u24(input: &[u8], idx: u32) -> u32 {
+    u32::from(input[idx as usize])
+        + (u32::from(input[(idx + 1) as usize]) << 8)
+        + (u32::from(input[(idx + 2) as usize]) << 16)
 }
 
 #[cfg(test)]
@@ -247,6 +288,10 @@ mod tests {
             })
             .collect();
         assert!(flz_compress_len(&random) > 900);
+
+        assert_eq!(flz_compress_len(&[0; 1000]), 21);
+        assert_eq!(flz_compress_len(&[42; 1000]), 21);
+        assert_eq!(flz_compress_len(&[0xfa, 0xca, 0xde]), 4);
     }
 
     #[test]

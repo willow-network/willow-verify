@@ -4,7 +4,7 @@ use crate::header::{self, HeaderInfo};
 
 
 use alloy::eips::eip4895::Withdrawal;
-use anyhow::{ensure, Context, Result};
+use anyhow::{ensure, Result};
 
 
 
@@ -16,9 +16,6 @@ pub struct VerifiedHeader {
 
     pub header: alloy::consensus::Header,
 }
-
-
-
 
 
 
@@ -202,6 +199,20 @@ pub struct VerifiedBody {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 pub fn header_from_rlp(rlp: &[u8]) -> Result<VerifiedHeader> {
     let (_, total, is_list) = crate::receipts::rlp_item(rlp)?;
     ensure!(
@@ -214,10 +225,7 @@ pub fn header_from_rlp(rlp: &[u8]) -> Result<VerifiedHeader> {
         "the two header decoders disagree on block {}",
         info.number
     );
-    let header = {
-        use alloy_rlp::Decodable;
-        alloy::consensus::Header::decode(&mut &rlp[..]).context("header RLP decode")?
-    };
+    let header = header::alloy_header(rlp)?;
     Ok(VerifiedHeader {
         info,
         timestamp: header.timestamp,

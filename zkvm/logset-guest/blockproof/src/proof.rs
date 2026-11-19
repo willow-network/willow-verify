@@ -17,9 +17,11 @@ use crate::fault::{check, reject, Fault, Tag};
 use crate::mpt;
 use crate::render::{Context, Rendered, View};
 use alloy::eips::eip4895::Withdrawal;
-use alloy_rlp::Decodable;
 use anyhow::{bail, ensure, Context as _, Result};
 use logset_blockcheck::receipts::{rlp_item, rlp_list_items};
+
+
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -280,16 +282,25 @@ pub(crate) fn parse_bytes(s: &str, what: &str) -> Result<Vec<u8>> {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
 pub fn decode_header(rlp: &[u8]) -> Result<alloy::consensus::Header> {
-    let mut buf = rlp;
-    let h = alloy::consensus::Header::decode(&mut buf).context("header RLP")?;
+
+
+    let h = logset_blockcheck::header::alloy_header(rlp).context("header RLP")?;
+    let trailing = logset_blockcheck::header::trailing_items(rlp).context("header RLP")?;
     ensure!(
-        buf.is_empty(),
-        "header RLP has {} trailing bytes",
-        buf.len()
-    );
-    ensure!(
-        alloy_rlp::encode(&h) == rlp,
+        logset_blockcheck::header::encode_with_trailing(&h, &trailing)? == rlp,
         "header RLP is not in canonical form"
     );
     let (payload, _, is_list) = rlp_item(rlp)?;

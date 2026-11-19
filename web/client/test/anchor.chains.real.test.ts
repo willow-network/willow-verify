@@ -1,7 +1,8 @@
 // The chains added after the first seven through the REAL anchor module (a verify
 // page build, WILLOW_VERIFY_DIST, built with them), on anchors saved from
 // public endpoints (web/verify/test/anchor/chains/): Ethereum's light client for Soneium, Zora and
-// World Chain; Sepolia's for the testnets, its data on the testnet's own route; BNB's validators.
+// World Chain; Sepolia's for the testnets, its data on the testnet's own route; BNB's and
+// Berachain's validators.
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,6 +33,7 @@ interface Asked {
 function willow(anchors: Map<string, unknown>) {
   const asked: Asked[] = [];
   const bnb = read('bnb.json');
+  const bera = read('berachain.json');
   const reply = (result: unknown): Reply => {
     const value = { jsonrpc: '2.0', id: 1, result } as Reply['value'];
     return { value, text: JSON.stringify(value) };
@@ -40,12 +42,14 @@ function willow(anchors: Map<string, unknown>) {
     asked.push({ chainId, method, params });
     const lc = chainId === 1 ? undefined : lightClientOf(chainId);
     if (method === 'willow_lightClientBootstrap') {
+      if (lc === 'berachain') return reply(bera.bootstrap);
       return reply(lc === 'bnb' ? bnb.bootstrap : read(lc === 'sepolia' ? 'sepolia-bootstrap.json' : 'bootstrap.json'));
     }
     if (method === 'willow_lightClientUpdates') {
       const [from, count] = params as [number, number];
       const within = (k: number) => k >= from && k < from + count;
       if (lc === 'bnb') return reply(bnb.updates.filter((u: any) => within(u.epoch)));
+      if (lc === 'berachain') return reply(bera.updates.filter((u: any) => u.header.height > from && u.header.height <= from + count));
       return reply(read(lc === 'sepolia' ? 'sepolia-updates.json' : 'updates.json').filter((u: any) => within(period(u))));
     }
     if (method === 'willow_getBlockAnchor') {
@@ -61,7 +65,14 @@ function willow(anchors: Map<string, unknown>) {
 function starts(): AnchorStart {
   const c = read('checkpoint.json');
   const b = read('bnb.json').start;
-  return { root: c.root, slot: c.slot, sepolia: read('sepolia-checkpoint.json'), bnb: { number: b.number, hash: b.hash, time: 0 } };
+  const e = read('berachain.json').start;
+  return {
+    root: c.root,
+    slot: c.slot,
+    sepolia: read('sepolia-checkpoint.json'),
+    bnb: { number: b.number, hash: b.hash, time: 0 },
+    berachain: { height: e.height, hash: e.hash, time: 0 },
+  };
 }
 
 const memory = (): KeyValueStorage & { m: Map<string, string> } => {
@@ -76,7 +87,9 @@ function anchorsAt(nowSec: number, anchors: Map<string, unknown>, storage: KeyVa
     backend,
     rpc: w.rpc,
     storage,
-    checkpointRoot: async (lc) => (lc === 'sepolia' ? starts().sepolia!.root : lc === 'bnb' ? starts().bnb!.hash : starts().root),
+    checkpointRoot: async (lc) =>
+      lc === 'sepolia' ? starts().sepolia!.root : lc === 'bnb' ? starts().bnb!.hash : lc === 'berachain' ? starts().berachain!.hash : starts().root,
+    startHeight: async (lc) => (lc === 'berachain' ? starts().berachain!.height : undefined),
     minLevel,
     headMaxAgeMs: () => 2_000,
     maxHeadAgeSec: 10 ** 9,
@@ -136,5 +149,21 @@ describe.skipIf(!VERIFY_DIST)('the real anchor module on the new chains', () => 
     const { a } = anchorsAt(newest.savedAt, new Map([['56:latest', newest.result]]), null, 'final');
     const head = await a.head(56, 'latest');
     expect([head.number, head.level, head.hash]).toEqual([newest.block, 'final', newest.hash.toLowerCase()]);
+  });
+
+  it("Berachain: blocks final through its validators' commit, its start asked by hash and height on chain 80094's route", async () => {
+    const bera = read('berachain.json');
+    const storage = memory();
+    for (const x of bera.anchors) {
+      const { a, asked } = anchorsAt(x.savedAt, new Map([[`80094:${quantity(x.block)}`, x.result]]), storage);
+      const got = await a.block(80094, x.block, x.hash);
+      expect([got.level, got.hash, got.path]).toEqual(['final', x.hash.toLowerCase(), 'cometbft']);
+      for (const y of asked.filter((q) => q.method === 'willow_lightClientBootstrap')) {
+        expect([y.chainId, y.params]).toEqual([80094, [bera.start.hash, bera.start.height]]);
+      }
+      const { a: b } = anchorsAt(x.savedAt, new Map([[`80094:${quantity(x.block)}`, x.result]]));
+      await expect(b.block(80094, x.block, `0x${'ab'.repeat(32)}`)).rejects.toMatchObject({ code: -32098, data: { kind: 'anchor-mismatch' } });
+    }
+    expect(storage.m.has('willow-rpc:light-client:berachain')).toBe(true);
   });
 });

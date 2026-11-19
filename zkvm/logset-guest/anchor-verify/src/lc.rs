@@ -66,6 +66,8 @@ pub enum Network {
 pub mod sepolia {
     use super::{hex32, Bytes32};
 
+
+    pub const CHAIN_ID: u64 = 11_155_111;
     pub const GENESIS_VALIDATORS_ROOT: Bytes32 =
         hex32("d8ea171f3c94aea21ebc42a1ed61052acf3f9209c00e4efbaaddac09ed9b8078");
     pub const GENESIS_TIME: u64 = 1_655_733_600;
@@ -80,8 +82,8 @@ pub mod sepolia {
 
 
     pub const PINNED_ROOT: Bytes32 =
-        hex32("5d5b94c9c82d9f56409699948380d58de837f39a170e0de81c547642d3b58415");
-    pub const PINNED_SLOT: u64 = 11_577_216;
+        hex32("9f8fea00eaa8dfa2562cf8f82cf80c03917665835a4523871d1d0bc2e7ba360a");
+    pub const PINNED_SLOT: u64 = 11_595_392;
 }
 
 

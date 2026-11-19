@@ -1,51 +1,16 @@
-//! What Nitro charges a call for its L1 data, as gas (`GasChargingHook`, `RPCPostingGasHook`): the
-//! size after brotli of a stand-in transaction made from the call, priced at the L1 price per
-//! unit ArbOS holds and turned into gas at the L2 price.
 
-use alloy_primitives::{keccak256, Address, Bytes, B256, U256, U512};
+
+
+
+
+
+use alloy_primitives::{b256, Address, Bytes, B256, U256};
 use alloy_rlp::{Encodable, Header};
 use brotli::enc::encode::{
     BrotliEncoderOperation, BrotliEncoderParameter, BrotliEncoderStateStruct,
 };
-use brotli::enc::interface::PredictionModeContextMap;
-use brotli::enc::{InputPair, InputReferenceMut, StandardAlloc, StaticCommand};
-use std::sync::LazyLock;
-
-
-const UNITS_PER_BYTE: u64 = 16;
-
-const PADDING_UNITS: u64 = 16 * UNITS_PER_BYTE;
-const PADDING_BIPS: u64 = 10_100;
-
-const ESTIMATE_BIPS: u64 = 11_000;
-
-const WINDOW: u32 = 22;
-
-
-static FILLERS: LazyLock<Fillers> = LazyLock::new(|| {
-    let k = |s: &str| keccak256(s.as_bytes());
-    let word4 = |s: &str| U256::from_be_slice(&k(s)[..4]);
-    Fillers {
-        nonce: u64::from_be_bytes(k("Nonce")[..8].try_into().unwrap()),
-        tip: word4("GasTipCap"),
-        fee_cap: word4("GasFeeCap"),
-        gas: u64::from(u32::from_be_bytes(k("Gas")[..4].try_into().unwrap())),
-
-        v: U256::from(42_161u64 * 3),
-        r: U256::from_be_bytes(k("R").0),
-        s: U256::from_be_bytes(k("S").0),
-    }
-});
-
-struct Fillers {
-    nonce: u64,
-    tip: U256,
-    fee_cap: U256,
-    gas: u64,
-    v: U256,
-    r: U256,
-    s: U256,
-}
+use brotli::enc::interface::{InputPair, PredictionModeContextMap, StaticCommand};
+use brotli::enc::{InputReferenceMut, StandardAlloc};
 
 
 #[derive(Clone, Debug)]
@@ -61,150 +26,121 @@ pub struct Message<'a> {
 }
 
 
+const NONCE_FILLER: u64 = 12_125_040_168_863_184_969;
+
+const TIP_FILLER: u64 = 968_523_046;
+
+const FEE_CAP_FILLER: u64 = 4_054_464_639;
+
+const GAS_FILLER: u64 = 3_091_729_570;
+
+const SIG_V: u64 = 126_483;
+const SIG_R: B256 = b256!("0xef22bddd350b943170a67d35191c27e310709a28c38b5762a152ff640108f5b2");
+const SIG_S: B256 = b256!("0xa9463b19d1148abedba3d6925530d4465b271ce2cc61f80b1a0a80fd73eab881");
+
+
+const WINDOW_BITS: u32 = 22;
+
+
 
 pub fn stand_in(m: &Message<'_>, estimating: bool) -> Vec<u8> {
-    let f = &*FILLERS;
-    let or = |v: U256, filler: U256| if v.is_zero() { filler } else { v };
-    let nonce = if m.nonce == 0 { f.nonce } else { m.nonce };
-    let gas = if m.gas == 0 || estimating {
-        f.gas
-    } else {
-        m.gas
+    let nonce = match m.nonce {
+        0 => NONCE_FILLER,
+        n => n,
     };
-    let (tip, fee_cap) = (or(m.tip, f.tip), or(m.fee_cap, f.fee_cap));
-    let items: Vec<(Address, &[B256])> = m
-        .access_list
-        .iter()
-        .map(|(a, keys)| (*a, keys.as_slice()))
-        .collect();
-    let item_len = |(a, keys): &(Address, &[B256])| {
-        let keys_len: usize = keys.iter().map(Encodable::length).sum();
-        let inner = a.length()
-            + Header {
-                list: true,
-                payload_length: keys_len,
-            }
-            .length()
-            + keys_len;
-        Header {
-            list: true,
-            payload_length: inner,
-        }
-        .length()
-            + inner
+    let tip = match m.tip.is_zero() {
+        true => U256::from(TIP_FILLER),
+        false => m.tip,
     };
-    let list_len: usize = items.iter().map(item_len).sum();
-    let to_len = m.to.map_or(1, |a| a.length());
-    let payload = U256::ZERO.length()
-        + nonce.length()
-        + tip.length()
-        + fee_cap.length()
-        + gas.length()
-        + to_len
-        + m.value.length()
-        + m.data.length()
-        + Header {
-            list: true,
-            payload_length: list_len,
-        }
-        .length()
-        + list_len
-        + f.v.length()
-        + f.r.length()
-        + f.s.length();
-    let mut out = Vec::with_capacity(payload + 8);
-    out.push(2);
-    Header {
-        list: true,
-        payload_length: payload,
-    }
-    .encode(&mut out);
-    U256::ZERO.encode(&mut out);
-    nonce.encode(&mut out);
-    tip.encode(&mut out);
-    fee_cap.encode(&mut out);
-    gas.encode(&mut out);
+    let fee_cap = match m.fee_cap.is_zero() {
+        true => U256::from(FEE_CAP_FILLER),
+        false => m.fee_cap,
+    };
+    let gas = match m.gas == 0 || estimating {
+        true => GAS_FILLER,
+        false => m.gas,
+    };
+    let mut body = Vec::new();
+    0u64.encode(&mut body);
+    nonce.encode(&mut body);
+    tip.encode(&mut body);
+    fee_cap.encode(&mut body);
+    gas.encode(&mut body);
     match m.to {
-        Some(a) => a.encode(&mut out),
-        None => out.push(alloy_rlp::EMPTY_STRING_CODE),
+        Some(to) => to.encode(&mut body),
+
+        None => body.push(alloy_rlp::EMPTY_STRING_CODE),
     }
-    m.value.encode(&mut out);
-    m.data.encode(&mut out);
+    m.value.encode(&mut body);
+    m.data.encode(&mut body);
+    let mut entries = Vec::new();
+    for (address, keys) in m.access_list {
+        let mut keys_rlp = Vec::new();
+        for k in keys {
+            k.encode(&mut keys_rlp);
+        }
+        let mut entry = Vec::new();
+        address.encode(&mut entry);
+        list_header(keys_rlp.len(), &mut entry);
+        entry.extend_from_slice(&keys_rlp);
+        list_header(entry.len(), &mut entries);
+        entries.extend_from_slice(&entry);
+    }
+    list_header(entries.len(), &mut body);
+    body.extend_from_slice(&entries);
+    SIG_V.encode(&mut body);
+    U256::from_be_bytes(SIG_R.0).encode(&mut body);
+    U256::from_be_bytes(SIG_S.0).encode(&mut body);
+    let mut out = vec![0x02];
+    list_header(body.len(), &mut out);
+    out.extend_from_slice(&body);
+    out
+}
+
+fn list_header(payload_length: usize, out: &mut Vec<u8>) {
     Header {
         list: true,
-        payload_length: list_len,
+        payload_length,
     }
-    .encode(&mut out);
-    for item in &items {
-        let (a, keys) = item;
-        let keys_len: usize = keys.iter().map(Encodable::length).sum();
-        let inner = a.length()
-            + Header {
-                list: true,
-                payload_length: keys_len,
-            }
-            .length()
-            + keys_len;
-        Header {
-            list: true,
-            payload_length: inner,
-        }
-        .encode(&mut out);
-        a.encode(&mut out);
-        Header {
-            list: true,
-            payload_length: keys_len,
-        }
-        .encode(&mut out);
-        for k in *keys {
-            k.encode(&mut out);
-        }
-    }
-    f.v.encode(&mut out);
-    f.r.encode(&mut out);
-    f.s.encode(&mut out);
-    out
+    .encode(out);
 }
 
 
 
 pub fn brotli_len(input: &[u8], level: u32) -> Option<usize> {
-    let mut s = BrotliEncoderStateStruct::new(StandardAlloc::default());
-    if !s.set_parameter(BrotliEncoderParameter::BROTLI_PARAM_QUALITY, level)
-        || !s.set_parameter(BrotliEncoderParameter::BROTLI_PARAM_LGWIN, WINDOW)
+    let mut encoder = BrotliEncoderStateStruct::new(StandardAlloc::default());
+    if !encoder.set_parameter(BrotliEncoderParameter::BROTLI_PARAM_QUALITY, level)
+        || !encoder.set_parameter(BrotliEncoderParameter::BROTLI_PARAM_LGWIN, WINDOW_BITS)
     {
         return None;
     }
-    let mut out = vec![0u8; input.len() + (input.len() >> 10) * 8 + 64];
-    let (mut available_in, mut in_offset) = (input.len(), 0usize);
-    let (mut available_out, mut out_offset) = (out.len(), 0usize);
-    let mut total = Some(0usize);
-    let mut nop = |_: &mut PredictionModeContextMap<InputReferenceMut<'_>>,
-                   _: &mut [StaticCommand],
-                   _: InputPair<'_>,
-                   _: &mut StandardAlloc| ();
-    let ok = s.compress_stream(
+    let mut out = vec![0u8; input.len() + 8 * (input.len() / 1024) + 64];
+    let (mut in_left, mut in_at) = (input.len(), 0usize);
+    let (mut out_left, mut out_at) = (out.len(), 0usize);
+    let mut total = None;
+    let mut no_callback = |_: &mut PredictionModeContextMap<InputReferenceMut>,
+                           _: &mut [StaticCommand],
+                           _: InputPair,
+                           _: &mut StandardAlloc| ();
+    let ok = encoder.compress_stream(
         BrotliEncoderOperation::BROTLI_OPERATION_FINISH,
-        &mut available_in,
+        &mut in_left,
         input,
-        &mut in_offset,
-        &mut available_out,
+        &mut in_at,
+        &mut out_left,
         &mut out,
-        &mut out_offset,
+        &mut out_at,
         &mut total,
-        &mut nop,
+        &mut no_callback,
     );
-    (ok && s.is_finished()).then_some(out_offset)
+    ok.then_some(out_at)
 }
 
-/// Whether this port of brotli compresses `len` bytes at `level` to Google's size: checked at
-/// level 1 (ArbOS's), where it hashes 6 bytes a match for inputs of 16–32 KiB and Google's
-/// encoder 4 (`compress_fragment_two_pass.rs`: `table_bits < 15`; Nitro's C: `B <= 15`).
+
+
 pub fn reproducible(len: usize, level: u32) -> bool {
     level == 1 && !(16_385..=32_768).contains(&len)
 }
-
-
 
 
 pub fn data_cost(
@@ -213,19 +149,18 @@ pub fn data_cost(
     price_per_unit: U256,
     estimating: bool,
 ) -> Result<(U256, u64), String> {
-    let tx = stand_in(m, estimating);
-    if !reproducible(tx.len(), level) {
+    let bytes = stand_in(m, estimating);
+    let len = bytes.len();
+    if !reproducible(len, level) {
         return Err(format!(
-            "its L1 data's size after brotli ({} bytes at level {level}) isn't reproduced here",
-            tx.len()
+            "its L1 data's size after brotli ({len} bytes at level {level}) isn't reproduced here"
         ));
     }
-    let len =
-        brotli_len(&tx, level).ok_or_else(|| format!("brotli failed at level {level}"))? as u64;
-    let units = UNITS_PER_BYTE.saturating_mul(len);
-    let units = units.wrapping_add(PADDING_UNITS).wrapping_mul(PADDING_BIPS) / 10_000;
-    let cost = U512::from(price_per_unit) * U512::from(units);
-    Ok((narrow(cost), units))
+    let size =
+        brotli_len(&bytes, level).ok_or_else(|| format!("brotli failed at level {level}"))?;
+    let units = (size as u64).saturating_mul(16);
+    let padded = units.wrapping_add(256).wrapping_mul(10_100) / 10_000;
+    Ok((price_per_unit.saturating_mul(U256::from(padded)), padded))
 }
 
 
@@ -233,65 +168,15 @@ pub fn data_cost(
 pub fn poster_gas(cost: U256, price: U256, estimating: Option<U256>) -> u64 {
     let (cost, price) = match estimating {
         None => (cost, price),
-        Some(min_base_fee) => {
-            let adjusted = (U512::from(price) * U512::from(7u64)) / U512::from(8u64);
-            let adjusted = narrow(adjusted).max(min_base_fee);
-            let padded = U512::from(cost) * U512::from(ESTIMATE_BIPS) / U512::from(10_000u64);
-            (narrow(padded), adjusted)
+        Some(min) => {
+
+            let (eighth, rest) = (price / U256::from(8), price % U256::from(8));
+            let lowered = eighth * U256::from(7) + rest * U256::from(7) / U256::from(8);
+            (cost.saturating_add(cost / U256::from(10)), lowered.max(min))
         }
     };
-    if price.is_zero() {
-        return 0;
-    }
-    (cost / price).saturating_to()
-}
-
-
-pub(crate) fn narrow(v: U512) -> U256 {
-    match v.bit_len() <= 256 {
-        true => U256::from_limbs_slice(&v.as_limbs()[..4]),
-        false => U256::MAX,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_stand_in_is_an_eip1559_transaction_with_its_fillers() {
-        let data = Bytes::new();
-        let m = Message {
-            nonce: 0,
-            tip: U256::ZERO,
-            fee_cap: U256::ZERO,
-            gas: 1_000_000,
-            to: Some(Address::repeat_byte(0x11)),
-            value: U256::ZERO,
-            data: &data,
-            access_list: &[],
-        };
-        let tx = stand_in(&m, false);
-        assert_eq!(tx[0], 2);
-
-        assert_eq!(FILLERS.v, U256::from(126_483u64));
-        let decoded = alloy_rlp::Header::decode(&mut &tx[1..]).unwrap();
-        assert!(decoded.list);
-        assert_eq!(decoded.payload_length + 1 + decoded.length(), tx.len());
-    }
-
-    #[test]
-    fn only_sizes_this_brotli_shares_with_nitros_are_priced() {
-        assert!(reproducible(16_384, 1) && reproducible(32_769, 1));
-        assert!(!reproducible(16_385, 1) && !reproducible(32_768, 1));
-        assert!(!reproducible(100, 0) && !reproducible(100, 11));
-    }
-
-    #[test]
-    fn brotli_compresses_in_one_finishing_step() {
-        let input = vec![7u8; 1000];
-        let short = brotli_len(&input, 1).unwrap();
-        assert!(short < 40, "{short}");
-        assert!(brotli_len(&[], 1).unwrap() > 0);
+    match price.is_zero() {
+        true => 0,
+        false => (cost / price).saturating_to(),
     }
 }

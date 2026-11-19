@@ -75,6 +75,12 @@ pub struct ReceiptGate {
 
 
     pub nitro: bool,
+
+
+    pub fee_currency: bool,
+
+
+    pub pol: bool,
 }
 
 
@@ -84,6 +90,9 @@ pub const DEPOSIT_TX_TYPE: u8 = 0x7E;
 
 
 pub const NITRO_TX_TYPES: [u8; 6] = [0x64, 0x65, 0x66, 0x68, 0x69, 0x6A];
+
+
+pub const FEE_CURRENCY_TX_TYPE: u8 = 0x7B;
 
 
 
@@ -96,10 +105,54 @@ pub const NITRO_CHAIN_IDS: [u64; 2] = [42161, 4663];
 
 
 
-pub const SERVED_OP_STACK_CHAIN_IDS: [u64; 7] =
-    [1868, 7_777_777, 480, 11_155_420, 84_532, 1301, 763_373];
 
-pub const SERVED_NITRO_CHAIN_IDS: [u64; 2] = [421_614, 46_630];
+pub const SERVED_OP_STACK_CHAIN_IDS: [u64; 13] = [
+    1868, 7_777_777, 480, 11_155_420, 84_532, 1301, 763_373, CELO, X_LAYER, KATANA, OPBNB, MEGAETH,
+    MANTLE,
+];
+
+
+
+pub const MEGAETH: u64 = 4_326;
+
+
+
+pub const MANTLE: u64 = 5_000;
+
+
+pub const SERVED_NITRO_CHAIN_IDS: [u64; 3] = [421_614, 46_630, APECHAIN];
+
+pub const X_LAYER: u64 = 196;
+
+pub const APECHAIN: u64 = 33_139;
+
+
+pub const MONAD: u64 = 143;
+
+pub const MONAD_TESTNET: u64 = 10_143;
+
+pub const KATANA: u64 = 747_474;
+
+
+pub const OPBNB: u64 = 204;
+
+
+pub const BERACHAIN: u64 = 80_094;
+
+pub const POL_CHAIN_IDS: [u64; 1] = [BERACHAIN];
+
+pub const CELO: u64 = 42_220;
+
+
+
+
+pub const POLYGON: u64 = 137;
+
+pub const STATE_SYNC_TX_TYPE: u8 = 0x7F;
+
+pub const STATE_SYNC_CHAIN_IDS: [u64; 1] = [POLYGON];
+
+pub const FEE_CURRENCY_CHAIN_IDS: [u64; 1] = [CELO];
 
 
 
@@ -108,6 +161,8 @@ pub fn receipt_gate(chain_id: u64) -> ReceiptGate {
         deposits: OP_STACK_CHAIN_IDS.contains(&chain_id)
             || SERVED_OP_STACK_CHAIN_IDS.contains(&chain_id),
         nitro: NITRO_CHAIN_IDS.contains(&chain_id) || SERVED_NITRO_CHAIN_IDS.contains(&chain_id),
+        fee_currency: FEE_CURRENCY_CHAIN_IDS.contains(&chain_id),
+        pol: POL_CHAIN_IDS.contains(&chain_id),
     }
 }
 

@@ -1,0 +1,118 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+pub mod blob;
+pub mod error;
+pub mod hash;
+
+
+pub mod results;
+pub mod scp;
+
+
+
+
+
+pub use error::Error;
+
+use stellar_xdr::{Limits, ReadXdr};
+
+
+pub const PUBNET_PASSPHRASE: &str = "Public Global Stellar Network ; September 2015";
+
+pub const TESTNET_PASSPHRASE: &str = "Test SDF Network ; September 2015";
+
+
+
+
+pub const MIN_LEDGER_VERSION: u32 = 23;
+
+
+
+
+pub const MAX_LEDGER_VERSION: u32 = 30;
+
+
+
+#[cfg(not(feature = "testnet"))]
+pub const NETWORK_ID: [u8; 32] = [
+    0x7a, 0xc3, 0x39, 0x97, 0x54, 0x4e, 0x31, 0x75, 0xd2, 0x66, 0xbd, 0x02, 0x24, 0x39, 0xb2, 0x2c,
+    0xdb, 0x16, 0x50, 0x8c, 0x01, 0x16, 0x3f, 0x26, 0xe5, 0xcb, 0x2a, 0x3e, 0x10, 0x45, 0xa9, 0x79,
+];
+#[cfg(feature = "testnet")]
+pub const NETWORK_ID: [u8; 32] = [
+    0xce, 0xe0, 0x30, 0x2d, 0x59, 0x84, 0x4d, 0x32, 0xbd, 0xca, 0x91, 0x5c, 0x82, 0x03, 0xdd, 0x44,
+    0xb3, 0x3f, 0xbb, 0x7e, 0xdc, 0x19, 0x05, 0x1e, 0xa3, 0x7a, 0xbe, 0xdf, 0x28, 0xec, 0xd4, 0x72,
+];
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const MAX_XDR_DEPTH: u32 = 256;
+
+pub(crate) fn decode<T: ReadXdr>(bytes: &[u8], what: &'static str) -> Result<T, Error> {
+    T::from_xdr(bytes, Limits::depth(MAX_XDR_DEPTH)).map_err(|_| Error::Xdr(what))
+}
+
+
+pub use scp::{run_anchor, AnchorOutput};

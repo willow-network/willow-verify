@@ -381,9 +381,9 @@ for (const [chain, refused] of [[8453, true], [130, false], [4663, false]]) {
 {
   const rh = RH_ESTIMATE.request.params;
   const o = await run('call', { mode: 'robinhood', chain: 4663, fill: async (p) => { await p.fill('#call', JSON.stringify(rh[0])); await p.check('#estimate'); await p.fill('#at', String(parseInt(rh[1], 16))); }, name: 'estimate-robinhood' });
-  expect("Estimate on Robinhood Chain: Nitro's search, run in the browser, finds Nitro's gas", notCompleteL2(o) && stepOf(o, 'Estimating its gas').includes("ran Nitro's gas estimation") && /Nitro's gas estimation \(v3\.12\.2\)/.test(o.coverage) && o.table.some((r) => r.includes(`${parseInt(RH_ESTIMATE.expect.result, 16).toLocaleString('en-US')} gas`)), `${o.title} | ${stepOf(o, 'Estimating')} | ${o.coverage.slice(0, 80)}`);
+  expect("Estimate on Robinhood Chain: Nitro's search, run in the browser, finds Nitro's gas", notCompleteL2(o) && stepOf(o, 'Estimating its gas').includes("recomputed the gas estimate the way a Nitro node does") && /the way a Nitro node does \(v3\.12\.2\)/.test(o.coverage) && o.table.some((r) => r.includes(`${parseInt(RH_ESTIMATE.expect.result, 16).toLocaleString('en-US')} gas`)), `${o.title} | ${stepOf(o, 'Estimating')} | ${o.coverage.slice(0, 80)}`);
   const e = await run('call', { fill: typeCall(ESTIMATE.request.params[0], true), name: 'estimate-geth' });
-  expect("Estimate on Ethereum: still geth's (v1.17.10)", /geth's gas estimation \(v1\.17\.10\)/.test(e.coverage) && stepOf(e, 'Estimating its gas').includes("ran geth's gas estimation"), e.coverage.slice(0, 80));
+  expect("Estimate on Ethereum: still geth's (v1.17.10)", /the way a geth node does \(v1\.17\.10\)/.test(e.coverage) && stepOf(e, 'Estimating its gas').includes("recomputed the gas estimate the way a geth node does"), e.coverage.slice(0, 80));
 }
 
 // ---------- Chains without log or fee proofs ----------

@@ -1,575 +1,550 @@
-//! The precompiles of Nitro's EVM at ArbOS 60 and on: Osaka's, and ArbOS's own at 0x64–0x74,
-//! 0xff and 0xa4b05. ArbSys and ArbGasInfo are rebuilt from Nitro's source, gas included (800 to
-//! open ArbOS's state, 800 a slot read, 3 a word of arguments and of results); a call to any
-//! other ArbOS precompile, or to a method of these not rebuilt, is refused.
 
-use crate::evm::{arbos_slot, refuse, Ctx};
-use crate::state::{signed, SLOTS};
-use crate::ROBINHOOD;
-use alloy_primitives::{address, keccak256, Address, B256, U256};
+
+
+
+
+
+
+use crate::exec::{arbos_word, fail, refuse, NitroCtx};
+use crate::state::{low160, low64, signed, SLOTS};
+use alloy_primitives::{hex, Address, Bytes, U256};
 use revm::context::LocalContextTr;
-use revm::context_interface::{ContextTr, JournalTr};
+use revm::context_interface::JournalTr;
 use revm::handler::{EthPrecompiles, PrecompileProvider};
 use revm::interpreter::{CallInput, Gas, InputsImpl, InstructionResult, InterpreterResult};
+use revm::precompile::{PrecompileSpecId, Precompiles};
 use revm::primitives::hardfork::SpecId;
 use revm::Database;
-use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
-
-const ARBSYS: Address = address!("0x0000000000000000000000000000000000000064");
-const ARBGASINFO: Address = address!("0x000000000000000000000000000000000000006c");
+use std::collections::HashSet;
 
 
-pub(crate) const ARBOS: [Address; 18] = [
-    ARBSYS,
-    address!("0x0000000000000000000000000000000000000065"),
-    address!("0x0000000000000000000000000000000000000066"),
-    address!("0x0000000000000000000000000000000000000067"),
-    address!("0x0000000000000000000000000000000000000068"),
-    address!("0x0000000000000000000000000000000000000069"),
-    address!("0x000000000000000000000000000000000000006b"),
-    ARBGASINFO,
-    address!("0x000000000000000000000000000000000000006d"),
-    address!("0x000000000000000000000000000000000000006e"),
-    address!("0x000000000000000000000000000000000000006f"),
-    address!("0x0000000000000000000000000000000000000070"),
-    address!("0x0000000000000000000000000000000000000071"),
-    address!("0x0000000000000000000000000000000000000072"),
-    address!("0x0000000000000000000000000000000000000073"),
-    address!("0x0000000000000000000000000000000000000074"),
-    address!("0x00000000000000000000000000000000000000ff"),
-    address!("0x00000000000000000000000000000000000a4b05"),
+const fn small(n: u32) -> Address {
+    let mut b = [0u8; 20];
+    b[17] = (n >> 16) as u8;
+    b[18] = (n >> 8) as u8;
+    b[19] = n as u8;
+    Address::new(b)
+}
+
+const ARBSYS: Address = small(0x64);
+const ARBGASINFO: Address = small(0x6c);
+
+
+pub(crate) const ARBOS_PRECOMPILES: [Address; 18] = [
+    small(0x64),
+    small(0x65),
+    small(0x66),
+    small(0x67),
+    small(0x68),
+    small(0x69),
+    small(0x6b),
+    small(0x6c),
+    small(0x6d),
+    small(0x6e),
+    small(0x6f),
+    small(0x70),
+    small(0x71),
+    small(0x72),
+    small(0x73),
+    small(0x74),
+    small(0xff),
+    small(0xa4b05),
 ];
 
 
-const READ: u64 = 800;
-const COPY: u64 = 3;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Purity {
-    Pure,
-    View,
-    Write,
-    Payable,
-}
-
-use Purity::*;
-
-/// Every method of ArbSys and ArbGasInfo (their ABIs, nitro-precompile-interfaces 7e88c8c).
-const METHODS: [(Address, &str, Purity); 41] = [
-    (ARBSYS, "arbBlockNumber()", View),
-    (ARBSYS, "arbBlockHash(uint256)", View),
-    (ARBSYS, "arbChainID()", View),
-    (ARBSYS, "arbOSVersion()", View),
-    (ARBSYS, "getStorageGasAvailable()", View),
-    (ARBSYS, "isTopLevelCall()", View),
-    (
-        ARBSYS,
-        "mapL1SenderContractAddressToL2Alias(address,address)",
-        Pure,
-    ),
-    (ARBSYS, "wasMyCallersAddressAliased()", View),
-    (ARBSYS, "myCallersAddressWithoutAliasing()", View),
-    (ARBSYS, "withdrawEth(address)", Payable),
-    (ARBSYS, "sendTxToL1(address,bytes)", Payable),
-    (ARBSYS, "sendMerkleTreeState()", View),
-    (ARBGASINFO, "getPricesInWeiWithAggregator(address)", View),
-    (ARBGASINFO, "getPricesInWei()", View),
-    (ARBGASINFO, "getPricesInArbGasWithAggregator(address)", View),
-    (ARBGASINFO, "getPricesInArbGas()", View),
-    (ARBGASINFO, "getGasAccountingParams()", View),
-    (ARBGASINFO, "getMaxTxGasLimit()", View),
-    (ARBGASINFO, "getMinimumGasPrice()", View),
-    (ARBGASINFO, "getL1BaseFeeEstimate()", View),
-    (ARBGASINFO, "getL1BaseFeeEstimateInertia()", View),
-    (ARBGASINFO, "getL1RewardRate()", View),
-    (ARBGASINFO, "getL1RewardRecipient()", View),
-    (ARBGASINFO, "getL1GasPriceEstimate()", View),
-    (ARBGASINFO, "getCurrentTxL1GasFees()", View),
-    (ARBGASINFO, "getGasBacklog()", View),
-    (ARBGASINFO, "getPricingInertia()", View),
-    (ARBGASINFO, "getGasBacklogTolerance()", View),
-    (ARBGASINFO, "getL1PricingSurplus()", View),
-    (ARBGASINFO, "getPerBatchGasCharge()", View),
-    (ARBGASINFO, "getAmortizedCostCapBips()", View),
-    (ARBGASINFO, "getL1FeesAvailable()", View),
-    (ARBGASINFO, "getL1PricingEquilibrationUnits()", View),
-    (ARBGASINFO, "getLastL1PricingUpdateTime()", View),
-    (ARBGASINFO, "getL1PricingFundsDueForRewards()", View),
-    (ARBGASINFO, "getL1PricingUnitsSinceUpdate()", View),
-    (ARBGASINFO, "getLastL1PricingSurplus()", View),
-    (ARBGASINFO, "getMaxBlockGasLimit()", View),
-    (ARBGASINFO, "getGasPricingConstraints()", View),
-    (ARBGASINFO, "getMultiGasPricingConstraints()", View),
-    (ARBGASINFO, "getMultiGasBaseFee()", View),
-];
-
-fn selector(signature: &str) -> [u8; 4] {
-    keccak256(signature.as_bytes())[..4].try_into().unwrap()
-}
+const STOPPED: &str = "the run was stopped";
 
 
-type Methods = HashMap<(Address, [u8; 4]), (&'static str, Purity)>;
-
-static BY_SELECTOR: LazyLock<Methods> = LazyLock::new(|| {
-    METHODS
-        .iter()
-        .map(|(a, sig, p)| ((*a, selector(sig)), (*sig, *p)))
-        .collect()
-});
-
-
-
-pub(crate) struct Precompiles {
-    eth: EthPrecompiles,
+pub(crate) struct ArbPrecompiles {
+    base: EthPrecompiles,
     overridden: HashSet<Address>,
 }
 
-impl Precompiles {
-    pub fn new(spec: SpecId, overridden: &HashSet<Address>) -> Self {
-        let eth = EthPrecompiles {
-            precompiles: revm::precompile::Precompiles::new(
-                revm::precompile::PrecompileSpecId::from_spec_id(spec),
-            ),
-            spec,
-        };
-        Self {
-            eth,
-            overridden: overridden.clone(),
+impl ArbPrecompiles {
+    pub(crate) fn new(overridden: HashSet<Address>) -> Self {
+        ArbPrecompiles {
+            base: EthPrecompiles {
+                precompiles: Precompiles::new(PrecompileSpecId::from_spec_id(SpecId::OSAKA)),
+                spec: SpecId::OSAKA,
+            },
+            overridden,
         }
     }
 }
 
-impl<DB: Database> PrecompileProvider<Ctx<DB>> for Precompiles {
+impl<DB: Database> PrecompileProvider<NitroCtx<DB>> for ArbPrecompiles {
     type Output = InterpreterResult;
 
     fn set_spec(&mut self, spec: SpecId) -> bool {
-        <EthPrecompiles as PrecompileProvider<Ctx<DB>>>::set_spec(&mut self.eth, spec)
+        <EthPrecompiles as PrecompileProvider<NitroCtx<DB>>>::set_spec(&mut self.base, spec)
     }
 
     fn run(
         &mut self,
-        ctx: &mut Ctx<DB>,
+        context: &mut NitroCtx<DB>,
         address: &Address,
         inputs: &InputsImpl,
         is_static: bool,
         gas_limit: u64,
     ) -> Result<Option<InterpreterResult>, String> {
+
         if self.overridden.contains(address) {
             return Ok(None);
         }
-        if ARBOS.contains(address) {
-            return Ok(Some(arbos(ctx, *address, inputs, is_static, gas_limit)));
+        if *address == ARBSYS || *address == ARBGASINFO {
+            return arbos_call(context, *address, inputs, is_static, gas_limit).map(Some);
         }
-        self.eth.run(ctx, address, inputs, is_static, gas_limit)
+        if ARBOS_PRECOMPILES.contains(address) {
+            let why = format!(
+                "it calls the ArbOS precompile {}",
+                address.to_checksum(None)
+            );
+            refuse(context, why.clone());
+            return Err(why);
+        }
+        <EthPrecompiles as PrecompileProvider<NitroCtx<DB>>>::run(
+            &mut self.base,
+            context,
+            address,
+            inputs,
+            is_static,
+            gas_limit,
+        )
     }
 
-
     fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
-        Box::new(self.eth.warm_addresses().chain(ARBOS))
+        Box::new(self.base.warm_addresses().chain(ARBOS_PRECOMPILES))
     }
 
     fn contains(&self, address: &Address) -> bool {
         !self.overridden.contains(address)
-            && (ARBOS.contains(address) || self.eth.contains(address))
+            && (self.base.contains(address) || ARBOS_PRECOMPILES.contains(address))
     }
 }
 
 
-enum Fail {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Purity {
+    Pure,
+    View,
+    Payable,
+}
 
-    OutOfGas,
 
-    Sol(Vec<u8>),
+#[derive(Clone, Copy)]
+enum Method {
+    BlockNumber,
+    BlockHash,
+    ChainId,
+    OsVersion,
+    StorageGasAvailable,
+    IsTopLevelCall,
+    AliasOf,
+    WasAliased,
+    CallerUnaliased,
+    WithdrawEth,
+    SendTxToL1,
+    SendMerkleTreeState,
+    PricesInWei {
+        aggregator: bool,
+    },
+    PricesInArbGas {
+        aggregator: bool,
+    },
+    GasAccountingParams,
+    MaxTxGasLimit,
+    MinimumGasPrice,
+    L1BaseFeeEstimate,
+    L1BaseFeeEstimateInertia,
+    L1RewardRate,
+    L1RewardRecipient,
+    L1GasPriceEstimate,
+    CurrentTxL1GasFees,
+    GasBacklog,
+    PricingInertia,
+    GasBacklogTolerance,
+    L1PricingSurplus,
+    PerBatchGasCharge,
+    AmortizedCostCapBips,
+    L1FeesAvailable,
+    L1PricingEquilibrationUnits,
+    LastL1PricingUpdateTime,
+    L1PricingFundsDueForRewards,
+    L1PricingUnitsSinceUpdate,
+    LastL1PricingSurplus,
+    MaxBlockGasLimit,
+
+    NotRebuilt(&'static str),
+}
+
+use Method as M;
+use Purity::{Payable, Pure, View};
+
+const ARBSYS_METHODS: [([u8; 4], Method, Purity); 12] = [
+    (hex!("a3b1b31d"), M::BlockNumber, View),
+    (hex!("2b407a82"), M::BlockHash, View),
+    (hex!("d127f54a"), M::ChainId, View),
+    (hex!("051038f2"), M::OsVersion, View),
+    (hex!("a94597ff"), M::StorageGasAvailable, View),
+    (hex!("08bd624c"), M::IsTopLevelCall, View),
+    (hex!("4dbbd506"), M::AliasOf, Pure),
+    (hex!("175a260b"), M::WasAliased, View),
+    (hex!("d74523b3"), M::CallerUnaliased, View),
+    (hex!("25e16063"), M::WithdrawEth, Payable),
+    (hex!("928c169a"), M::SendTxToL1, Payable),
+    (hex!("7aeecd2a"), M::SendMerkleTreeState, View),
+];
+
+const ARBGASINFO_METHODS: [([u8; 4], Method, Purity); 29] = [
+    (hex!("ba9c916e"), M::PricesInWei { aggregator: true }, View),
+    (hex!("41b247a8"), M::PricesInWei { aggregator: false }, View),
+    (
+        hex!("7a1ea732"),
+        M::PricesInArbGas { aggregator: true },
+        View,
+    ),
+    (
+        hex!("02199f34"),
+        M::PricesInArbGas { aggregator: false },
+        View,
+    ),
+    (hex!("612af178"), M::GasAccountingParams, View),
+    (hex!("aae1cd4c"), M::MaxTxGasLimit, View),
+    (hex!("f918379a"), M::MinimumGasPrice, View),
+    (hex!("f5d6ded7"), M::L1BaseFeeEstimate, View),
+    (hex!("29eb31ee"), M::L1BaseFeeEstimateInertia, View),
+    (hex!("8a5b1d28"), M::L1RewardRate, View),
+    (hex!("9e6d7e31"), M::L1RewardRecipient, View),
+    (hex!("055f362f"), M::L1GasPriceEstimate, View),
+    (hex!("c6f7de0e"), M::CurrentTxL1GasFees, View),
+    (hex!("1d5b5c20"), M::GasBacklog, View),
+    (hex!("3dfb45b9"), M::PricingInertia, View),
+    (hex!("25754f91"), M::GasBacklogTolerance, View),
+    (hex!("520acdd7"), M::L1PricingSurplus, View),
+    (hex!("6ecca45a"), M::PerBatchGasCharge, View),
+    (hex!("7a7d6beb"), M::AmortizedCostCapBips, View),
+    (hex!("5b39d23c"), M::L1FeesAvailable, View),
+    (hex!("ad26ce90"), M::L1PricingEquilibrationUnits, View),
+    (hex!("138b47b4"), M::LastL1PricingUpdateTime, View),
+    (hex!("963d6002"), M::L1PricingFundsDueForRewards, View),
+    (hex!("eff01306"), M::L1PricingUnitsSinceUpdate, View),
+    (hex!("2987d027"), M::LastL1PricingSurplus, View),
+    (hex!("0371fdb4"), M::MaxBlockGasLimit, View),
+    (
+        hex!("232027d1"),
+        M::NotRebuilt("getGasPricingConstraints"),
+        View,
+    ),
+    (
+        hex!("bbfc0a72"),
+        M::NotRebuilt("getMultiGasPricingConstraints"),
+        View,
+    ),
+    (hex!("c0e10bbb"), M::NotRebuilt("getMultiGasBaseFee"), View),
+];
+
+
+const INVALID_BLOCK_NUMBER: [u8; 4] = hex!("d5dc642d");
+
+
+enum Done {
+
+    Output(Vec<u8>),
+
+    SolError(Vec<u8>),
 
     Plain,
 
-    Refuse(String),
+    AllGas,
 
-    Db,
+    Refused(String),
 }
 
 
-struct Meter(u64);
-
-impl Meter {
-    fn burn(&mut self, n: u64) -> Result<(), Fail> {
-        match self.0.checked_sub(n) {
-            Some(left) => {
-                self.0 = left;
-                Ok(())
-            }
-            None => {
-                self.0 = 0;
-                Err(Fail::OutOfGas)
-            }
-        }
-    }
+fn word_gas(len: usize) -> u64 {
+    (len as u64).div_ceil(32).saturating_mul(3)
 }
 
-fn words(n: usize) -> u64 {
-    (n as u64).div_ceil(32)
-}
-
-fn result(r: InstructionResult, out: Vec<u8>, limit: u64, left: u64) -> InterpreterResult {
-    let mut gas = Gas::new(limit);
-    let _ = gas.record_cost(limit - left);
+fn ended(result: InstructionResult, gas_limit: u64) -> InterpreterResult {
+    let mut gas = Gas::new(gas_limit);
+    gas.spend_all();
     InterpreterResult {
-        result: r,
-        output: out.into(),
+        result,
+        output: Bytes::new(),
         gas,
     }
 }
 
-fn word(v: U256) -> Vec<u8> {
-    v.to_be_bytes::<32>().to_vec()
-}
 
-fn int_word(negative: bool, magnitude: U256) -> Vec<u8> {
-    match negative {
-        true => word((!magnitude).wrapping_add(U256::from(1))),
-        false => word(magnitude),
-    }
-}
-
-
-fn arbos<DB: Database>(
-    ctx: &mut Ctx<DB>,
-    address: Address,
+fn arbos_call<DB: Database>(
+    ctx: &mut NitroCtx<DB>,
+    at: Address,
     inputs: &InputsImpl,
     is_static: bool,
-    limit: u64,
-) -> InterpreterResult {
+    gas_limit: u64,
+) -> Result<InterpreterResult, String> {
     let input: Vec<u8> = match &inputs.input {
+        CallInput::Bytes(b) => b.to_vec(),
         CallInput::SharedBuffer(range) => ctx
-            .local()
+            .local
             .shared_memory_buffer_slice(range.clone())
             .map(|s| s.to_vec())
             .unwrap_or_default(),
-        CallInput::Bytes(b) => b.to_vec(),
     };
-    let fatal = || result(InstructionResult::FatalExternalError, vec![], limit, 0);
-    let all_gas = |r| result(r, vec![], limit, 0);
-    if address != ARBSYS && address != ARBGASINFO {
-        refuse(ctx, format!("it calls the ArbOS precompile {address}"));
-        return fatal();
-    }
-
-
-    let Some(sel) = input.get(..4).map(|s| <[u8; 4]>::try_from(s).unwrap()) else {
-        return all_gas(InstructionResult::Revert);
+    let all_gas = || Ok(ended(InstructionResult::Revert, gas_limit));
+    let table: &[([u8; 4], Method, Purity)] = match at == ARBSYS {
+        true => &ARBSYS_METHODS,
+        false => &ARBGASINFO_METHODS,
     };
-    let Some(&(method, purity)) = BY_SELECTOR.get(&(address, sel)) else {
-        return all_gas(InstructionResult::Revert);
+    let Some(&(_, method, purity)) = input
+        .get(..4)
+        .and_then(|s| table.iter().find(|m| m.0[..] == *s))
+    else {
+        return all_gas();
     };
-    let value = inputs.call_value;
-    if (purity >= View && inputs.target_address != address)
-        || (purity >= Write && is_static)
-        || (purity < Payable && !value.is_zero())
-    {
-        return all_gas(InstructionResult::Revert);
+    if purity != Pure && inputs.target_address != at {
+        return all_gas();
     }
-    let mut m = Meter(limit);
-
-    if purity != Pure && m.burn(READ).is_err() {
-        return all_gas(InstructionResult::PrecompileOOG);
+    if purity == Payable && is_static {
+        return all_gas();
     }
-    let args = &input[4..];
-    if m.burn(COPY * words(args.len())).is_err() {
-        return all_gas(InstructionResult::Revert);
+    if purity != Payable && !inputs.call_value.is_zero() {
+        return all_gas();
     }
-    let body = match address {
-        ARBSYS => arbsys(ctx, &mut m, method, args, inputs),
-        _ => arbgasinfo(ctx, &mut m, method, args),
-    };
-    match body {
-        Ok(out) => match m.burn(COPY * words(out.len())) {
-            Ok(()) => result(InstructionResult::Return, out, limit, m.0),
-            Err(_) => all_gas(InstructionResult::Revert),
-        },
-        Err(Fail::Sol(data)) => match m.burn(COPY * words(data.len())) {
-            Ok(()) => result(InstructionResult::Revert, data, limit, m.0),
-            Err(_) => all_gas(InstructionResult::Revert),
-        },
-        Err(Fail::Plain) => result(InstructionResult::Revert, vec![], limit, m.0),
-        Err(Fail::OutOfGas) => all_gas(InstructionResult::Revert),
-        Err(Fail::Refuse(why)) => {
-            refuse(ctx, why);
-            fatal()
+    let mut gas = Gas::new(gas_limit);
+    if purity != Pure && !gas.record_cost(800) {
+        return Ok(ended(InstructionResult::PrecompileOOG, gas_limit));
+    }
+    if !gas.record_cost(word_gas(input.len() - 4)) {
+        return all_gas();
+    }
+    let done = match answer(ctx, method, &input[4..], inputs, &mut gas) {
+        Ok(done) => done,
+        Err(e) => {
+            fail(ctx, e);
+            return Err(STOPPED.into());
         }
-        Err(Fail::Db) => fatal(),
+    };
+    let (result, output) = match done {
+        Done::Output(out) => (InstructionResult::Return, out),
+        Done::SolError(data) => (InstructionResult::Revert, data),
+        Done::Plain => (InstructionResult::Revert, Vec::new()),
+        Done::AllGas => return all_gas(),
+        Done::Refused(why) => {
+            refuse(ctx, why.clone());
+            return Err(why);
+        }
+    };
+    if !gas.record_cost(word_gas(output.len())) {
+        return all_gas();
     }
+    Ok(InterpreterResult {
+        result,
+        output: output.into(),
+        gas,
+    })
+}
+
+fn words(ws: &[U256]) -> Done {
+    Done::Output(ws.iter().flat_map(|w| w.to_be_bytes::<32>()).collect())
 }
 
 
-fn arg(args: &[u8], i: usize) -> Result<U256, Fail> {
-    args.get(i * 32..i * 32 + 32)
-        .map(U256::from_be_slice)
-        .ok_or(Fail::OutOfGas)
-}
-
-fn read<DB: Database>(ctx: &mut Ctx<DB>, m: &mut Meter, slot: B256) -> Result<U256, Fail> {
-    m.burn(READ)?;
-    arbos_slot(ctx, slot).ok_or(Fail::Db)
-}
-
-
-fn l2_price<DB: Database>(ctx: &Ctx<DB>) -> U256 {
-    ctx.chain
-        .base_fee_in_block
-        .unwrap_or(U256::from(ctx.block.basefee))
-}
-
-fn arbsys<DB: Database>(
-    ctx: &mut Ctx<DB>,
-    _m: &mut Meter,
-    method: &str,
+fn answer<DB: Database>(
+    ctx: &mut NitroCtx<DB>,
+    method: Method,
     args: &[u8],
     inputs: &InputsImpl,
-) -> Result<Vec<u8>, Fail> {
-    let depth = ctx.journaled_state.depth();
-    let refuse = |what: &str| Err(Fail::Refuse(format!("it calls ArbSys.{what}")));
-    Ok(match method {
-        "arbBlockNumber()" => word(ctx.chain.block_number),
-        "arbBlockHash(uint256)" => {
-            let n = arg(args, 0)?;
-            let current = ctx.chain.block_number;
-            let (now, asked) = (current.as_limbs()[0], u64::try_from(n));
-            let invalid = || {
-                let mut data = selector("InvalidBlockNumber(uint256,uint256)").to_vec();
-                data.extend(word(n));
-                data.extend(word(current));
-                Err(Fail::Sol(data))
-            };
-            let Ok(asked) = asked else {
-                return invalid();
-            };
-            if asked >= now || asked.wrapping_add(256) < now {
-                return invalid();
+    gas: &mut Gas,
+) -> Result<Done, DB::Error> {
+    let arg = |i: usize| args.get(32 * i..32 * i + 32).map(U256::from_be_slice);
+    macro_rules! read {
+        ($slot:ident) => {{
+            if !gas.record_cost(800) {
+                return Ok(Done::AllGas);
             }
-
-            if asked >= ctx.chain.header_number {
-                word(U256::ZERO)
-            } else {
-                match ctx.journaled_state.database.block_hash(asked) {
-                    Ok(h) => h.to_vec(),
-                    Err(e) => {
-                        ctx.error = Err(revm::context_interface::context::ContextError::Db(e));
-                        return Err(Fail::Db);
-                    }
+            arbos_word(ctx, SLOTS.$slot)?
+        }};
+    }
+    let p2 = ctx.chain.base_fee;
+    Ok(match method {
+        M::BlockNumber => words(&[ctx.chain.number]),
+        M::BlockHash => {
+            let Some(n) = arg(0) else {
+                return Ok(Done::AllGas);
+            };
+            let number = ctx.chain.number;
+            let now = low64(number);
+            let out_of_range = match u64::try_from(n) {
+                Ok(n) => n >= now || n.wrapping_add(256) < now,
+                Err(_) => true,
+            };
+            if out_of_range {
+                let mut data = INVALID_BLOCK_NUMBER.to_vec();
+                data.extend_from_slice(&n.to_be_bytes::<32>());
+                data.extend_from_slice(&number.to_be_bytes::<32>());
+                return Ok(Done::SolError(data));
+            }
+            let n = n.to::<u64>();
+            match n >= ctx.chain.header_number {
+                true => words(&[U256::ZERO]),
+                false => {
+                    let hash = ctx.journaled_state.database.block_hash(n)?;
+                    words(&[U256::from_be_bytes(hash.0)])
                 }
             }
         }
-        "arbChainID()" => word(U256::from(ROBINHOOD)),
-        "arbOSVersion()" => word(U256::from(55 + ctx.chain.version)),
-        "getStorageGasAvailable()" => word(U256::ZERO),
-        "isTopLevelCall()" => word(U256::from(u8::from(depth <= 2))),
-        "mapL1SenderContractAddressToL2Alias(address,address)" => {
-            let sender = arg(args, 0)?;
-            arg(args, 1)?;
-            let offset = U256::from_be_slice(
-                address!("0x1111000000000000000000000000000000001111").as_slice(),
-            );
-            let mask: U256 = (U256::from(1) << 160) - U256::from(1);
-            let aliased: U256 = (sender & mask).wrapping_add(offset);
-            word(aliased & mask)
-        }
-
-        "wasMyCallersAddressAliased()" => word(U256::ZERO),
-
-        "myCallersAddressWithoutAliasing()" if depth <= 1 => word(U256::ZERO),
-        "myCallersAddressWithoutAliasing()" => return refuse("myCallersAddressWithoutAliasing"),
-        "sendMerkleTreeState()" if inputs.caller_address != Address::ZERO => {
-            return Err(Fail::Plain)
-        }
-        m => return refuse(m.split('(').next().unwrap_or(m)),
-    })
-}
-
-fn arbgasinfo<DB: Database>(
-    ctx: &mut Ctx<DB>,
-    m: &mut Meter,
-    method: &str,
-    args: &[u8],
-) -> Result<Vec<u8>, Fail> {
-    let s = &*SLOTS;
-    let words_of = |v: &[U256]| v.iter().flat_map(|x| word(*x)).collect::<Vec<u8>>();
-    let l2 = l2_price(ctx);
-    let mul = |a: U256, b: U256| a.checked_mul(b).ok_or(Fail::Plain);
-    Ok(match method {
-        "getPricesInWeiWithAggregator(address)" | "getPricesInWei()" => {
-            if method.ends_with("(address)") {
-                arg(args, 0)?;
-            }
-            let l1 = read(ctx, m, s.l1_price_per_unit)?;
-            let for_l1_calldata = mul(l1, U256::from(16))?;
-            let per_l2_tx = mul(for_l1_calldata, U256::from(140))?;
-            let base = read(ctx, m, s.l2_min_base_fee)?.min(l2);
-            let storage = mul(l2, U256::from(20_000))?;
-            words_of(&[per_l2_tx, for_l1_calldata, storage, base, l2 - base, l2])
-        }
-        "getPricesInArbGasWithAggregator(address)" | "getPricesInArbGas()" => {
-            if method.ends_with("(address)") {
-                arg(args, 0)?;
-            }
-            let l1 = read(ctx, m, s.l1_price_per_unit)?;
-            let for_l1_calldata = mul(l1, U256::from(16))?;
-            let per_l2_tx = mul(for_l1_calldata, U256::from(140))?;
-            let (gas_for_l1, gas_per_tx) = match l2.is_zero() {
-                true => (U256::ZERO, U256::ZERO),
-                false => (for_l1_calldata / l2, per_l2_tx / l2),
+        M::ChainId => words(&[U256::from(ctx.cfg.chain_id)]),
+        M::OsVersion => words(&[U256::from(55u64) + U256::from(ctx.chain.arbos_version)]),
+        M::StorageGasAvailable | M::WasAliased => words(&[U256::ZERO]),
+        M::IsTopLevelCall => words(&[U256::from(u8::from(ctx.journaled_state.depth() <= 2))]),
+        M::AliasOf => {
+            let (Some(sender), Some(_)) = (arg(0), arg(1)) else {
+                return Ok(Done::AllGas);
             };
-            words_of(&[gas_per_tx, gas_for_l1, U256::from(20_000)])
+            let mask = (U256::from(1u64) << 160) - U256::from(1u64);
+            let offset = U256::from_be_slice(&hex!("1111000000000000000000000000000000001111"));
+            words(&[((sender & mask) + offset) & mask])
         }
-        "getGasAccountingParams()" => {
-            let speed = read(ctx, m, s.l2_speed_limit)?;
-            let max = read(ctx, m, s.l2_per_block_gas_limit)?;
-            words_of(&[low64(speed), low64(max), low64(max)])
-        }
-        "getMaxTxGasLimit()" => word(low64(read(ctx, m, s.l2_per_tx_gas_limit)?)),
-        "getMinimumGasPrice()" => word(read(ctx, m, s.l2_min_base_fee)?),
-        "getL1BaseFeeEstimate()" | "getL1GasPriceEstimate()" => {
-            word(read(ctx, m, s.l1_price_per_unit)?)
-        }
-        "getL1BaseFeeEstimateInertia()" => word(low64(read(ctx, m, s.l1_inertia)?)),
-        "getL1RewardRate()" => word(low64(read(ctx, m, s.l1_per_unit_reward)?)),
-        "getL1RewardRecipient()" => {
-            let v = read(ctx, m, s.l1_pay_rewards_to)?;
-            word(v & ((U256::from(1) << 160) - U256::from(1)))
-        }
-        "getCurrentTxL1GasFees()" => word(ctx.chain.poster_fee),
-        "getGasBacklog()" => word(low64(read(ctx, m, s.l2_gas_backlog)?)),
-        "getPricingInertia()" => word(low64(read(ctx, m, s.l2_pricing_inertia)?)),
-        "getGasBacklogTolerance()" => word(low64(read(ctx, m, s.l2_backlog_tolerance)?)),
-        "getL1PricingSurplus()" => {
-            let refunds = signed(read(ctx, m, s.l1_total_funds_due)?);
-            let rewards = signed(read(ctx, m, s.l1_funds_due_for_rewards)?);
-            let have = read(ctx, m, s.l1_fees_available)?;
-            surplus(have, refunds, rewards)?
-        }
-        "getPerBatchGasCharge()" => {
-            let v = low64(read(ctx, m, s.l1_per_batch_gas_cost)?).to::<u64>() as i64;
-            int_word(v < 0, U256::from(v.unsigned_abs()))
-        }
-        "getAmortizedCostCapBips()" => word(low64(read(ctx, m, s.l1_amortized_cost_cap_bips)?)),
-        "getL1FeesAvailable()" => word(read(ctx, m, s.l1_fees_available)?),
-        "getL1PricingEquilibrationUnits()" => word(read(ctx, m, s.l1_equilibration_units)?),
-        "getLastL1PricingUpdateTime()" => word(low64(read(ctx, m, s.l1_last_update_time)?)),
-        "getL1PricingFundsDueForRewards()" => {
-
-            match signed(read(ctx, m, s.l1_funds_due_for_rewards)?) {
-                (true, v) if !v.is_zero() => return Err(Fail::Plain),
-                (_, v) => word(v),
+        M::CallerUnaliased => match ctx.journaled_state.depth() {
+            0 | 1 => words(&[U256::ZERO]),
+            _ => Done::Refused("it calls ArbSys.myCallersAddressWithoutAliasing".into()),
+        },
+        M::WithdrawEth => Done::Refused("it calls ArbSys.withdrawEth".into()),
+        M::SendTxToL1 => Done::Refused("it calls ArbSys.sendTxToL1".into()),
+        M::SendMerkleTreeState => match inputs.caller_address.is_zero() {
+            true => Done::Refused("it calls ArbSys.sendMerkleTreeState".into()),
+            false => Done::Plain,
+        },
+        M::PricesInWei { aggregator } | M::PricesInArbGas { aggregator } => {
+            if aggregator && arg(0).is_none() {
+                return Ok(Done::AllGas);
+            }
+            let l1 = read!(l1_price_per_unit);
+            let Some(w1) = l1.checked_mul(U256::from(16u64)) else {
+                return Ok(Done::Plain);
+            };
+            let Some(w0) = w1.checked_mul(U256::from(140u64)) else {
+                return Ok(Done::Plain);
+            };
+            match method {
+                M::PricesInWei { .. } => {
+                    let min = read!(l2_min_base_fee);
+                    let w3 = min.min(p2);
+                    words(&[w0, w1, p2 * U256::from(20_000u64), w3, p2 - w3, p2])
+                }
+                _ => match p2.is_zero() {
+                    true => words(&[U256::ZERO, U256::ZERO, U256::from(20_000u64)]),
+                    false => words(&[w0 / p2, w1 / p2, U256::from(20_000u64)]),
+                },
             }
         }
-        "getL1PricingUnitsSinceUpdate()" => {
-
-            let v = low64(read(ctx, m, s.l1_units_since_update)?).to::<u64>();
-            word(U256::from(v.wrapping_add(ctx.chain.units_added)))
+        M::GasAccountingParams => {
+            let speed = read!(l2_speed_limit);
+            let block = read!(l2_per_block_gas_limit);
+            let (s, x) = (U256::from(low64(speed)), U256::from(low64(block)));
+            words(&[s, x, x])
         }
-        "getLastL1PricingSurplus()" => {
-            let (neg, v) = signed(read(ctx, m, s.l1_last_surplus)?);
-            int_word(neg, v)
+        M::MaxTxGasLimit => words(&[U256::from(low64(read!(l2_per_tx_gas_limit)))]),
+        M::MinimumGasPrice => words(&[read!(l2_min_base_fee)]),
+        M::L1BaseFeeEstimate | M::L1GasPriceEstimate => words(&[read!(l1_price_per_unit)]),
+        M::L1BaseFeeEstimateInertia => words(&[U256::from(low64(read!(l1_inertia)))]),
+        M::L1RewardRate => words(&[U256::from(low64(read!(l1_per_unit_reward)))]),
+        M::L1RewardRecipient => {
+            let to = low160(read!(l1_pay_rewards_to));
+            words(&[U256::from_be_slice(to.as_slice())])
         }
-        "getMaxBlockGasLimit()" => word(low64(read(ctx, m, s.l2_per_block_gas_limit)?)),
-        m => {
-            let name = m.split('(').next().unwrap_or(m);
-            return Err(Fail::Refuse(format!("it calls ArbGasInfo.{name}")));
+        M::CurrentTxL1GasFees => words(&[ctx.chain.poster_fee]),
+        M::GasBacklog => words(&[U256::from(low64(read!(l2_gas_backlog)))]),
+        M::PricingInertia => words(&[U256::from(low64(read!(l2_pricing_inertia)))]),
+        M::GasBacklogTolerance => words(&[U256::from(low64(read!(l2_backlog_tolerance)))]),
+        M::L1PricingSurplus => {
+            let total_due = read!(l1_total_funds_due);
+            let rewards_due = read!(l1_funds_due_for_rewards);
+            let available = read!(l1_fees_available);
+            words(&[available.wrapping_sub(total_due).wrapping_sub(rewards_due)])
         }
+        M::PerBatchGasCharge => {
+            let v = low64(read!(l1_per_batch_gas_cost)) as i64;
+            let word = match v < 0 {
+                true => U256::ZERO.wrapping_sub(U256::from(v.unsigned_abs())),
+                false => U256::from(v as u64),
+            };
+            words(&[word])
+        }
+        M::AmortizedCostCapBips => words(&[U256::from(low64(read!(l1_amortized_cost_cap_bips)))]),
+        M::L1FeesAvailable => words(&[read!(l1_fees_available)]),
+        M::L1PricingEquilibrationUnits => words(&[read!(l1_equilibration_units)]),
+        M::LastL1PricingUpdateTime => words(&[U256::from(low64(read!(l1_last_update_time)))]),
+        M::L1PricingFundsDueForRewards => {
+            let due = read!(l1_funds_due_for_rewards);
+            match signed(due).0 {
+                true => Done::Plain,
+                false => words(&[due]),
+            }
+        }
+        M::L1PricingUnitsSinceUpdate => {
+            let units = low64(read!(l1_units_since_update)).wrapping_add(ctx.chain.units_added);
+            words(&[U256::from(units)])
+        }
+        M::LastL1PricingSurplus => words(&[read!(l1_last_surplus)]),
+        M::MaxBlockGasLimit => words(&[U256::from(low64(read!(l2_per_block_gas_limit)))]),
+        M::NotRebuilt(name) => Done::Refused(format!("it calls ArbGasInfo.{name}")),
     })
 }
 
 
-fn low64(v: U256) -> U256 {
-    U256::from(v.as_limbs()[0])
+#[derive(Clone, Copy)]
+enum Arg {
+    Uint256,
+    Uint64,
+    Uint16,
+    Bool,
+    Str,
 }
-
-
-fn surplus(have: U256, refunds: (bool, U256), rewards: (bool, U256)) -> Result<Vec<u8>, Fail> {
-    let as_i = |(neg, v): (bool, U256)| -> alloy_primitives::I256 {
-        let v = alloy_primitives::I256::from_raw(v);
-        if neg {
-            -v
-        } else {
-            v
-        }
-    };
-    let need = as_i(refunds)
-        .checked_add(as_i(rewards))
-        .ok_or(Fail::Plain)?;
-    let out = alloy_primitives::I256::from_raw(have)
-        .checked_sub(need)
-        .ok_or(Fail::Plain)?;
-    Ok(word(out.into_raw()))
-}
-
 
 
 
 pub(crate) fn render_error(data: &[u8]) -> Option<String> {
-    #[derive(Clone, Copy)]
-    enum T {
-        U(u32),
-        Str,
-        Bool,
-    }
-    type Errors = Vec<([u8; 4], &'static str, Vec<T>)>;
-    static ERRORS: LazyLock<Errors> = LazyLock::new(|| {
-        let e = |name: &'static str, types: Vec<T>| {
-            let sig: Vec<&str> = types
-                .iter()
-                .map(|t| match t {
-                    T::U(256) => "uint256",
-                    T::U(64) => "uint64",
-                    T::U(16) => "uint16",
-                    T::U(_) => unreachable!(),
-                    T::Str => "string",
-                    T::Bool => "bool",
-                })
-                .collect();
-            (selector(&format!("{name}({})", sig.join(","))), name, types)
-        };
-        vec![
-            e("CallerNotArbOS", vec![]),
-            e("Custom", vec![T::U(64), T::Str, T::Bool]),
-            e("Unused", vec![]),
-            e("NoTicketWithID", vec![]),
-            e("NotCallable", vec![]),
-            e("InvalidBlockNumber", vec![T::U(256), T::U(256)]),
-            e("ProgramNotWasm", vec![]),
-            e("ProgramNotActivated", vec![]),
-            e("ProgramNeedsUpgrade", vec![T::U(16), T::U(16)]),
-            e("ProgramExpired", vec![T::U(64)]),
-            e("ProgramUpToDate", vec![]),
-            e("ProgramKeepaliveTooSoon", vec![T::U(64)]),
-            e("ProgramInsufficientValue", vec![T::U(256), T::U(256)]),
-        ]
-    });
-    let (sel, body) = (data.get(..4)?, &data[4..]);
-    let (_, name, types) = ERRORS.iter().find(|(s, _, _)| s == sel)?;
-    let w = |i: usize| body.get(i * 32..i * 32 + 32).map(U256::from_be_slice);
-    let mut shown = Vec::new();
-    for (i, t) in types.iter().enumerate() {
-        let v = w(i)?;
-        shown.push(match t {
-            T::U(256) => v.to_string(),
-            T::U(bits) => {
-                if v.bit_len() > *bits as usize {
-                    return None;
-                }
-                v.to_string()
-            }
-            T::Bool => match v {
-                v if v == U256::ZERO => "false".into(),
-                v if v == U256::from(1) => "true".into(),
+    use Arg::*;
+    let selector: [u8; 4] = data.get(..4)?.try_into().ok()?;
+    let (name, kinds): (&str, &[Arg]) = match selector {
+        s if s == hex!("f812e656") => ("CallerNotArbOS", &[]),
+        s if s == hex!("1753067f") => ("Custom", &[Uint64, Str, Bool]),
+        s if s == hex!("3a66de7d") => ("Unused", &[]),
+        s if s == hex!("80698456") => ("NoTicketWithID", &[]),
+        s if s == hex!("902824c1") => ("NotCallable", &[]),
+        s if s == INVALID_BLOCK_NUMBER => ("InvalidBlockNumber", &[Uint256, Uint256]),
+        s if s == hex!("27f38212") => ("ProgramNotWasm", &[]),
+        s if s == hex!("6f809c4e") => ("ProgramNotActivated", &[]),
+        s if s == hex!("637d968f") => ("ProgramNeedsUpgrade", &[Uint16, Uint16]),
+        s if s == hex!("c9b12e52") => ("ProgramExpired", &[Uint64]),
+        s if s == hex!("cc944bf2") => ("ProgramUpToDate", &[]),
+        s if s == hex!("16bd0cf8") => ("ProgramKeepaliveTooSoon", &[Uint64]),
+        s if s == hex!("09781ab7") => ("ProgramInsufficientValue", &[Uint256, Uint256]),
+        _ => return None,
+    };
+    let args = &data[4..];
+    let word =
+        |at: usize| -> Option<U256> { args.get(at..at.checked_add(32)?).map(U256::from_be_slice) };
+    let mut shown = Vec::with_capacity(kinds.len());
+    for (i, kind) in kinds.iter().enumerate() {
+        let w = word(32 * i)?;
+        shown.push(match kind {
+            Uint256 => w.to_string(),
+            Uint64 => u64::try_from(w).ok()?.to_string(),
+            Uint16 => u16::try_from(w).ok()?.to_string(),
+            Bool => match u8::try_from(w).ok()? {
+                0 => "false".to_string(),
+                1 => "true".to_string(),
                 _ => return None,
             },
-            T::Str => {
-                let at = usize::try_from(v).ok()?;
-                let len = usize::try_from(U256::from_be_slice(body.get(at..at.checked_add(32)?)?))
-                    .ok()?;
+            Str => {
+                let at = usize::try_from(w).ok()?;
+                let len = usize::try_from(word(at)?).ok()?;
                 let start = at.checked_add(32)?;
-                let bytes = body.get(start..start.checked_add(len)?)?;
+                let bytes = args.get(start..start.checked_add(len)?)?;
                 String::from_utf8_lossy(bytes).into_owned()
             }
         });

@@ -71,7 +71,7 @@ fn op_tx(t: &Tx) -> Option<op::Tx> {
                 }),
             })
         }
-        Decoded::Table { .. } => None,
+        Decoded::Table { .. } | Decoded::FeeCurrency(_) => None,
     }
 }
 
@@ -101,6 +101,7 @@ pub fn run_block(
         .collect::<Result<Vec<_>, _>>()?;
     let h = &block.header;
     let env = willow_op_exec::Block {
+        chain_id: crate::UNICHAIN,
         number: h.number,
         timestamp: h.timestamp,
         gas_limit: h.gas_limit,

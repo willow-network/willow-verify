@@ -68,9 +68,12 @@ fn join(path: &str, key: &str) -> String {
 
 
 
+
+
 fn may_omit(key: &str, ours: &serde_json::Map<String, Value>) -> bool {
     let deposit = ours.get("type").is_some_and(|t| t == "0x7e") && ours.contains_key("sourceHash");
-    key == "blockTimestamp" || (deposit && matches!(key, "nonce" | "depositReceiptVersion"))
+    key == "blockTimestamp"
+        || (deposit && matches!(key, "nonce" | "depositReceiptVersion" | "yParity"))
 }
 
 fn same(a: &Value, b: &Value) -> bool {

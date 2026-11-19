@@ -1,13 +1,13 @@
-//! Calls on Robinhood Chain (Arbitrum Orbit, chain 4663) run as a Nitro node runs `eth_call`, over
-//! a state the caller of this crate proves (every account, slot and code the call reads, ArbOS's
-//! own state included, comes from its database). Where Nitro's EVM differs from Ethereum's it is
-//! rebuilt from Nitro's source: NUMBER and BLOCKHASH read the L1 block number and hashes ArbOS
-//! keeps, GASPRICE is the base fee, BLOBBASEFEE fails, PREVRANDAO is the difficulty; the call is
-//! charged gas for its L1 data as Nitro charges it; ArbSys and ArbGasInfo answer from ArbOS's
-//! storage. What isn't rebuilt (Stylus programs, the other ArbOS precompiles, ArbOS versions not
-//! in [`rules`]) is refused, never approximated.
 
-mod evm;
+
+
+
+
+
+
+
+mod exec;
+mod ops;
 pub mod poster;
 mod precompiles;
 pub mod state;
@@ -21,11 +21,37 @@ pub use state::ARBOS_STATE;
 
 pub const ROBINHOOD: u64 = 4663;
 
+pub const ARBITRUM_ONE: u64 = 42161;
 
 pub const GAS_CAP: u64 = 50_000_000;
 
-pub const MAX_CODE_SIZE: usize = 98_304;
-pub const MAX_INITCODE_SIZE: usize = 196_608;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArbChain {
+    pub id: u64,
+    pub max_code_size: usize,
+    pub max_initcode_size: usize,
+}
+
+
+pub const CHAINS: [ArbChain; 2] = [
+    ArbChain {
+        id: ROBINHOOD,
+        max_code_size: 98_304,
+        max_initcode_size: 196_608,
+    },
+    ArbChain {
+        id: ARBITRUM_ONE,
+        max_code_size: 24_576,
+        max_initcode_size: 49_152,
+    },
+];
+
+
+pub fn chain(id: u64) -> Option<&'static ArbChain> {
+    CHAINS.iter().find(|c| c.id == id)
+}
+
 
 
 
@@ -35,19 +61,21 @@ pub const NODE_INTERFACES: [Address; 2] = [
 ];
 
 
-
 pub fn rules(arbos_version: u64) -> Option<revm::primitives::hardfork::SpecId> {
-    match arbos_version {
-
-        61 => Some(revm::primitives::hardfork::SpecId::OSAKA),
-        _ => None,
-    }
+    (arbos_version == 61).then_some(revm::primitives::hardfork::SpecId::OSAKA)
 }
 
 
 pub fn header_arbos_version(mix_hash: &B256) -> u64 {
-    u64::from_be_bytes(mix_hash[16..24].try_into().unwrap())
+    let mut be = [0u8; 8];
+    be.copy_from_slice(&mix_hash[16..24]);
+    u64::from_be_bytes(be)
 }
+
+
+
+
+
 
 
 
@@ -70,6 +98,7 @@ pub fn header_arbos_version(mix_hash: &B256) -> u64 {
 
 #[derive(Clone, Debug)]
 pub struct Block {
+    pub chain_id: u64,
     pub number: u64,
     pub timestamp: u64,
     pub gas_limit: u64,
@@ -91,9 +120,7 @@ pub struct Call {
     pub value: U256,
     pub data: Bytes,
     pub access_list: Vec<(Address, Vec<B256>)>,
-
     pub nonce: Option<u64>,
-
     pub skip_l1_charging: bool,
 }
 
@@ -112,20 +139,22 @@ pub struct BlockOverrides {
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
     Returned(Bytes),
-
     Reverted(Bytes, Option<String>),
-
     Halted(HaltReason),
-
     HaltedSaying(String),
-
     Invalid(String),
-
     Refused(String),
-
     Internal(String),
 }
 
+
+#[derive(Debug, PartialEq)]
+pub struct Measured {
+    pub outcome: Outcome,
+    pub used: u64,
+    pub peak: u64,
+    pub intrinsic: bool,
+}
 
 
 pub fn run<DB: revm::Database>(
@@ -135,35 +164,8 @@ pub fn run<DB: revm::Database>(
     overrides: &BlockOverrides,
     overridden: &HashSet<Address>,
 ) -> Result<Outcome, DB::Error> {
-    evm::run(db, block, call, overrides, overridden)
+    exec::execute(db, block, call, overrides, overridden, None).map(|m| m.outcome)
 }
-
-
-#[derive(Debug, PartialEq)]
-pub struct Measured {
-    pub outcome: Outcome,
-
-    pub used: u64,
-
-    pub peak: u64,
-
-    pub intrinsic: bool,
-}
-
-impl Measured {
-    pub(crate) fn not_run(outcome: Outcome, intrinsic: bool) -> Self {
-        Measured {
-            outcome,
-            used: 0,
-            peak: 0,
-            intrinsic,
-        }
-    }
-}
-
-
-
-
 
 
 pub fn estimate_run<DB: revm::Database>(
@@ -174,17 +176,8 @@ pub fn estimate_run<DB: revm::Database>(
     overridden: &HashSet<Address>,
     gas: u64,
 ) -> Result<Measured, DB::Error> {
-    evm::run_as(
-        db,
-        block,
-        call,
-        overrides,
-        overridden,
-        evm::Mode::Estimate(gas),
-    )
+    exec::execute(db, block, call, overrides, overridden, Some(gas))
 }
-
-
 
 
 pub fn estimate_posting_gas<DB: revm::Database>(
@@ -193,15 +186,8 @@ pub fn estimate_posting_gas<DB: revm::Database>(
     call: &Call,
     overrides: &BlockOverrides,
 ) -> Result<Result<u64, String>, DB::Error> {
-    evm::estimate_posting_gas(db, block, call, overrides)
+    exec::posting_gas(db, block, call, overrides)
 }
-
-
-
-
-
-
-
 
 
 

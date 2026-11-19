@@ -10,6 +10,8 @@
 
 
 
+mod rules;
+
 use crate::bls::{aggregate_verify_points, public_key};
 use crate::lc::bytes_of;
 use crate::{Failure, Kind};
@@ -85,7 +87,7 @@ struct Era {
 impl Era {
 
     fn check_len(&self) -> u64 {
-        (self.validators.len() as u64 / 2 + 1) * self.turn_length - 1
+        rules::check_len(self.validators.len(), self.turn_length)
     }
 
 
@@ -169,16 +171,6 @@ fn linked(list: &Value) -> Result<Vec<(Header, B256)>, Failure> {
     }
     Ok(headers)
 }
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -392,6 +384,17 @@ impl Bnb {
 
 
     pub fn confirm(&self, number: u64, answer: &Value, now: u64) -> Result<BnbConfirmed, Failure> {
+        self.confirm_header(number, answer, now).map(|(c, _)| c)
+    }
+
+
+
+    pub fn confirm_header(
+        &self,
+        number: u64,
+        answer: &Value,
+        now: u64,
+    ) -> Result<(BnbConfirmed, Header), Failure> {
         if let Some(t) = self.start_time.filter(|_| self.ages) {
             check_age(t, now)?;
         }
@@ -423,14 +426,17 @@ impl Bnb {
         match p.get("attestation") {
             Some(a) if !a.is_null() => {
                 let (signers, of) = self.finalizes(&headers, a)?;
-                Ok(BnbConfirmed {
-                    level: "final",
-                    hash: hash.0,
-                    anchor_block: headers.last().unwrap().0.number,
-                    time: h.time,
-                    signers,
-                    of,
-                })
+                Ok((
+                    BnbConfirmed {
+                        level: "final",
+                        hash: hash.0,
+                        anchor_block: headers.last().unwrap().0.number,
+                        time: h.time,
+                        signers,
+                        of,
+                    },
+                    h.clone(),
+                ))
             }
             _ => {
                 if headers.len() != 1 {
@@ -461,14 +467,17 @@ impl Bnb {
                         ),
                     ));
                 }
-                Ok(BnbConfirmed {
-                    level: "signed",
-                    hash: hash.0,
-                    anchor_block: number,
-                    time: h.time,
-                    signers: 1,
-                    of: era.validators.len(),
-                })
+                Ok((
+                    BnbConfirmed {
+                        level: "signed",
+                        hash: hash.0,
+                        anchor_block: number,
+                        time: h.time,
+                        signers: 1,
+                        of: era.validators.len(),
+                    },
+                    h.clone(),
+                ))
             }
         }
     }
@@ -510,6 +519,20 @@ impl Bnb {
         self.start_time = None;
         self.eras.clear();
         self.chain = None;
+    }
+}
+
+
+pub fn execution(h: &Header) -> crate::lc::Execution {
+    crate::lc::Execution {
+        number: h.number,
+        hash: h.hash().0,
+        state_root: h.state_root.0,
+        timestamp: h.time,
+        gas_limit: h.gas_limit,
+        base_fee: h.base_fee.unwrap_or_default(),
+        prev_randao: h.mix_digest.0,
+        fee_recipient: h.coinbase.0 .0,
     }
 }
 

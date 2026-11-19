@@ -76,6 +76,28 @@ pub fn served_header(chain_id: u64, h: &VerifiedHeader, body: &VerifiedBody) -> 
         x.parent_beacon_block_root.map(|r| hx(r.as_slice())),
     );
     put("requestsHash", x.requests_hash.map(|r| hx(r.as_slice())));
+
+    let trailing = logset_blockcheck::header::trailing_items(&h.rlp)?;
+    let names = logset_blockcheck::header::trailing_fields(chain_id);
+    anyhow::ensure!(
+        trailing.len() <= names.len(),
+        "a header of chain {chain_id} with {} fields after requestsHash",
+        trailing.len()
+    );
+    for (b, &(name, kind)) in trailing.iter().zip(names) {
+        use logset_blockcheck::header::TrailingKind;
+        let v = match kind {
+            TrailingKind::Quantity => {
+                anyhow::ensure!(
+                    b.len() <= 8 && b.first() != Some(&0),
+                    "{name} is not a canonical u64"
+                );
+                q(b.iter().fold(0u64, |a, x| a << 8 | u64::from(*x)))
+            }
+            TrailingKind::Hash | TrailingKind::Data => hx(b),
+        };
+        put(name, Some(v));
+    }
     put(
         "timestampMs",
         millis(chain_id, body).map(|ms| q(x.timestamp.saturating_mul(1_000).saturating_add(ms))),
@@ -85,6 +107,15 @@ pub fn served_header(chain_id: u64, h: &VerifiedHeader, body: &VerifiedBody) -> 
             "milliTimestamp",
             Some(q(logset_blockcheck::header::parlia_milli_timestamp(x))),
         );
+    }
+    if logset_blockcheck::header::opbnb(chain_id) {
+        put(
+            "milliTimestamp",
+            logset_blockcheck::header::opbnb_milli_timestamp(x).map(q),
+        );
+    }
+    if logset_blockcheck::header::zero_total_difficulty(chain_id) && x.difficulty.is_zero() {
+        put("totalDifficulty", Some("0x0".into()));
     }
     if nitro_allowed(chain_id) {
         let info = logset_blockcheck::header::nitro_header_info(x)?;
@@ -128,11 +159,13 @@ pub fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
 
 
 
+
 pub fn check_withdrawals(
     chain_id: u64,
     h: &alloy::consensus::Header,
     rlp: Option<&[u8]>,
 ) -> Result<Option<Vec<Withdrawal>>> {
+    let empty = logset_blockcheck::trie::ordered_root(&[]).tag(Fault::Withdrawals)?;
     let (root, rlp) = match (h.withdrawals_root, rlp) {
         (None, None) => return Ok(None),
         (None, Some(_)) => {
@@ -140,6 +173,10 @@ pub fn check_withdrawals(
                 Fault::Withdrawals,
                 "withdrawals given, but the header has no withdrawalsRoot",
             ))
+        }
+
+        (Some(root), None) if logset_blockcheck::header::monad(chain_id) && root.0 == empty => {
+            return Ok(None)
         }
         (Some(_), None) => {
             return Err(reject(

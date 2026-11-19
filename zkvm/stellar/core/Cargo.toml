@@ -1,0 +1,26 @@
+[package]
+name = "stellar-lane-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+stellar-xdr = { version = "=30.0.0", default-features = false, features = ["std"] }
+sha2 = "0.10"
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
+
+
+
+logset-core = { path = "../../logset-guest/core" }
+
+[features]
+
+cycles = []
+
+testnet = []
+
+[dev-dependencies]
+
+logset-agg-core = { path = "../../logset-guest/agg-core", features = ["index"] }
+flate2 = "1"
+hex = "0.4"
+serde_json = "1"

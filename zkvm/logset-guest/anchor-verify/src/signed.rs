@@ -4,13 +4,12 @@
 
 
 
-use crate::call::{self, address_word, calldata, word};
+use crate::call::{self, calldata, word};
 use crate::history::{self, ETHEREUM_RING};
 use crate::l2::{header, nitro_code_hash, walk_back, MAX_HOPS, NITRO_RING};
 use crate::lc::{bytes_of, Execution, LightClient};
 use crate::{Failure, Kind};
-use alloy_primitives::{address, keccak256, Address, Signature, B256};
-use base64::Engine;
+use alloy_primitives::{address, keccak256, Address, Signature};
 use serde_json::Value;
 
 
@@ -180,74 +179,7 @@ pub fn op_signed_block(
     Ok((number, p[472..504].try_into().unwrap(), signer))
 }
 
-
-fn go_bytes(v: Option<&Value>) -> Option<Vec<u8>> {
-    match v {
-        None | Some(Value::Null) => Some(vec![]),
-        Some(Value::String(s)) => base64::engine::general_purpose::STANDARD.decode(s).ok(),
-        _ => None,
-    }
-}
-
-
-fn feed_signature_hash(chain_id: u64, seq: u64, block_hash: &[u8; 32], m: &Value) -> Option<B256> {
-    let with = m.get("message")?;
-    let msg = with.get("message")?;
-    let h = msg.get("header")?;
-    let mut d = b"Arbitrum Nitro Feed:".to_vec();
-    d.extend(chain_id.to_be_bytes());
-    d.extend(seq.to_be_bytes());
-    d.extend(block_hash);
-    d.extend(go_bytes(m.get("blockMetadata"))?);
-    d.extend(with.get("delayedMessagesRead")?.as_u64()?.to_be_bytes());
-    d.push(u8::try_from(h.get("kind")?.as_u64()?).ok()?);
-    let poster: Address = h.get("sender")?.as_str()?.parse().ok()?;
-    d.extend(poster.as_slice());
-    d.extend(h.get("blockNumber")?.as_u64()?.to_be_bytes());
-    d.extend(h.get("timestamp")?.as_u64()?.to_be_bytes());
-    if let Some(id) = h.get("requestId").filter(|v| !v.is_null()) {
-        let id: B256 = id.as_str()?.parse().ok()?;
-        d.extend(id.as_slice());
-    }
-
-    if let Some(fee) = h.get("baseFeeL1").filter(|v| !v.is_null()) {
-        let fee = fee.as_u64()?.to_be_bytes();
-        d.extend(fee.iter().skip_while(|b| **b == 0));
-    }
-    d.extend(go_bytes(msg.get("l2Msg"))?);
-    Some(keccak256(d))
-}
-
-
-pub fn nitro_signed_block(chain_id: u64, m: &Value) -> Result<(u64, [u8; 32], Address), Failure> {
-    let seq = m
-        .get("sequenceNumber")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| bad("a feed message without a sequence number"))?;
-    let hash: [u8; 32] = m
-        .get("blockHash")
-        .and_then(Value::as_str)
-        .and_then(|s| s.parse::<B256>().ok())
-        .ok_or_else(|| bad("a feed message without a block hash"))?
-        .0;
-    let sig = go_bytes(m.get("signatureV2"))
-        .filter(|s| s.len() == 65)
-        .ok_or_else(|| bad("a feed message without a signature"))?;
-    let sig = Signature::try_from(sig.as_slice()).map_err(|_| bad("a malformed signature"))?;
-    let digest = feed_signature_hash(chain_id, seq, &hash, m)
-        .ok_or_else(|| bad("a malformed feed message"))?;
-    let signer = sig
-        .recover_address_from_prehash(&digest)
-        .map_err(|_| rejected("the sequencer's signature does not recover a key"))?;
-    Ok((seq, hash, signer))
-}
-
-fn as_true(out: &alloy_primitives::Bytes) -> Result<bool, Failure> {
-    match word(out, 0)? {
-        w if w[..31].iter().all(|&b| b == 0) && w[31] <= 1 => Ok(w[31] == 1),
-        _ => Err(rejected("a call did not return a bool")),
-    }
-}
+pub use crate::feed::{feed_signature_hash, nitro_signed_block};
 
 
 
@@ -300,25 +232,14 @@ pub fn confirm_signed(
             }
             (n, h, signer)
         }
-        KeyOn::SequencerInbox { inbox, first_block } => {
-            let message = signed
-                .get("message")
-                .ok_or_else(|| bad("the signed block has no feed message"))?;
-            let (seq, h, signer) = nitro_signed_block(chain_id, message)?;
-            let s = address_word(signer);
-            if !as_true(&at(inbox, "isBatchPoster(address)", &[s])?)?
-                && !as_true(&at(inbox, "isSequencer(address)", &[s])?)?
-            {
-                return Err(rejected(format!(
-                    "{signer} is not a sequencer or batch poster Ethereum names for {}",
-                    chain.name
-                )));
-            }
-            let n = first_block
-                .checked_add(seq)
-                .ok_or_else(|| bad("a sequence number out of range"))?;
-            (n, h, signer)
-        }
+        KeyOn::SequencerInbox { inbox, first_block } => crate::feed::nitro_sequenced_block(
+            chain_id,
+            chain.name,
+            inbox,
+            first_block,
+            signed,
+            &|to: Address, data: alloy_primitives::Bytes| call::call(&state, &l1, to, data),
+        )?,
     };
 
     let headers = answer

@@ -1,6 +1,6 @@
 {
   "name": "@willow-network/rpc",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "A drop-in verifying JSON-RPC client for Willow: a viem transport and an ethers v6 provider that verify every response",
   "license": "MIT",
   "repository": {
@@ -33,15 +33,23 @@
     "./verifiers": {
       "import": "./dist/esm/verifiers.js",
       "require": "./dist/cjs/verifiers.js"
+    },
+    "./stellar": {
+      "import": "./dist/esm/stellar.js",
+      "require": "./dist/cjs/stellar.js"
     }
   },
   "files": [
     "dist",
     "wasm",
-    "README.md"
+    "README.md",
+    "THIRD-PARTY-NOTICES.md",
+    "THIRD-PARTY-LICENSES.md"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
+    "prepublishOnly": "node scripts/prepublish-guard.mjs",
+    "prepack": "node scripts/prepublish-guard.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },

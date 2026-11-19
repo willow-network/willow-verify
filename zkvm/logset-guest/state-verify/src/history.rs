@@ -38,7 +38,7 @@ impl History {
 
     pub fn of(chain_id: u64) -> History {
         match chain_id {
-            willow_arb_exec::ROBINHOOD => ARBITRUM,
+            id if willow_arb_exec::chain(id).is_some() => ARBITRUM,
             _ => ETHEREUM,
         }
     }

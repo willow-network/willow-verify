@@ -325,6 +325,8 @@ export class MockAnchor implements Anchor {
     if (toNumber(r.blockNumber) !== m.number || m.chainId !== chainId) return fail('rejected', 'the anchor is for another chain or block');
     if (m.number !== number) return fail('rejected', `the anchor is for block ${m.number}, not ${number}`);
     if (m.level === 'signed' && now - m.time > (chainId === 1 ? 600 : 3 * 3600)) return fail('stale-head', `the signed head is ${Math.round((now - m.time) / 60)} minutes old`);
+    // Polygon's checkpoints: the header's roots, never its hash.
+    if (m.path === 'checkpoint') return out({ ok: true, level: m.level, path: 'checkpoint', covers: 'roots', headerHash: m.hash, rootsMatch: m.hash === hash.toLowerCase(), checkpoint: 10_000, l1Block: 1 });
     const o: any = { ok: true, level: m.level, path: m.path, hash: m.hash, matches: m.hash === hash.toLowerCase() };
     if (chainId === 1) Object.assign(o, { headTime: m.time, head: m.path === 'head' ? number : number + 32, finalized: m.level === 'final' ? number : number - 64, signers: 500 });
     else Object.assign(o, { anchorBlock: number, l1Block: 1, ...(m.path === 'sequencer' ? { anchorTime: m.time } : {}) });

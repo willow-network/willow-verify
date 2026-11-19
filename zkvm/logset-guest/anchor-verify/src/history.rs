@@ -96,18 +96,41 @@ pub fn block_hash(
     }
     let nonce: u64 = nonce.try_into().map_err(|_| bad("nonce is over 64 bits"))?;
 
-    let mut fields = Vec::new();
-    alloy_rlp::Encodable::encode(&nonce, &mut fields);
-    alloy_rlp::Encodable::encode(&balance, &mut fields);
-    alloy_rlp::Encodable::encode(&storage_root, &mut fields);
-    alloy_rlp::Encodable::encode(&code_hash, &mut fields);
-    let mut account = Vec::with_capacity(fields.len() + 3);
-    alloy_rlp::Header {
-        list: true,
-        payload_length: fields.len(),
-    }
-    .encode(&mut account);
-    account.extend(fields);
+
+    let account = match proof.get("account") {
+        Some(a) => {
+            let rlp = bytes_of(
+                a.as_str().ok_or_else(|| bad("account is not hex"))?,
+                "account",
+            )?;
+            let items = crate::l2::rlp_items(&rlp)?;
+            let n = items.len();
+            if n < 4
+                || items[n - 2] != storage_root.as_slice()
+                || items[n - 1] != code_hash.as_slice()
+            {
+                return Err(rejected(
+                    "the history contract's account is not the one proven",
+                ));
+            }
+            rlp
+        }
+        None => {
+            let mut fields = Vec::new();
+            alloy_rlp::Encodable::encode(&nonce, &mut fields);
+            alloy_rlp::Encodable::encode(&balance, &mut fields);
+            alloy_rlp::Encodable::encode(&storage_root, &mut fields);
+            alloy_rlp::Encodable::encode(&code_hash, &mut fields);
+            let mut account = Vec::with_capacity(fields.len() + 3);
+            alloy_rlp::Header {
+                list: true,
+                payload_length: fields.len(),
+            }
+            .encode(&mut account);
+            account.extend(fields);
+            account
+        }
+    };
     verify_proof(
         B256::from(state_root),
         Nibbles::unpack(keccak256(HISTORY_ADDRESS)),
@@ -144,6 +167,78 @@ pub fn block_hash(
     })?;
     Ok(value.to_be_bytes::<32>())
 }
+
+
+pub const MAX_HOPS: usize = 16;
+
+
+
+
+
+pub fn hops(
+    state_root: [u8; 32],
+    at: u64,
+    number: u64,
+    headers: &[Value],
+    proofs: &[Value],
+) -> Result<[u8; 32], Failure> {
+    if headers.len() > MAX_HOPS || proofs.len() != headers.len() + 1 {
+        return Err(bad(format!(
+            "hops are at most {MAX_HOPS} headers and one proof more than headers"
+        )));
+    }
+    let code = ethereum_code_hash();
+    let (mut root, mut current) = (state_root, at);
+    for (h, p) in headers.iter().zip(proofs) {
+        let older = crate::l2::header(h.as_str().ok_or_else(|| bad("a hop header is not hex"))?)?;
+        if older.number <= number {
+            return Err(rejected(format!(
+                "a hop lands on block {}, not above block {number}",
+                older.number
+            )));
+        }
+        let hash = block_hash(root, current, older.number, ETHEREUM_RING, code, p)?;
+        if hash != older.hash {
+            return Err(rejected(format!(
+                "the header of block {} is not the one the history holds",
+                older.number
+            )));
+        }
+        (root, current) = (older.state_root, older.number);
+    }
+    block_hash(
+        root,
+        current,
+        number,
+        ETHEREUM_RING,
+        code,
+        &proofs[headers.len()],
+    )
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 pub fn ethereum_code_hash() -> B256 {

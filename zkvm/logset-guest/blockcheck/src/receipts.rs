@@ -27,7 +27,10 @@ pub struct Log {
 
 
 
-pub use logset_chains::{DEPOSIT_TX_TYPE, NITRO_TX_TYPES};
+
+pub use logset_chains::{
+    DEPOSIT_TX_TYPE, FEE_CURRENCY_TX_TYPE, NITRO_TX_TYPES, STATE_SYNC_TX_TYPE,
+};
 
 pub fn deposits_allowed(chain_id: u64) -> bool {
     logset_chains::receipt_gate(chain_id).deposits
@@ -36,6 +39,80 @@ pub fn deposits_allowed(chain_id: u64) -> bool {
 pub fn nitro_allowed(chain_id: u64) -> bool {
     logset_chains::receipt_gate(chain_id).nitro
 }
+
+pub fn fee_currency_allowed(chain_id: u64) -> bool {
+    logset_chains::receipt_gate(chain_id).fee_currency
+}
+
+
+pub fn state_sync_allowed(chain_id: u64) -> bool {
+    logset_chains::STATE_SYNC_CHAIN_IDS.contains(&chain_id)
+}
+
+
+
+pub fn pol_allowed(chain_id: u64) -> bool {
+    logset_chains::receipt_gate(chain_id).pol
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -336,13 +413,17 @@ fn fixed<const N: usize>(b: &[u8], what: &str) -> Result<[u8; N]> {
 
 
 
+
 pub fn logs_from_value(value: &[u8], chain_id: u64) -> Result<Vec<Log>> {
     let first = *value.first().context("empty receipt value")?;
     let deposit = first == DEPOSIT_TX_TYPE && deposits_allowed(chain_id);
     let nitro = NITRO_TX_TYPES.contains(&first) && nitro_allowed(chain_id);
+    let fee_currency = first == FEE_CURRENCY_TX_TYPE && fee_currency_allowed(chain_id);
+    let pol = first == DEPOSIT_TX_TYPE && pol_allowed(chain_id);
+    let state_sync = first == STATE_SYNC_TX_TYPE && state_sync_allowed(chain_id);
     let body = match first {
         0x01..=0x04 => &value[1..],
-        _ if deposit || nitro => &value[1..],
+        _ if deposit || nitro || fee_currency || pol || state_sync => &value[1..],
         0x00 => bail!("receipt value starts with a 0x00 type byte"),
         0x05..=0x7f => bail!("unsupported EIP-2718 receipt type 0x{first:02x}"),
         _ => value,
@@ -365,6 +446,18 @@ pub fn logs_from_value(value: &[u8], chain_id: u64) -> Result<Vec<Log>> {
             ensure!(
                 !is_list && f.len() <= 8 && f.first() != Some(&0),
                 "deposit nonce/version is not a canonical u64"
+            );
+        }
+    } else if fee_currency {
+        ensure!(
+            (4..=5).contains(&fields.len()),
+            "fee-currency receipt has {} fields, expected 4 or 5",
+            fields.len()
+        );
+        for (f, is_list) in &fields[4..] {
+            ensure!(
+                !is_list && f.len() <= 32 && f.first() != Some(&0),
+                "a fee-currency receipt's baseFee is not a canonical scalar"
             );
         }
     } else {
@@ -408,6 +501,93 @@ pub fn logs_from_value(value: &[u8], chain_id: u64) -> Result<Vec<Log>> {
     }
     Ok(out)
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

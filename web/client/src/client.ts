@@ -1,6 +1,6 @@
-import { Anchors, atLeast, type Anchored, type Level } from './anchor.js';
+import { Anchors, atLeast, L1_CHAINS, type Anchored, type Level } from './anchor.js';
 import { InlineBackend, isNoVerifier, type AnchorStart, type Backend } from './backend.js';
-import { BEACON_APIS, chooseCheckpoint, chooseStarts, type BnbStart, type Checkpoint } from './checkpoint.js';
+import { BEACON_APIS, chooseCheckpoint, chooseStarts, type BeraStart, type BnbStart, type Checkpoint } from './checkpoint.js';
 import { WillowRpcError, WillowUnverifiableError, WillowVerificationError } from './errors.js';
 import { hexToBytes, isAddress, isHash, keccakHex, sameHex, slotKey, toNumber, toQuantity } from './hex.js';
 import { Batcher, MAX_BATCH, type Reply } from './http.js';
@@ -31,9 +31,12 @@ export interface WillowOptions {
   /**
    * The chain this client verifies: Ethereum (1); anchored on Ethereum, Base (8453), OP Mainnet
    * (10), Unichain (130), Ink (57073), Soneium (1868), Zora (7777777), World Chain (480), Arbitrum
-   * One (42161), Robinhood Chain (4663); anchored on Sepolia, OP Sepolia (11155420), Base Sepolia
-   * (84532), Unichain Sepolia (1301), Ink Sepolia (763373), Arbitrum Sepolia (421614), Robinhood
-   * Chain testnet (46630); anchored on its own validators, BNB Smart Chain (56).
+   * One (42161), Robinhood Chain (4663), and by their claims alone (no newest block yet) Celo
+   * (42220), X Layer (196), Mantle (5000), Katana (747474); anchored on Sepolia, OP Sepolia
+   * (11155420), Base Sepolia (84532), Unichain Sepolia (1301), Ink Sepolia (763373), Arbitrum
+   * Sepolia (421614), Robinhood Chain testnet (46630); anchored on its own validators, Sepolia
+   * (11155111) and BNB Smart Chain (56); anchored through the chain it settles on, opBNB (204) on
+   * BNB Smart Chain and ApeChain (33139) on Arbitrum One.
    */
   chainId: number;
   /** API key; without one, the public path, which serves blocks, transactions, receipts and logs but no state. */
@@ -44,7 +47,7 @@ export interface WillowOptions {
   lightClientUrl?: string;
   /** The lowest anchor level a response may rest on; default `signed`. */
   minLevel?: Level;
-  /** A value that can't be verified: `throw` (default) raises WillowUnverifiableError; `flag` returns it with an event. */
+  /** A value that can't be verified: `throw` (default) raises WillowUnverifiableError; `flag` returns the server's with an event, except in a filter: a log filter's logs fall back to the server's eth_getLogs over the same blocks, anything else (a block filter's blocks) raises. */
   unverifiable?: 'throw' | 'flag';
   /** Called once per response: what was verified, at which block and level, or why not. */
   onVerification?: (event: VerificationEvent) => void;
@@ -60,6 +63,8 @@ export interface WillowOptions {
   sepoliaCheckpoint?: Checkpoint;
   /** BNB's light client's starting point, an epoch block, in place of the shipped one. */
   bnbStart?: BnbStart;
+  /** Berachain's light client's starting point, a CometBFT header, in place of the shipped one. */
+  berachainStart?: BeraStart;
   /** Beacon APIs that must confirm a fetched checkpoint; default two in Node, none in browsers. */
   beaconApis?: string[] | false;
   /** Where the light client's committees are kept; default localStorage, or ~/.cache/willow-rpc in Node; false: nowhere. */
@@ -115,7 +120,7 @@ export interface WillowVerifier {
   close(): void;
 }
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.3.0';
 const ORIGIN = 'https://api.willow.tech';
 const RPC_PATH = /^(.*\/rpc\/)(\d+)(\/.*)?$/;
 /** eth_getLogs over at most this many blocks goes by block-receipts proofs. */
@@ -126,7 +131,13 @@ export const FEE_HISTORY_WITH_REWARDS = 16;
 const EMPTY_CODE_HASH = '0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470';
 const NOT_FOUND_TX = 'not found in this store: transaction ';
 const FILTER_IDLE_MS = 5 * 60 * 1000;
-const NITRO = new Set([42161, 4663, 421614, 46630]);
+/** How long a failed choice of the light clients' starts stands before a request tries again. */
+const START_RETRY_MS = 10_000;
+/** The most blocks one `eth_getFilterChanges` on a block filter returns, oldest first; the next poll goes on from there. */
+export const BLOCK_FILTER_MAX = 2000;
+/** The filter methods served here, from the verified methods; the server knows none of their ids. */
+const LOCAL_FILTERS = new Set(['eth_newFilter', 'eth_newBlockFilter', 'eth_getFilterChanges', 'eth_getFilterLogs', 'eth_uninstallFilter']);
+const NITRO = new Set([42161, 4663, 421614, 46630, 33139]);
 const PROOF_DOWNLOADS = 4;
 /** The chains whose traces are proven (trace-verify): Ethereum and Unichain. */
 const TRACED = new Set([1, 130]);
@@ -138,6 +149,23 @@ const TX_TRACES = new Set(['debug_traceTransaction', 'trace_transaction', 'trace
 /** The most blocks one trace_filter spans (the server's `trace_filter_max_blocks` default). */
 export const TRACE_FILTER_BLOCKS = 16;
 
+/** What a proof needs its block's anchor to cover: the hash (and with it the whole header), or its transactions and receipts roots alone. */
+type Needs = 'hash' | 'roots';
+
+/** Where an item's block hash sits in it: left out when its block is anchored by roots alone. */
+const BLOCK_HASH_LEAVES: Record<string, string[]> = {
+  transaction: ['blockHash'],
+  receipt: ['blockHash', 'logs[].blockHash'],
+  blockReceipts: ['[].blockHash', '[].logs[].blockHash'],
+};
+
+/** `v` without its `blockHash` fields, at any depth (a receipt's logs carry their own). */
+function withoutBlockHash(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(withoutBlockHash);
+  if (!v || typeof v !== 'object') return v;
+  return Object.fromEntries(Object.entries(v as Record<string, unknown>).filter(([k]) => k !== 'blockHash').map(([k, x]) => [k, withoutBlockHash(x)]));
+}
+
 /** The app's request, as the client tracks it for its event. */
 class Call {
   readonly started = Date.now();
@@ -148,6 +176,8 @@ class Call {
   unproven = new Set<string>();
   /** The error thrown is the client's own verified outcome (a revert), not a refusal. */
   provenError = false;
+  /** For a filter served here, the server request whose value `flag` may return instead. */
+  standIn?: { method: string; params: unknown[] };
   constructor(
     readonly method: string,
     readonly params: unknown[],
@@ -166,6 +196,13 @@ class Call {
 
   leaves(fields: string[] | undefined): void {
     for (const f of fields ?? []) this.unproven.add(f);
+  }
+
+  /** The server request standing for this one under `flag`: the request itself, a filter's eth_getLogs, or none. */
+  serverRequest(): { method: string; params: unknown[] } | null {
+    if (this.standIn) return this.standIn;
+    if (LOCAL_FILTERS.has(this.method)) return null;
+    return { method: this.method, params: this.raw === undefined ? [] : (this.raw as unknown[]) };
   }
 }
 
@@ -307,6 +344,7 @@ class Client implements WillowVerifier {
   private readonly flagMode: boolean;
   private readonly now: () => number;
   private checkpoint: Promise<AnchorStart> | null = null;
+  private checkpointFailedAt: number | null = null;
   private chainCheck: Promise<void> | null = null;
   private memo = new Map<string, Promise<unknown>>();
   private results = new Lru<unknown>(1024, 16 << 20);
@@ -319,7 +357,8 @@ class Client implements WillowVerifier {
   private filterIds = 0;
 
   constructor(private readonly o: WillowOptions) {
-    if (!Number.isSafeInteger(o.chainId) || o.chainId <= 0) throw new Error('chainId must be a positive integer');
+    // The verifiers take a chain id as a u32: a larger one would be verified as another chain.
+    if (!Number.isSafeInteger(o.chainId) || o.chainId <= 0 || o.chainId > 0xffffffff) throw new WillowRpcError(-32602, 'chainId must be a positive integer of at most 32 bits');
     if (o.minLevel && !['signed', 'committed', 'final'].includes(o.minLevel)) throw new Error('minLevel is signed, committed or final');
     if (o.unverifiable && !['throw', 'flag'].includes(o.unverifiable)) throw new Error('unverifiable is throw or flag');
     this.chainId = o.chainId;
@@ -332,17 +371,29 @@ class Client implements WillowVerifier {
     const fetchImpl = o.fetch ?? globalThis.fetch.bind(globalThis);
     this.batcher = new Batcher({ fetch: fetchImpl, windowMs: o.batchWindowMs ?? 5, maxBatch: MAX_BATCH });
     const nowSec = () => Math.floor(this.now() / 1000);
-    const checkpoint = () =>
-      (this.checkpoint ??= Promise.all([
-        chooseCheckpoint({
-          checkpoint: o.checkpoint,
-          checkpointUrl: o.checkpointUrl,
-          beaconApis: o.beaconApis ?? (isNode() ? BEACON_APIS : false),
-          fetch: fetchImpl,
-          nowSec,
-        }),
-        chooseStarts({ sepolia: o.sepoliaCheckpoint, bnb: o.bnbStart, checkpointUrl: o.checkpointUrl, fetch: fetchImpl, nowSec }),
-      ]).then(([c, starts]) => ({ ...c, ...starts })));
+    // The starts, chosen once; a failure stands for START_RETRY_MS (or until the clock goes back), then the next ask tries again.
+    const checkpoint = () => {
+      const since = this.checkpointFailedAt === null ? null : this.now() - this.checkpointFailedAt;
+      if (since !== null && (since >= START_RETRY_MS || since < 0)) this.checkpoint = null;
+      if (!this.checkpoint) {
+        const p = Promise.all([
+          chooseCheckpoint({
+            checkpoint: o.checkpoint,
+            checkpointUrl: o.checkpointUrl,
+            beaconApis: o.beaconApis ?? (isNode() ? BEACON_APIS : false),
+            fetch: fetchImpl,
+            nowSec,
+          }),
+          chooseStarts({ sepolia: o.sepoliaCheckpoint, bnb: o.bnbStart, berachain: o.berachainStart, checkpointUrl: o.checkpointUrl, fetch: fetchImpl, nowSec }),
+        ]).then(([c, starts]) => ({ ...c, ...starts }));
+        this.checkpoint = p;
+        this.checkpointFailedAt = null;
+        p.catch(() => {
+          if (this.checkpoint === p) this.checkpointFailedAt = this.now();
+        });
+      }
+      return this.checkpoint;
+    };
     const worker = o.worker ?? (!isNode() && typeof Worker !== 'undefined' && !o.verifiers);
     if (worker && o.verifiers) throw new Error('verifiers are injected into this thread: pass worker: false');
     this.backend = worker ? new WorkerBackend(spawnWorker() as any, checkpoint) : new InlineBackend(o.verifiers ?? packageModules(), checkpoint);
@@ -353,10 +404,11 @@ class Client implements WillowVerifier {
       storage,
       checkpointRoot: async (lc) => {
         const c = await checkpoint();
-        return lc === 'sepolia' ? c.sepolia!.root : lc === 'bnb' ? c.bnb!.hash : c.root;
+        return lc === 'sepolia' ? c.sepolia!.root : lc === 'bnb' ? c.bnb!.hash : lc === 'berachain' ? c.berachain!.hash : c.root;
       },
+      startHeight: async (lc) => (lc === 'berachain' ? (await checkpoint()).berachain?.height : undefined),
       minLevel: o.minLevel ?? 'signed',
-      headMaxAgeMs: (c) => o.headMaxAgeMs ?? (c === 1 ? 12_000 : 2_000),
+      headMaxAgeMs: (c) => o.headMaxAgeMs ?? (L1_CHAINS.has(c) ? 12_000 : 2_000),
       maxHeadAgeSec: o.maxHeadAgeSec ?? 600,
       nowMs: this.now,
       waitingMs: o.waitMs?.anchor,
@@ -528,15 +580,17 @@ class Client implements WillowVerifier {
 
   /** A value that can't be verified: throw, or (flag) return the server's standard response, marked. */
   private async policy(call: Call, kind: string, detail: string, fallback: () => Promise<unknown>): Promise<never> {
-    if (!this.flagMode) throw new WillowUnverifiableError(kind, detail, call.method);
+    if (!this.flagMode || !call.serverRequest()) throw new WillowUnverifiableError(kind, detail, call.method);
     const v = await fallback();
     call.flag(kind, detail);
     throw new Fallback(v);
   }
 
-  /** The app's own request, sent as it is. */
+  /** The app's own request, sent as it is (for a log filter, its eth_getLogs). */
   private async standard(call: Call): Promise<unknown> {
-    const r = await this.batcher.call(this.url, call.method, call.raw === undefined ? [] : (call.raw as unknown[]));
+    const req = call.serverRequest();
+    if (!req) throw new WillowRpcError(-32603, `${call.method} has no server request`);
+    const r = await this.batcher.call(this.url, req.method, req.params);
     if (r.value.error) throw this.rpcError(r.value.error);
     return r.value.result;
   }
@@ -614,9 +668,9 @@ class Client implements WillowVerifier {
     if (isTag(b)) return this.head(call);
     if (b === 'earliest') return { number: 0 };
     if (b === 'finalized' || b === 'safe') {
-      if (this.chainId === 1) {
+      if (L1_CHAINS.has(this.chainId)) {
         if (b === 'safe') throw new WillowRpcError(-32000, 'not found in this store: the "safe" block tag');
-        const f = await this.anchors.head(1, 'finalized', false, call.method);
+        const f = await this.anchors.head(this.chainId, 'finalized', false, call.method);
         call.anchored(f);
         return { number: f.number, hash: f.hash };
       }
@@ -642,10 +696,16 @@ class Client implements WillowVerifier {
     return hash ? { number: n, hash } : { number: n };
   }
 
-  /** Anchors a verified block; under `flag`, a block that can't be anchored is marked and kept. */
-  private async anchor(call: Call, number: number, hash: string, prefetched?: Promise<Reply>): Promise<Anchored | null> {
+  /**
+   * Anchors a verified block; under `flag`, a block that can't be anchored is marked and kept. An
+   * anchor of the roots alone counts only for a proof that `needs` no more.
+   */
+  private async anchor(call: Call, number: number, hash: string, prefetched?: Promise<Reply>, needs: Needs = 'hash'): Promise<Anchored | null> {
     try {
       const a = await this.anchors.block(this.chainId, number, hash, prefetched, call.method);
+      if (a.covers === 'roots' && needs === 'hash') {
+        throw new WillowUnverifiableError('anchor-covers', `block ${number} of chain ${this.chainId} is anchored by its transactions and receipts roots, not its hash: ${call.method} needs more of its header`, call.method);
+      }
       call.anchored(a);
       return a;
     } catch (e) {
@@ -704,7 +764,7 @@ class Client implements WillowVerifier {
    * Block `at`, verified and anchored (cached by hash), its parent's hash anchored with it.
    * `reply`: its proof, already asked for; `prefetch: false`: no anchor asked for ahead.
    */
-  private async block(call: Call, at: Resolved, full: boolean, opts: { reply?: Promise<Reply>; prefetch?: boolean } = {}): Promise<BlockEntry | null> {
+  private async block(call: Call, at: Resolved, full: boolean, opts: { reply?: Promise<Reply>; prefetch?: boolean; needs?: Needs } = {}): Promise<BlockEntry | null> {
     let entry = at.hash ? this.blocks.get(at.hash) : undefined;
     if (!entry) {
       let prefetched: Promise<Reply> | undefined;
@@ -737,13 +797,13 @@ class Client implements WillowVerifier {
         number: toNumber(b.number)!,
         hash: b.hash.toLowerCase(),
       };
-      const a = await this.anchor(call, entry.number, entry.hash, prefetched);
+      const a = await this.anchor(call, entry.number, entry.hash, prefetched, opts.needs);
       if (a) {
         this.anchors.parent(a, String(b.parentHash ?? entry.proven.parentHash ?? ''));
         this.blocks.set(entry.hash, entry, reply.text.length);
       }
     } else {
-      const a = await this.anchor(call, entry.number, entry.hash);
+      const a = await this.anchor(call, entry.number, entry.hash, undefined, opts.needs);
       call.leaves(entry.unproven);
       if (a) this.anchors.parent(a, String(entry.proven.parentHash ?? ''));
     }
@@ -764,7 +824,8 @@ class Client implements WillowVerifier {
   }
 
   private async txCount(call: Call, at: Resolved): Promise<string | null> {
-    const e = await this.block(call, at, false);
+    // The count is the transactions root's: an anchor of the roots covers it.
+    const e = await this.block(call, at, false, { needs: 'roots' });
     if (!e) return null;
     const txs = e.proven.transactions;
     if (!Array.isArray(txs)) throw new WillowVerificationError('malformed', 'the proven block has no transaction list', call.method);
@@ -1164,8 +1225,11 @@ class Client implements WillowVerifier {
       return null;
     }
     const v = await this.verifyItem(call, kind, target, reply);
-    await this.anchor(call, toNumber(v.report.block.number)!, v.report.block.hash);
-    return v.proven;
+    // Transactions and receipts are the roots': an anchor of the roots covers all but the block hash.
+    const a = await this.anchor(call, toNumber(v.report.block.number)!, v.report.block.hash, undefined, 'roots');
+    if (a?.covers !== 'roots') return v.proven;
+    call.leaves(BLOCK_HASH_LEAVES[kind]);
+    return withoutBlockHash(v.proven);
   }
 
   // ---------- logs ----------
@@ -1205,16 +1269,26 @@ class Client implements WillowVerifier {
     const verified = await Promise.all(blocks.map((at) => this.proveItem(call, 'blockReceipts', this.target(at))));
     const named = verified.map((v) => ({ number: toNumber(v.report.block.number)!, hash: v.report.block.hash.toLowerCase(), parentHash: v.report.block.parentHash }));
     const linked = named.every((b, i) => i === top || (named[i + 1].number === b.number + 1 && typeof named[i + 1].parentHash === 'string' && named[i + 1].parentHash!.toLowerCase() === b.hash));
+    const each = () => Promise.all(named.map((b, i) => this.anchor(call, b.number, b.hash, i === top ? prefetched : this.prefetch({ number: b.number }), 'roots')));
+    let anchored: (Anchored | null)[];
     if (linked) {
-      const a = await this.anchor(call, named[top].number, named[top].hash, prefetched);
-      for (let i = top; a && i > 0; i--) this.anchors.parent({ ...a, number: named[i].number, hash: named[i].hash }, named[i].parentHash!);
+      const a = await this.anchor(call, named[top].number, named[top].hash, prefetched, 'roots');
+      // Roots alone prove no parent: each block is anchored by its own checkpoint.
+      if (a?.covers === 'roots') anchored = await each();
+      else {
+        for (let i = top; a && i > 0; i--) this.anchors.parent({ ...a, number: named[i].number, hash: named[i].hash }, named[i].parentHash!);
+        anchored = [a];
+      }
     } else {
-      await Promise.all(named.map((b, i) => this.anchor(call, b.number, b.hash, i === top ? prefetched : this.prefetch({ number: b.number }))));
+      anchored = await each();
     }
-    return verified.flatMap((v) => {
+    const logs = verified.flatMap((v) => {
       if (!Array.isArray(v.proven)) throw new WillowVerificationError('malformed', 'the proven receipts are not a list', call.method);
       return (v.proven as { logs?: unknown[] }[]).flatMap((r) => r?.logs ?? []).filter((l) => matches(l, filter));
     });
+    if (!anchored.some((a) => a?.covers === 'roots')) return logs;
+    call.leaves(['[].blockHash']);
+    return logs.map(withoutBlockHash);
   }
 
   private async logsByProof(call: Call, filter: Record<string, unknown>, from: number, to: number): Promise<unknown[]> {
@@ -1305,34 +1379,50 @@ class Client implements WillowVerifier {
     f.touched = now;
     if (call.method === 'eth_getFilterLogs') {
       if (f.kind !== 'logs') throw new WillowRpcError(-32000, 'filter not found');
+      call.standIn = { method: 'eth_getLogs', params: [f.filter] };
       return this.getLogs(call, f.filter);
     }
     const head = await this.head(call);
     const top = head.number!;
     if (top < f.next) return [];
     if (f.kind === 'blocks') {
+      // At most BLOCK_FILTER_MAX blocks a poll, oldest first; the next poll goes on from there.
+      const last = Math.min(top, f.next + BLOCK_FILTER_MAX - 1);
       const at = (n: number): Resolved => (n === top && head.hash ? head : { number: n });
       // Every proof asked for at once (one batch); verified newest first, so each block's parent
       // hash anchors the one below it without an anchor of its own.
       const replies = new Map<number, Promise<Reply>>();
-      for (let n = top; n >= f.next; n--) {
+      for (let n = last; n >= f.next; n--) {
         const p = this.blockReply(call, at(n));
         p.catch(() => undefined);
         replies.set(n, p);
       }
       const out: string[] = [];
-      for (let n = top; n >= f.next; n--) {
+      for (let n = last; n >= f.next; n--) {
         const b = await this.block(call, at(n), false, { reply: replies.get(n), prefetch: false });
         if (!b) throw new WillowVerificationError('missing', `block ${n} of the range is absent`, call.method);
         out.unshift(b.hash);
       }
-      f.next = top + 1;
+      f.next = last + 1;
       return out;
     }
     const filter = f.filter ?? {};
     const lo = Math.max(f.next, typeof filter.fromBlock === 'string' && toNumber(filter.fromBlock) !== null ? toNumber(filter.fromBlock)! : 0);
     const hi = typeof filter.toBlock === 'string' && toNumber(filter.toBlock) !== null ? Math.min(top, toNumber(filter.toBlock)!) : top;
-    const logs = lo > hi ? [] : await this.logsRange(call, filter, { number: lo }, hi === top ? head : { number: hi });
+    let logs: unknown[] = [];
+    if (lo <= hi) {
+      const range: Record<string, unknown> = { fromBlock: toQuantity(lo), toBlock: toQuantity(hi) };
+      if (filter.address !== undefined) range.address = filter.address;
+      if (filter.topics !== undefined) range.topics = filter.topics;
+      call.standIn = { method: 'eth_getLogs', params: [range] };
+      try {
+        logs = await this.logsRange(call, filter, { number: lo }, hi === top ? head : { number: hi });
+      } catch (e) {
+        // The server's logs, flagged (`flag`): this range is served, so the filter moves on.
+        if (e instanceof Fallback) f.next = top + 1;
+        throw e;
+      }
+    }
     // Only once the logs are in: a failed poll is asked again from the same block.
     f.next = top + 1;
     return logs;

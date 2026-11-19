@@ -6,9 +6,11 @@
 
 
 
+
 pub mod call;
 pub mod estimate;
 pub mod history;
+pub mod memguard;
 pub mod overrides;
 pub mod proof;
 
@@ -324,12 +326,12 @@ pub fn call_request(chain_id: u64, params: &Value) -> Result<CallRequest, Failur
     let Some(engine) = call::engine(chain_id) else {
         return Err(Failure::new(
             Kind::Unsupported,
-            format!("calls are verified on Ethereum, Unichain and Robinhood Chain, not chain {chain_id}"),
+            format!("calls are verified on Ethereum, Unichain, OP Mainnet, Ink, World Chain, Soneium, Robinhood Chain and Arbitrum One, not chain {chain_id}"),
         ));
     };
     let unsupported = |m: String| Failure::new(Kind::Unsupported, m);
     let p = |i: usize| params.get(i).unwrap_or(&Value::Null);
-    if engine == Engine::Nitro {
+    if engine.is_nitro() {
 
         if ["beaconRoot", "withdrawals"]
             .iter()

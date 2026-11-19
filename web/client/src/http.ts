@@ -3,6 +3,9 @@ import { WillowRpcError, WillowVerificationError } from './errors.js';
 /** The most items in one JSON-RPC batch (the server's `MAX_BATCH`, rpc.rs). */
 export const MAX_BATCH = 100;
 
+/** JSON-RPC params: positional (Ethereum), by name (stellar-rpc), or none (the member is left out). */
+export type JsonRpcParams = unknown[] | Record<string, unknown> | undefined;
+
 /** One item of a batch response: its exact text (passed to the wasm as sent) and its parse. */
 export interface Reply {
   text: string;
@@ -19,7 +22,7 @@ export interface BatcherOptions {
 
 interface Entry {
   method: string;
-  params: unknown[];
+  params: JsonRpcParams;
   resolve: (r: Reply) => void;
   reject: (e: unknown) => void;
 }
@@ -89,7 +92,7 @@ export class Batcher {
 
   constructor(private readonly o: BatcherOptions) {}
 
-  call(url: string, method: string, params: unknown[]): Promise<Reply> {
+  call(url: string, method: string, params: JsonRpcParams): Promise<Reply> {
     const key = `${url}\n${method}\n${JSON.stringify(params)}`;
     const same = this.inflight.get(key);
     if (same) return same;
@@ -109,7 +112,7 @@ export class Batcher {
   }
 
   /** One request on its own (not batched): for responses too large to share a batch, such as proofs of megabytes. */
-  async single(url: string, method: string, params: unknown[]): Promise<Reply> {
+  async single(url: string, method: string, params: JsonRpcParams): Promise<Reply> {
     const { text, status } = await this.post(url, JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }));
     this.sent.push({ url, items: 1, bytes: text.length });
     let value: any;

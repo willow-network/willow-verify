@@ -387,8 +387,8 @@ export interface AnchorFailure extends Failure<AnchorFailureKind> {
   lightClient?: LightClientName;
 }
 
-/** The anchor's light clients besides Ethereum's: Sepolia's (the testnets) and BNB's validators. */
-export type LightClientName = 'sepolia' | 'bnb';
+/** The anchor's light clients besides Ethereum's: Sepolia's (the testnets), BNB's and Berachain's validators. */
+export type LightClientName = 'sepolia' | 'bnb' | 'berachain';
 
 /**
  * A passing `Anchor.verify`, by path (anchor-verify lib.rs `Anchor::verify`):
@@ -402,11 +402,25 @@ export type LightClientName = 'sepolia' | 'bnb';
 export interface AnchorVerified {
   ok: true;
   level: 'signed' | 'committed' | 'final';
-  path: 'head' | 'history' | 'beacon' | 'game' | 'assertion' | 'sequencer' | 'parlia' | 'accumulator';
-  /** Block `number`'s hash, as proven. */
-  hash: string;
+  path: 'head' | 'history' | 'hops' | 'beacon' | 'game' | 'assertion' | 'sequencer' | 'parlia' | 'cometbft' | 'accumulator' | 'checkpoint';
+  /** Block `number`'s hash, as proven (none when `covers` is `roots`). */
+  hash?: string;
   /** Whether `hash` is the one passed in. */
-  matches: boolean;
+  matches?: boolean;
+  /**
+   * `roots` (Polygon PoS, `checkpoint`): the block's number, time, transactions root and receipts
+   * root are proven, not its hash: `headerHash` is the header sent, `rootsMatch` whether it is the
+   * one passed in.
+   */
+  covers?: 'roots';
+  headerHash?: string;
+  rootsMatch?: boolean;
+  transactionsRoot?: string;
+  receiptsRoot?: string;
+  blockTime?: number;
+  checkpoint?: number;
+  checkpointStart?: number;
+  checkpointEnd?: number;
   finalized?: number;
   head?: number;
   headTime?: number;
@@ -417,7 +431,7 @@ export interface AnchorVerified {
   assertion?: string;
   signer?: string;
   l1Block?: number;
-  /** BNB (`parlia`): the validators who voted, of the set. */
+  /** BNB (`parlia`) and Berachain (`cometbft`): the validators who voted or signed, of the set. */
   of?: number;
 }
 
@@ -440,7 +454,8 @@ export interface Anchor {
   reset(): void;
   /**
    * Additive: the other light clients. `start` sets where one starts (`sepolia`:
-   * `{root, slot}`; `bnb`: `{number, hash}` of an epoch block) in place of the pin built in; the
+   * `{root, slot}`; `bnb`: `{number, hash}` of an epoch block; `berachain`: `{height, hash}` of a
+   * CometBFT header) in place of the pin built in; the
    * rest are the methods above for it. A build before them has none.
    */
   start?(lightClient: LightClientName, start: string): JsonText;
@@ -519,6 +534,113 @@ export interface OpenVmVerifierConstructor {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Stellar module (`stellar.js`, willow-stellar-verify-wasm, crates/stellar-verify-wasm): new
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Stellar failure kinds: `pending` (the bundle has no anchor yet: SCP messages are published per
+ * 64-ledger checkpoint), `invalid` (the bundle does not verify or can't be read), `invalid-request`
+ * (the caller's own input: a trusted quorum set, event filters).
+ */
+export type StellarFailureKind = 'pending' | 'invalid' | 'invalid-request';
+
+/** An event as stellar-rpc's getEvents writes it (`xdrFormat` base64). */
+export interface StellarEvent {
+  type: string;
+  ledger: number;
+  ledgerClosedAt: string;
+  contractId: string;
+  id: string;
+  operationIndex: number;
+  transactionIndex: number;
+  txHash: string;
+  inSuccessfulContractCall: boolean;
+  topic: string[];
+  value: string;
+}
+
+/** A transaction as stellar-rpc writes it, proven fields only (no `resultMetaXdr`, no events). */
+export interface StellarProvenTransaction {
+  status: 'SUCCESS' | 'FAILED';
+  txHash: string;
+  /** 1-based. */
+  applicationOrder: number;
+  feeBump: boolean;
+  resultXdr: string;
+  ledger: number;
+  /** Close time, unix seconds, as a decimal string. */
+  createdAt: string;
+  /** When the bundle carried the transaction set. */
+  envelopeXdr?: string;
+  /** A successful Soroban invocation's return value (`ScVal` XDR). */
+  returnValueXdr?: string;
+}
+
+/** A successful `InvokeHostFunction`: its place and its proven `ContractEvent`s (base64 XDR). */
+export interface StellarInvocation {
+  /** 1-based application order. */
+  tx: number;
+  op: number;
+  eventsXdr: string[];
+}
+
+export interface StellarProvenLedger {
+  sequence: number;
+  hash: string;
+  previousHash: string;
+  /** Unix seconds, as a decimal string. */
+  closeTime: string;
+  protocolVersion: number;
+  /** `LedgerHeader` XDR (getLatestLedger's `headerXdr`). */
+  headerXdr: string;
+  /** `LedgerHeaderHistoryEntry` XDR (getLedgers' `headerXdr`). */
+  headerHistoryXdr: string;
+  transactionCount: number;
+  transactions: StellarProvenTransaction[];
+  /** The committed events: every Soroban event of a successful invocation, as getEvents writes it. */
+  events: StellarEvent[];
+  invocations: StellarInvocation[];
+}
+
+/** What anchored a bundle: SCP `EXTERNALIZE` for slot `ledger + 1`, signed by a quorum of the trusted set. */
+export interface StellarAnchor {
+  ledger: number;
+  hash: string;
+  quorumSetHash: string;
+  /** The quorum set the signers declare, when it is not the trusted one (all zeros otherwise). */
+  nextQuorumSetHash: string;
+  /** Top-level entries (organisations) of the trusted set that signed, and how many it has. */
+  signedEntries: number;
+  totalEntries: number;
+  /** Envelopes checked. */
+  signers: number;
+  /** The history-archive file the envelopes came from. */
+  source: string | null;
+}
+
+export interface StellarVerified {
+  ok: true;
+  verified: { network: string; anchor: StellarAnchor; ledgers: StellarProvenLedger[] };
+}
+
+/**
+ * The Stellar module's functions (no class: every call is stateless). Each returns JSON text and
+ * never throws a verdict.
+ */
+export interface StellarVerifier {
+  /**
+   * A `willow_getLedgerProof` response body (or the bundle alone) against the pinned Tier-1 quorum
+   * set, or `trustedQuorumSet` (base64 `ScpQuorumSet` XDR). `StellarVerified` or
+   * `Failure<StellarFailureKind>`.
+   */
+  verifyLedgerBundle(response: string, trustedQuorumSet?: string | null): JsonText;
+  /** `{ok: true, matches: boolean[]}`: which of `events` (JSON array) match getEvents `filters` (JSON); or `invalid-request`. */
+  matchEvents(events: string, filters: string): JsonText;
+  /** `{ok: true, xdr, hash, network, maxLedgers}`: the pinned quorum set and its sha256. */
+  pinnedQuorumSet(): JsonText;
+}
+
+// ---------------------------------------------------------------------------------------------
 // The modules, as the client loads them
 // ---------------------------------------------------------------------------------------------
 
@@ -543,6 +665,7 @@ export interface LogsModule extends GlueModule {
 export interface OpenVmModule extends GlueModule {
   OpenVmVerifier: OpenVmVerifierConstructor;
 }
+export interface StellarModule extends GlueModule, StellarVerifier {}
 
 /**
  * The verifier classes, initialised, by module. The client takes them from its own wasm builds by
@@ -555,4 +678,6 @@ export interface VerifierModules {
   anchor?: () => Promise<{ Anchor: AnchorConstructor }>;
   logs?: () => Promise<{ Verifier: LogsVerifierConstructor }>;
   openvm?: () => Promise<{ OpenVmVerifier: OpenVmVerifierConstructor }>;
+  /** Stellar (`@willow-network/rpc/stellar`). */
+  stellar?: () => Promise<StellarVerifier>;
 }

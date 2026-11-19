@@ -1,6 +1,6 @@
 [package]
 name = "willow-rpc"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "A verifying JSON-RPC client for Willow: every response is verified on your machine against proofs and a light client, with an alloy transport"

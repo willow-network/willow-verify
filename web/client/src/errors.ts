@@ -23,7 +23,7 @@ export class WillowVerificationError extends Error {
   }
 }
 
-/** Code -32099: the client could not verify a value, and `unverifiable` is `"throw"`. */
+/** Code -32099: the client could not verify a value, and `unverifiable` is `"throw"`; under `"flag"`, also what a filter can't verify other than a log filter's logs (a block filter's blocks). */
 export class WillowUnverifiableError extends Error {
   readonly code = UNVERIFIABLE;
   readonly data: WillowErrorData;

@@ -129,6 +129,7 @@ where
             .with_block(env.block_env.clone())
             .with_cfg(env.cfg_env.clone())
             .build_mainnet_with_inspector(inspector);
+        state_verify::memguard::guard(&mut evm.instruction);
         evm.ctx.set_tx(tx);
         let result = state_verify::call::CallHandler::<_, EVMError<DB::Error>, _>::default()
             .inspect_run(&mut evm)?;

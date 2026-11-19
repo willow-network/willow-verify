@@ -2,17 +2,22 @@
 
 
 
+
+
+use crate::codec::{next, open_list, ListWriter};
 use crate::spec::Spec;
 
 use crate::Error;
-use alloy_primitives::{keccak256, Address, Signature, B256, B64, U256};
-use alloy_rlp::{Decodable, Encodable, Header as RlpHeader};
+use alloy_primitives::{keccak256, Address, Bytes, Signature, B256, B64, U256};
+
 
 
 pub const EXTRA_VANITY: usize = 32;
+
 pub const EXTRA_SEAL: usize = 65;
 
 pub const VALIDATOR_BYTES: usize = 20 + 48;
+
 pub const VALIDATOR_BYTES_BEFORE_LUBAN: usize = 20;
 
 
@@ -23,24 +28,7 @@ pub const VALIDATOR_BYTES_BEFORE_LUBAN: usize = 20;
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+const BARE_EXTRA: usize = EXTRA_VANITY + EXTRA_SEAL;
 
 
 
@@ -71,48 +59,16 @@ pub struct Header {
 
 
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EpochSet {
+    pub validators: Vec<(Address, [u8; 48])>,
+    pub turn_length: Option<u8>,
+}
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+pub(crate) fn on_epoch(number: u64, epoch_len: u64) -> bool {
+    epoch_len != 0 && number % epoch_len == 0
+}
 
 impl Header {
 
@@ -176,119 +132,13 @@ impl Header {
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    fn base_fields(&self, out: &mut Vec<u8>, extra: &[u8], chain_id: Option<u64>) {
-        if let Some(c) = chain_id {
-            U256::from(c).encode(out);
-        }
-        self.parent_hash.encode(out);
-        self.uncle_hash.encode(out);
-        self.coinbase.encode(out);
-        self.state_root.encode(out);
-        self.transactions_root.encode(out);
-        self.receipts_root.encode(out);
-        self.logs_bloom.as_slice().encode(out);
-        self.difficulty.encode(out);
-        self.number.encode(out);
-        self.gas_limit.encode(out);
-        self.gas_used.encode(out);
-        self.time.encode(out);
-        extra.encode(out);
-        self.mix_digest.encode(out);
-        self.nonce.encode(out);
-    }
-
-    fn tail_fields(&self, out: &mut Vec<u8>) {
-        if let Some(x) = self.base_fee {
-            x.encode(out);
-        } else {
-            return;
-        }
-        if let Some(x) = self.withdrawals_hash {
-            x.encode(out);
-        } else {
-            return;
-        }
-        if let Some(x) = self.blob_gas_used {
-            x.encode(out);
-        } else {
-            return;
-        }
-        if let Some(x) = self.excess_blob_gas {
-            x.encode(out);
-        } else {
-            return;
-        }
-        if let Some(x) = self.parent_beacon_root {
-            x.encode(out);
-        } else {
-            return;
-        }
-        if let Some(x) = self.requests_hash {
-            x.encode(out);
-        }
-    }
-
-
     pub fn rlp(&self) -> Vec<u8> {
-        let mut payload = Vec::with_capacity(640 + self.extra.len());
-        self.base_fields(&mut payload, &self.extra, None);
-        self.tail_fields(&mut payload);
-        wrap_list(payload)
+        let mut list = ListWriter::new();
+        self.write_base(&mut list, &self.extra);
+        self.write_tail(&mut list);
+        list.finish()
     }
+
 
     pub fn hash(&self) -> B256 {
         keccak256(self.rlp())
@@ -299,132 +149,54 @@ impl Header {
 
     pub fn seal_hash(&self, chain_id: u64) -> Option<B256> {
         let unsealed = self.extra.len().checked_sub(EXTRA_SEAL)?;
-        let mut payload = Vec::with_capacity(640 + self.extra.len());
-        self.base_fields(&mut payload, &self.extra[..unsealed], Some(chain_id));
-        if let Some(pbr) = self.parent_beacon_root {
-            self.base_fee.unwrap_or_default().encode(&mut payload);
-            self.withdrawals_hash
-                .unwrap_or_default()
-                .encode(&mut payload);
-            self.blob_gas_used.unwrap_or_default().encode(&mut payload);
-            self.excess_blob_gas
-                .unwrap_or_default()
-                .encode(&mut payload);
-            pbr.encode(&mut payload);
-            if let Some(r) = self.requests_hash {
-                r.encode(&mut payload);
+        let mut list = ListWriter::new();
+        list.item(&chain_id);
+        self.write_base(&mut list, &self.extra[..unsealed]);
+        if let Some(beacon) = &self.parent_beacon_root {
+            list.item(&self.base_fee.unwrap_or(U256::ZERO))
+                .item(&self.withdrawals_hash.unwrap_or(B256::ZERO))
+                .item(&self.blob_gas_used.unwrap_or(0))
+                .item(&self.excess_blob_gas.unwrap_or(0))
+                .item(beacon);
+            if let Some(requests) = &self.requests_hash {
+                list.item(requests);
             }
         }
-        Some(keccak256(wrap_list(payload)))
+        Some(keccak256(list.finish()))
     }
 
 
     pub fn signer(&self, chain_id: u64) -> Result<Address, Error> {
-        let hash = self.seal_hash(chain_id).ok_or_else(|| {
-            Error::Malformed(format!("block {}: extraData holds no seal", self.number))
-        })?;
-        let sig = &self.extra[self.extra.len() - EXTRA_SEAL..];
-        let v = sig[64];
-        if v > 1 {
+        let n = self.number;
+        let digest = self
+            .seal_hash(chain_id)
+            .ok_or_else(|| malformed(format!("block {n}: extraData holds no seal")))?;
+        let seal = &self.extra[self.extra.len() - EXTRA_SEAL..];
+        let recovery_id = seal[64];
+        if recovery_id > 1 {
             return Err(Error::BadSeal(format!(
-                "block {}: seal recovery id {v}",
-                self.number
+                "block {n}: seal recovery id {recovery_id}"
             )));
         }
-        let sig = Signature::from_bytes_and_parity(&sig[..64], v == 1);
-        sig.recover_address_from_prehash(&hash)
-            .map_err(|e| Error::BadSeal(format!("block {}: {e}", self.number)))
+        Signature::from_bytes_and_parity(&seal[..64], recovery_id == 1)
+            .recover_address_from_prehash(&digest)
+            .map_err(|e| Error::BadSeal(format!("block {n}: {e}")))
     }
 
 
     pub fn seal(&self) -> Option<&[u8]> {
-        self.extra
-            .len()
-            .checked_sub(EXTRA_SEAL)
-            .map(|i| &self.extra[i..])
+        let at = self.extra.len().checked_sub(EXTRA_SEAL)?;
+        Some(&self.extra[at..])
     }
 
 
     pub fn from_rlp(bytes: &[u8]) -> Result<(Header, B256), Error> {
-        let bad = |m: &str| Error::Malformed(format!("header RLP: {m}"));
-        let mut buf = bytes;
-        let head = RlpHeader::decode(&mut buf).map_err(|e| bad(&e.to_string()))?;
-        if !head.list || head.payload_length != buf.len() {
-            return Err(bad("not exactly one list"));
-        }
-        let mut p = buf;
-        let d = |p: &mut &[u8]| -> Result<B256, Error> {
-            B256::decode(p).map_err(|e| bad(&e.to_string()))
-        };
-        let parent_hash = d(&mut p)?;
-        let uncle_hash = d(&mut p)?;
-        let coinbase = Address::decode(&mut p).map_err(|e| bad(&e.to_string()))?;
-        let state_root = d(&mut p)?;
-        let transactions_root = d(&mut p)?;
-        let receipts_root = d(&mut p)?;
-        let bloom = alloy_rlp::Bytes::decode(&mut p).map_err(|e| bad(&e.to_string()))?;
-        let logs_bloom: [u8; 256] = bloom[..].try_into().map_err(|_| bad("bloom length"))?;
-        let u = |p: &mut &[u8]| u64::decode(p).map_err(|e| bad(&e.to_string()));
-        let difficulty = U256::decode(&mut p).map_err(|e| bad(&e.to_string()))?;
-        let number = u(&mut p)?;
-        let gas_limit = u(&mut p)?;
-        let gas_used = u(&mut p)?;
-        let time = u(&mut p)?;
-        let extra = alloy_rlp::Bytes::decode(&mut p)
-            .map_err(|e| bad(&e.to_string()))?
-            .to_vec();
-        let mix_digest = d(&mut p)?;
-        let nonce = B64::decode(&mut p).map_err(|e| bad(&e.to_string()))?;
-        let mut h = Header {
-            parent_hash,
-            uncle_hash,
-            coinbase,
-            state_root,
-            transactions_root,
-            receipts_root,
-            logs_bloom,
-            difficulty,
-            number,
-            gas_limit,
-            gas_used,
-            time,
-            extra,
-            mix_digest,
-            nonce,
-            base_fee: None,
-            withdrawals_hash: None,
-            blob_gas_used: None,
-            excess_blob_gas: None,
-            parent_beacon_root: None,
-            requests_hash: None,
-        };
-        if !p.is_empty() {
-            h.base_fee = Some(U256::decode(&mut p).map_err(|e| bad(&e.to_string()))?);
-        }
-        if !p.is_empty() {
-            h.withdrawals_hash = Some(d(&mut p)?);
-        }
-        if !p.is_empty() {
-            h.blob_gas_used = Some(u(&mut p)?);
-        }
-        if !p.is_empty() {
-            h.excess_blob_gas = Some(u(&mut p)?);
-        }
-        if !p.is_empty() {
-            h.parent_beacon_root = Some(d(&mut p)?);
-        }
-        if !p.is_empty() {
-            h.requests_hash = Some(d(&mut p)?);
-        }
-        if !p.is_empty() {
-            return Err(bad("fields past requestsHash"));
-        }
-        if h.rlp() != bytes {
-            return Err(bad("does not re-encode to the same bytes"));
-        }
-        let hash = keccak256(bytes);
-        Ok((h, hash))
+        let header =
+            Self::read_rlp(bytes).map_err(|why| malformed(format!("header RLP: {why}")))?;
+        Ok((header, keccak256(bytes)))
     }
+
+
 
 
 
@@ -439,67 +211,64 @@ impl Header {
 
 
     pub fn validator_bytes(&self, spec: &Spec, epoch: u64) -> &[u8] {
-        if self.extra.len() <= EXTRA_VANITY + EXTRA_SEAL {
+        let x = &self.extra;
+        if x.len() <= BARE_EXTRA {
             return &[];
         }
-        let body = &self.extra[EXTRA_VANITY..self.extra.len() - EXTRA_SEAL];
-        if !spec.is_luban(self.number) {
-            if self.number % epoch == 0 && body.len() % VALIDATOR_BYTES_BEFORE_LUBAN != 0 {
+        let n = self.number;
+        if !spec.is_luban(n) {
+            let body = &x[EXTRA_VANITY..x.len() - EXTRA_SEAL];
+            if on_epoch(n, epoch) && body.len() % VALIDATOR_BYTES_BEFORE_LUBAN != 0 {
                 return &[];
             }
             return body;
         }
-        if self.number % epoch != 0 {
+        if !on_epoch(n, epoch) {
             return &[];
         }
-        let n = self.extra[EXTRA_VANITY] as usize;
-        let start = EXTRA_VANITY + 1;
-        let end = start + n * VALIDATOR_BYTES;
-        let min = end + EXTRA_SEAL + usize::from(spec.is_bohr(self.time));
-        if n == 0 || self.extra.len() < min {
+        let count = x[EXTRA_VANITY] as usize;
+        let end = EXTRA_VANITY + 1 + count * VALIDATOR_BYTES;
+        let needed = end + EXTRA_SEAL + usize::from(spec.is_bohr(self.time));
+        if count == 0 || x.len() < needed {
             return &[];
         }
-        &self.extra[start..end]
+        &x[EXTRA_VANITY + 1..end]
     }
 
 
-
     pub fn epoch_set(&self, spec: &Spec, epoch: u64) -> Result<EpochSet, Error> {
-        let bytes = self.validator_bytes(spec, epoch);
-        if bytes.is_empty() {
+        let n = self.number;
+        let section = self.validator_bytes(spec, epoch);
+        if section.is_empty() {
             return Err(Error::BadExtra(format!(
-                "epoch block {} names no validators",
-                self.number
+                "epoch block {n} names no validators"
             )));
         }
-        let validators = if !spec.is_luban(self.number) {
-            bytes
-                .chunks_exact(VALIDATOR_BYTES_BEFORE_LUBAN)
-                .map(|c| (Address::from_slice(c), [0u8; 48]))
-                .collect()
-        } else {
-            bytes
+        let validators = if spec.is_luban(n) {
+            section
                 .chunks_exact(VALIDATOR_BYTES)
-                .map(|c| {
+                .map(|entry| {
                     let mut key = [0u8; 48];
-                    key.copy_from_slice(&c[20..]);
-                    (Address::from_slice(&c[..20]), key)
+                    key.copy_from_slice(&entry[20..]);
+                    (Address::from_slice(&entry[..20]), key)
                 })
                 .collect()
+        } else {
+            section
+                .chunks_exact(VALIDATOR_BYTES_BEFORE_LUBAN)
+                .map(|entry| (Address::from_slice(entry), [0u8; 48]))
+                .collect()
         };
-        let turn_length = if self.number % epoch == 0 && spec.is_bohr(self.time) {
-            let n = self.extra[EXTRA_VANITY] as usize;
-            let pos = EXTRA_VANITY + 1 + n * VALIDATOR_BYTES;
-            if self.extra.len() <= pos + EXTRA_SEAL {
+        let mut turn_length = None;
+        if on_epoch(n, epoch) && spec.is_bohr(self.time) {
+            let at = self.after_validators(false);
+            if self.extra.len() <= at + EXTRA_SEAL {
                 return Err(Error::BadExtra(format!(
-                    "epoch block {} has no turn length",
-                    self.number
+                    "epoch block {n} has no turn length"
                 )));
             }
-            Some(self.extra[pos])
-        } else {
-            None
-        };
+            turn_length = Some(self.extra[at]);
+        }
         Ok(EpochSet {
             validators,
             turn_length,
@@ -525,22 +294,266 @@ impl Header {
 
 
 
-}
 
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EpochSet {
-    pub validators: Vec<(Address, [u8; 48])>,
-    pub turn_length: Option<u8>,
-}
 
-fn wrap_list(payload: Vec<u8>) -> Vec<u8> {
-    let mut out = Vec::with_capacity(payload.len() + 5);
-    RlpHeader {
-        list: true,
-        payload_length: payload.len(),
+
+    fn after_validators(&self, with_turn_length: bool) -> usize {
+        let count = self.extra[EXTRA_VANITY] as usize;
+        EXTRA_VANITY + 1 + count * VALIDATOR_BYTES + usize::from(with_turn_length)
     }
-    .encode(&mut out);
-    out.extend_from_slice(&payload);
-    out
+
+    fn write_base(&self, list: &mut ListWriter, extra: &[u8]) {
+        list.item(&self.parent_hash)
+            .item(&self.uncle_hash)
+            .item(&self.coinbase)
+            .item(&self.state_root)
+            .item(&self.transactions_root)
+            .item(&self.receipts_root)
+            .item(&self.logs_bloom[..])
+            .item(&self.difficulty)
+            .item(&self.number)
+            .item(&self.gas_limit)
+            .item(&self.gas_used)
+            .item(&self.time)
+            .item(extra)
+            .item(&self.mix_digest)
+            .item(&self.nonce);
+    }
+
+    fn write_tail(&self, list: &mut ListWriter) {
+        let Some(base_fee) = &self.base_fee else {
+            return;
+        };
+        list.item(base_fee);
+        let Some(withdrawals) = &self.withdrawals_hash else {
+            return;
+        };
+        list.item(withdrawals);
+        let Some(blob_gas) = &self.blob_gas_used else {
+            return;
+        };
+        list.item(blob_gas);
+        let Some(excess) = &self.excess_blob_gas else {
+            return;
+        };
+        list.item(excess);
+        let Some(beacon) = &self.parent_beacon_root else {
+            return;
+        };
+        list.item(beacon);
+        if let Some(requests) = &self.requests_hash {
+            list.item(requests);
+        }
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+    fn read_rlp(bytes: &[u8]) -> Result<Header, String> {
+        let mut input = bytes;
+        let payload = match open_list(&mut input) {
+            Ok(Some(payload)) if input.is_empty() => payload,
+            Ok(_) => return Err("not exactly one list".into()),
+            Err(why) => return Err(why),
+        };
+        let mut p = payload;
+        let parent_hash: B256 = next(&mut p)?;
+        let uncle_hash: B256 = next(&mut p)?;
+        let coinbase: Address = next(&mut p)?;
+        let state_root: B256 = next(&mut p)?;
+        let transactions_root: B256 = next(&mut p)?;
+        let receipts_root: B256 = next(&mut p)?;
+        let bloom: Bytes = next(&mut p)?;
+        let logs_bloom: [u8; 256] = bloom
+            .as_ref()
+            .try_into()
+            .map_err(|_| "bloom length".to_string())?;
+        let difficulty: U256 = next(&mut p)?;
+        let number: u64 = next(&mut p)?;
+        let gas_limit: u64 = next(&mut p)?;
+        let gas_used: u64 = next(&mut p)?;
+        let time: u64 = next(&mut p)?;
+        let extra: Bytes = next(&mut p)?;
+        let mix_digest: B256 = next(&mut p)?;
+        let nonce: B64 = next(&mut p)?;
+        let mut h = Header {
+            parent_hash,
+            uncle_hash,
+            coinbase,
+            state_root,
+            transactions_root,
+            receipts_root,
+            logs_bloom,
+            difficulty,
+            number,
+            gas_limit,
+            gas_used,
+            time,
+            extra: extra.to_vec(),
+            mix_digest,
+            nonce,
+            base_fee: None,
+            withdrawals_hash: None,
+            blob_gas_used: None,
+            excess_blob_gas: None,
+            parent_beacon_root: None,
+            requests_hash: None,
+        };
+        if !p.is_empty() {
+            h.base_fee = Some(next(&mut p)?);
+        }
+        if !p.is_empty() {
+            h.withdrawals_hash = Some(next(&mut p)?);
+        }
+        if !p.is_empty() {
+            h.blob_gas_used = Some(next(&mut p)?);
+        }
+        if !p.is_empty() {
+            h.excess_blob_gas = Some(next(&mut p)?);
+        }
+        if !p.is_empty() {
+            h.parent_beacon_root = Some(next(&mut p)?);
+        }
+        if !p.is_empty() {
+            h.requests_hash = Some(next(&mut p)?);
+        }
+        if !p.is_empty() {
+            return Err("fields past requestsHash".into());
+        }
+        if h.rlp() != bytes {
+            return Err("does not re-encode to the same bytes".into());
+        }
+        Ok(h)
+    }
 }
+
+fn malformed(message: String) -> Error {
+    Error::Malformed(message)
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

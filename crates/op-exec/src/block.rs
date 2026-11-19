@@ -1,7 +1,7 @@
 
 
 
-use crate::{spec, Block, Db, State, Unreadable, UNICHAIN};
+use crate::{spec, Block, Db, State, Unreadable};
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use alloy_rpc_types_eth_2::TransactionInfo;
 use alloy_rpc_types_trace_2::geth::{
@@ -120,9 +120,9 @@ pub fn run_block(
     tracer: &Tracer,
     budget: usize,
 ) -> Result<Vec<Ran>, Stop> {
-    let spec = spec(block.timestamp);
+    let spec = spec(block.chain_id, block.timestamp).map_err(Stop::Failed)?;
     let cfg = CfgEnv::new()
-        .with_chain_id(UNICHAIN)
+        .with_chain_id(block.chain_id)
         .with_spec_and_mainnet_gas_params(spec);
     let block_env = BlockEnv {
         number: U256::from(block.number),
@@ -158,7 +158,8 @@ pub fn run_block(
             .with_db(&mut db)
             .with_block(block_env.clone())
             .with_cfg(cfg.clone())
-            .build_op();
+            .build_op()
+            .with_precompiles(crate::precompiles::OpPrecompileSet::new(spec));
         let out = evm.system_call_with_caller(SYSTEM, contract, data);
         drop(evm);
         let out = out.map_err(failed)?;
@@ -182,7 +183,8 @@ pub fn run_block(
                     .with_db(&mut db)
                     .with_block(block_env.clone())
                     .with_cfg(cfg.clone())
-                    .build_op();
+                    .build_op()
+                    .with_precompiles(crate::precompiles::OpPrecompileSet::new(spec));
                 let r = evm.transact(op_tx);
                 drop(evm);
                 (r.map_err(failed)?, None)
@@ -204,7 +206,8 @@ pub fn run_block(
                     .with_db(&mut db)
                     .with_block(block_env.clone())
                     .with_cfg(cfg.clone())
-                    .build_op_with_inspector(inspector);
+                    .build_op_with_inspector(inspector)
+                    .with_precompiles(crate::precompiles::OpPrecompileSet::new(spec));
                 let r = evm.inspect_tx(op_tx);
                 let inspector = std::mem::take(&mut evm.0.inspector);
                 drop(evm);

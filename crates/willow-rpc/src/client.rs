@@ -55,10 +55,9 @@ const TX_TRACES: [&str; 3] = [
     "trace_transaction",
     "trace_replayTransaction",
 ];
-/// What this release holds back, as its crates.io build leaves out code its sources say is ported
-/// from go-ethereum or op-geth, or rebuilt from Nitro: the fee formula, the gas estimate and
-/// Robinhood Chain's calls. Those methods are unverifiable (`no-verifier`).
-pub(crate) const HELD: bool = true;
+/// Whether this release refuses the fee methods, gas estimates and Robinhood Chain's calls as
+/// unverifiable (`no-verifier`). It doesn't: it verifies them.
+pub(crate) const HELD: bool = false;
 
 /// The most blocks one trace_filter spans.
 pub const TRACE_FILTER_BLOCKS: u64 = 16;

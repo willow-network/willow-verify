@@ -14,19 +14,27 @@ import type {
   Anchor,
   LightClientName,
 } from './verifiers.js';
-import type { BnbStart, Checkpoint } from './checkpoint.js';
+import type { BeraStart, BnbStart, Checkpoint } from './checkpoint.js';
 
 /** What the anchor module starts from: Ethereum's checkpoint, and the other light clients' starts. */
 export interface AnchorStart extends Checkpoint {
   sepolia?: Checkpoint;
   bnb?: BnbStart;
+  berachain?: BeraStart;
 }
 
-/** The light client that anchors chain `chainId`: Ethereum's (none named), Sepolia's or BNB's. */
+/** The light client that anchors chain `chainId`: Ethereum's (none named), Sepolia's (its own blocks too), BNB's or Berachain's. */
 export function lightClientOf(chainId: number): LightClientName | undefined {
-  if (chainId === 56) return 'bnb';
-  return SEPOLIA_CHAINS.has(chainId) ? 'sepolia' : undefined;
+  if (chainId === 56 || BNB_SETTLED.has(chainId)) return 'bnb';
+  if (chainId === 80094) return 'berachain';
+  return SEPOLIA_CHAINS.has(chainId) || chainId === SEPOLIA ? 'sepolia' : undefined;
 }
+
+/** Sepolia itself: its blocks anchor on its sync committee as Ethereum's on Ethereum's. */
+export const SEPOLIA = 11155111;
+
+/** The chains that settle on BNB Smart Chain (anchor-verify `l2::ORACLE_CHAINS` on BNB): opBNB. */
+export const BNB_SETTLED = new Set([204]);
 
 /** The chains that settle on Sepolia (anchor-verify `l2::SEPOLIA_CHAINS`). */
 export const SEPOLIA_CHAINS = new Set([11155420, 84532, 1301, 763373, 421614, 46630]);
@@ -153,6 +161,7 @@ export class InlineBackend implements Backend {
     // A build before the other light clients has no `start`: its chains stay unanchored.
     if (cp.sepolia && a.start) a.start('sepolia', JSON.stringify(cp.sepolia));
     if (cp.bnb && a.start) a.start('bnb', JSON.stringify({ number: cp.bnb.number, hash: cp.bnb.hash }));
+    if (cp.berachain && a.start) a.start('berachain', JSON.stringify({ height: cp.berachain.height, hash: cp.berachain.hash }));
     this.anchor = a;
     return a;
   }

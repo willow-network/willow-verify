@@ -80,17 +80,31 @@ pub enum Engine {
 
     Ethereum,
 
-    Op,
+    Op(u64),
 
-    Nitro,
+    Nitro(u64),
+}
+
+impl Engine {
+
+    pub fn chain_id(self) -> u64 {
+        match self {
+            Engine::Ethereum => 1,
+            Engine::Op(id) | Engine::Nitro(id) => id,
+        }
+    }
+
+    pub fn is_nitro(self) -> bool {
+        matches!(self, Engine::Nitro(_))
+    }
 }
 
 
 pub fn engine(chain_id: u64) -> Option<Engine> {
     match chain_id {
         1 => Some(Engine::Ethereum),
-        willow_op_exec::UNICHAIN => Some(Engine::Op),
-        willow_arb_exec::ROBINHOOD => Some(Engine::Nitro),
+        id if willow_op_exec::chain(id).is_some() => Some(Engine::Op(id)),
+        id if willow_arb_exec::chain(id).is_some() => Some(Engine::Nitro(id)),
         _ => None,
     }
 }
@@ -510,6 +524,7 @@ pub(crate) fn geth_invalid(e: &InvalidTransaction) -> String {
 
 
 
+
 pub fn nitro_invalid(m: String) -> String {
     let m = match m.contains("insufficient funds") || m.contains("gas too low") {
         true => m,
@@ -519,6 +534,30 @@ pub fn nitro_invalid(m: String) -> String {
         &m,
         "invalid transaction: the transaction can't run at this block",
     )
+}
+
+
+fn nitro_ran(outcome: willow_arb_exec::Outcome) -> Ran {
+    use willow_arb_exec::Outcome;
+    match outcome {
+        Outcome::Returned(b) => Ran::Returned(b),
+        Outcome::Reverted(b, None) => Ran::Reverted(b),
+        Outcome::Reverted(b, Some(_)) if revert_reason(&b).is_some() => Ran::Reverted(b),
+        Outcome::Reverted(b, Some(reason)) => Ran::RevertedSaying(b, reason),
+        Outcome::Halted(h) => Ran::Halted(halted(&h)),
+        Outcome::HaltedSaying(m) => Ran::Halted(routable(&m, "BLOBBASEFEE is not run on Arbitrum")),
+        Outcome::Invalid(m) => Ran::Invalid(nitro_invalid(m)),
+        Outcome::Refused(m) => Ran::Refused(m),
+        Outcome::Internal(m) => Ran::Internal(m),
+    }
+}
+
+
+fn nitro_unreadable(e: Unreadable) -> Ran {
+    match e {
+        Unreadable::BlockHash(n) => Ran::NoBlockHash(n),
+        e => Ran::Internal(e.to_string()),
+    }
 }
 
 
@@ -987,8 +1026,8 @@ impl<'a> Run<'a> {
     pub fn call(&self, reads: &mut Reads) -> Ran {
         match self.engine {
             Engine::Ethereum => self.eth_call(reads),
-            Engine::Op => self.op(None, reads).ran,
-            Engine::Nitro => self.nitro(reads),
+            Engine::Op(_) => self.op(None, reads).ran,
+            Engine::Nitro(_) => self.nitro(reads),
         }
     }
 
@@ -997,8 +1036,8 @@ impl<'a> Run<'a> {
     pub(crate) fn at_gas(&self, gas: u64, reads: &mut Reads, peak: bool) -> Exec {
         match self.engine {
             Engine::Ethereum => self.eth_estimate_run(gas, reads, peak),
-            Engine::Op => self.op(Some(gas), reads),
-            Engine::Nitro => self.nitro_at(gas, reads),
+            Engine::Op(_) => self.op(Some(gas), reads),
+            Engine::Nitro(_) => self.nitro_at(gas, reads),
         }
     }
 
@@ -1047,6 +1086,7 @@ impl<'a> Run<'a> {
             .with_block(block_env)
             .with_cfg(cfg)
             .build_mainnet();
+        crate::memguard::guard(&mut evm.instruction);
         evm.ctx.set_tx(tx);
         Ok(CallHandler::default().run(&mut evm))
     }
@@ -1117,11 +1157,13 @@ impl<'a> Run<'a> {
         Ok(match peak {
             true => {
                 let mut evm = context.build_mainnet_with_inspector(Peak::default());
+                crate::memguard::guard(&mut evm.instruction);
                 let out = evm.inspect_one_tx(tx);
                 (out, evm.inspector.remaining)
             }
             false => {
                 let mut evm = context.build_mainnet();
+                crate::memguard::guard(&mut evm.instruction);
                 (evm.transact(tx).map(|r| r.result), None)
             }
         })
@@ -1135,6 +1177,7 @@ impl<'a> Run<'a> {
         let db = self.db(&missing, &read);
         let (block, call) = (self.block, self.call);
         let op_block = willow_op_exec::Block {
+            chain_id: self.engine.chain_id(),
             number: block.number,
             timestamp: block.timestamp,
             gas_limit: block.gas_limit,
@@ -1169,6 +1212,7 @@ impl<'a> Run<'a> {
             Outcome::Halted(m) => Ran::Halted(m),
             Outcome::Invalid(m) => Ran::Invalid(m),
             Outcome::NoBlockHash(n) => Ran::NoBlockHash(n),
+            Outcome::Refused(m) => Ran::Refused(m),
             Outcome::Internal(m) => Ran::Internal(m),
         };
         Exec {
@@ -1182,11 +1226,62 @@ impl<'a> Run<'a> {
 
 
 
+
+    fn nitro_inputs(
+        &self,
+    ) -> (
+        willow_arb_exec::Block,
+        willow_arb_exec::Call,
+        willow_arb_exec::BlockOverrides,
+    ) {
+        let (b, c, o) = (self.block, self.call, &self.overrides.block);
+        let block = willow_arb_exec::Block {
+            chain_id: self.engine.chain_id(),
+            number: b.number,
+            timestamp: b.timestamp,
+            gas_limit: b.gas_limit,
+            base_fee: b.base_fee.unwrap_or(0),
+            difficulty: b.difficulty,
+            mix_hash: b.mix_hash,
+            beneficiary: b.beneficiary,
+        };
+        let call = willow_arb_exec::Call {
+            from: c.from,
+            to: c.to,
+            gas: c.gas,
+            gas_price: c.gas_price,
+            max_fee_per_gas: c.max_fee_per_gas,
+            max_priority_fee_per_gas: c.max_priority_fee_per_gas,
+            value: c.value,
+            data: c.data.clone(),
+            access_list: c.access_list.clone(),
+            nonce: c.nonce,
+            skip_l1_charging: c.skip_l1_charging,
+        };
+        let overrides = willow_arb_exec::BlockOverrides {
+            number: o.number,
+            difficulty: o.difficulty,
+            time: o.time,
+            gas_limit: o.gas_limit,
+            coinbase: o.coinbase,
+            base_fee: o.base_fee,
+        };
+        (block, call, overrides)
+    }
+
+
+    fn nitro_overridden(&self) -> HashSet<Address> {
+        self.overrides.state.keys().copied().collect()
+    }
+
+
     fn nitro(&self, reads: &mut Reads) -> Ran {
-        use willow_arb_exec::Outcome;
         let missing = RefCell::new(Missing::default());
         let read = RefCell::new(std::mem::take(reads));
-        let out = self.nitro_over(&missing, &read);
+        let (block, call, overrides) = self.nitro_inputs();
+        let out = self.overridden(&missing, &read, false).map(|db| {
+            willow_arb_exec::run(db, &block, &call, &overrides, &self.nitro_overridden())
+        });
         *reads = read.into_inner();
         let missing = missing.into_inner();
         if !missing.is_empty() {
@@ -1194,56 +1289,23 @@ impl<'a> Run<'a> {
         }
         match out {
             Err(e) => Ran::Internal(e),
-            Ok(Ok(Outcome::Returned(b))) => Ran::Returned(b),
-            Ok(Ok(Outcome::Reverted(b, None))) => Ran::Reverted(b),
-
-            Ok(Ok(Outcome::Reverted(b, Some(_)))) if revert_reason(&b).is_some() => {
-                Ran::Reverted(b)
-            }
-            Ok(Ok(Outcome::Reverted(b, Some(said)))) => Ran::RevertedSaying(b, said),
-            Ok(Ok(Outcome::Halted(h))) => Ran::Halted(halted(&h)),
-            Ok(Ok(Outcome::HaltedSaying(m))) => {
-                Ran::Halted(routable(&m, "BLOBBASEFEE is not run on Arbitrum"))
-            }
-            Ok(Ok(Outcome::Invalid(m))) => Ran::Invalid(nitro_invalid(m)),
-            Ok(Ok(Outcome::Refused(m))) => Ran::Refused(m),
-            Ok(Ok(Outcome::Internal(m))) => Ran::Internal(m),
-            Ok(Err(Unreadable::BlockHash(n))) => Ran::NoBlockHash(n),
-            Ok(Err(e)) => Ran::Internal(e.to_string()),
+            Ok(Err(e)) => nitro_unreadable(e),
+            Ok(Ok(outcome)) => nitro_ran(outcome),
         }
     }
 
 
-    fn nitro_over<'b>(
-        &'b self,
-        missing: &'b RefCell<Missing>,
-        read: &'b RefCell<Reads>,
-    ) -> Result<Result<willow_arb_exec::Outcome, Unreadable>, String> {
-        let db = self.overridden(missing, read, false)?;
-        let (arb_block, arb_call, arb_overrides, overridden) = self.nitro_inputs();
-        Ok(willow_arb_exec::run(
-            db,
-            &arb_block,
-            &arb_call,
-            &arb_overrides,
-            &overridden,
-        ))
-    }
-
-
-
     fn nitro_at(&self, gas: u64, reads: &mut Reads) -> Exec {
-        use willow_arb_exec::Outcome;
         let missing = RefCell::new(Missing::default());
         let read = RefCell::new(std::mem::take(reads));
+        let (block, call, overrides) = self.nitro_inputs();
         let out = self.overridden(&missing, &read, false).map(|db| {
-            let (arb_block, arb_call, arb_overrides, overridden) = self.nitro_inputs();
             willow_arb_exec::estimate_run(
                 db,
-                &arb_block,
-                &arb_call,
-                &arb_overrides,
-                &overridden,
+                &block,
+                &call,
+                &overrides,
+                &self.nitro_overridden(),
                 gas,
             )
         });
@@ -1252,45 +1314,32 @@ impl<'a> Run<'a> {
         if !missing.is_empty() {
             return Exec::not_run(Ran::Missing(missing));
         }
-        let m = match out {
+        let measured = match out {
             Err(e) => return Exec::not_run(Ran::Internal(e)),
-            Ok(Err(Unreadable::BlockHash(n))) => return Exec::not_run(Ran::NoBlockHash(n)),
-            Ok(Err(e)) => return Exec::not_run(Ran::Internal(e.to_string())),
-            Ok(Ok(m)) => m,
+            Ok(Err(e)) => return Exec::not_run(nitro_unreadable(e)),
+            Ok(Ok(measured)) => measured,
         };
-        let out_of_gas = matches!(m.outcome, Outcome::Halted(HaltReason::OutOfGas(e))
-            if e != OutOfGasError::InvalidOperand);
-        let ran = match m.outcome {
-            Outcome::Returned(b) => Ran::Returned(b),
-            Outcome::Reverted(b, None) => Ran::Reverted(b),
-            Outcome::Reverted(b, Some(_)) if revert_reason(&b).is_some() => Ran::Reverted(b),
-            Outcome::Reverted(b, Some(said)) => Ran::RevertedSaying(b, said),
-            Outcome::Halted(h) => Ran::Halted(halted(&h)),
-            Outcome::HaltedSaying(m) => {
-                Ran::Halted(routable(&m, "BLOBBASEFEE is not run on Arbitrum"))
-            }
-
-            Outcome::Invalid(m) => Ran::Invalid(nitro_invalid(m)),
-            Outcome::Refused(m) => Ran::Refused(m),
-            Outcome::Internal(m) => Ran::Internal(m),
-        };
+        let out_of_gas = matches!(
+            measured.outcome,
+            willow_arb_exec::Outcome::Halted(HaltReason::OutOfGas(e))
+                if e != OutOfGasError::InvalidOperand
+        );
         Exec {
-            ran,
-            used: m.used,
-            peak: m.peak,
+            ran: nitro_ran(measured.outcome),
+            used: measured.used,
+            peak: measured.peak,
             out_of_gas,
-            intrinsic: m.intrinsic,
+            intrinsic: measured.intrinsic,
         }
     }
-
 
 
     pub(crate) fn nitro_posting(&self, reads: &mut Reads) -> Result<u64, Ran> {
         let missing = RefCell::new(Missing::default());
         let read = RefCell::new(std::mem::take(reads));
+        let (block, call, overrides) = self.nitro_inputs();
         let out = self.overridden(&missing, &read, false).map(|mut db| {
-            let (arb_block, arb_call, arb_overrides, _) = self.nitro_inputs();
-            willow_arb_exec::estimate_posting_gas(&mut db, &arb_block, &arb_call, &arb_overrides)
+            willow_arb_exec::estimate_posting_gas(&mut db, &block, &call, &overrides)
         });
         *reads = read.into_inner();
         let missing = missing.into_inner();
@@ -1303,52 +1352,6 @@ impl<'a> Run<'a> {
             Ok(Ok(Err(why))) => Err(Ran::Refused(why)),
             Ok(Ok(Ok(gas))) => Ok(gas),
         }
-    }
-
-
-
-    fn nitro_inputs(
-        &self,
-    ) -> (
-        willow_arb_exec::Block,
-        willow_arb_exec::Call,
-        willow_arb_exec::BlockOverrides,
-        HashSet<Address>,
-    ) {
-        let (block, call) = (self.block, self.call);
-        let arb_block = willow_arb_exec::Block {
-            number: block.number,
-            timestamp: block.timestamp,
-            gas_limit: block.gas_limit,
-            base_fee: block.base_fee.unwrap_or(0),
-            difficulty: block.difficulty,
-            mix_hash: block.mix_hash,
-            beneficiary: block.beneficiary,
-        };
-        let arb_call = willow_arb_exec::Call {
-            from: call.from,
-            to: call.to,
-            gas: call.gas,
-            gas_price: call.gas_price,
-            max_fee_per_gas: call.max_fee_per_gas,
-            max_priority_fee_per_gas: call.max_priority_fee_per_gas,
-            value: call.value,
-            data: call.data.clone(),
-            access_list: call.access_list.clone(),
-            nonce: call.nonce,
-            skip_l1_charging: call.skip_l1_charging,
-        };
-        let o = &self.overrides.block;
-        let arb_overrides = willow_arb_exec::BlockOverrides {
-            number: o.number,
-            difficulty: o.difficulty,
-            time: o.time,
-            gas_limit: o.gas_limit,
-            coinbase: o.coinbase,
-            base_fee: o.base_fee,
-        };
-        let overridden: HashSet<Address> = self.overrides.state.keys().copied().collect();
-        (arb_block, arb_call, arb_overrides, overridden)
     }
 }
 
@@ -1558,7 +1561,7 @@ pub fn parse_on(o: &Value, chain_id: u64) -> Result<Call, Unrunnable> {
         }
     }
     let (nonce, skip_l1_charging) = match chain_id {
-        willow_arb_exec::ROBINHOOD => {
+        id if willow_arb_exec::chain(id).is_some() => {
             let nonce = opt_quantity("nonce")?
                 .map(|n| u64::try_from(n).map_err(|_| bad("nonce", "too large".into())))
                 .transpose()?;

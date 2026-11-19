@@ -6987,7 +6987,7 @@ dependencies = [
 
 [[package]]
 name = "willow-rpc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "alloy",
  "alloy-json-rpc 1.8.3",

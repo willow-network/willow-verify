@@ -1,0 +1,22 @@
+[package]
+name = "stellar-rpc-verify"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Checks Stellar RPC responses against Stellar consensus: the pinned Tier-1 quorum set's SCP signatures, the header chain, and the ledger's committed results and Soroban events. No ZK proof."
+
+
+
+
+
+[dependencies]
+stellar-lane-core = { path = "../../zkvm/stellar/core" }
+stellar-xdr = { version = "=30.0.0", default-features = false, features = ["std"] }
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+zstd = "0.13"

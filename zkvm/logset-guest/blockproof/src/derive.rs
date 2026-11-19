@@ -1,12 +1,14 @@
 
 
 
-use super::txs::{Decoded, ARB_DEPOSIT, ARB_INTERNAL};
+use super::txs::{Decoded, FeeCurrencyTx};
 use alloy::consensus::{Transaction as _, TxEnvelope};
 use alloy::primitives::U256;
-use logset_blockcheck::receipts::{nitro_allowed, DEPOSIT_TX_TYPE};
+use logset_blockcheck::receipts::{nitro_allowed, DEPOSIT_TX_TYPE, NITRO_TX_TYPES};
 
 use std::sync::Arc;
+
+
 
 
 
@@ -18,8 +20,25 @@ use std::sync::Arc;
 pub fn tx_gas_price(tx: &Decoded, base_fee: Option<U256>) -> U256 {
     match tx {
         Decoded::Eth(env) => standard_price(env, base_fee),
+
+        Decoded::Table { pol: true, .. } => tx.uint("gasPrice").unwrap_or_default(),
+        Decoded::Table { ty, .. } if NITRO_TX_TYPES.contains(ty) => crate::nitro::tx_gas_price(tx),
         Decoded::Table { .. } => tx.uint("maxFeePerGas").unwrap_or_default(),
+        Decoded::FeeCurrency(c) => fee_currency_price(c, None, base_fee),
     }
+}
+
+
+
+
+
+
+pub fn fee_currency_price(
+    tx: &FeeCurrencyTx,
+    receipt_base_fee: Option<U256>,
+    base_fee: Option<U256>,
+) -> U256 {
+    standard_price(&tx.fields, receipt_base_fee.or(base_fee))
 }
 
 fn standard_price(env: &TxEnvelope, base_fee: Option<U256>) -> U256 {
@@ -37,19 +56,7 @@ fn standard_price(env: &TxEnvelope, base_fee: Option<U256>) -> U256 {
 }
 
 
-
-
-
-
-pub fn nitro_collects_tips(mix_hash: &[u8; 32]) -> bool {
-    let arbos = u64::from_be_bytes(mix_hash[16..24].try_into().expect("8 bytes"));
-    arbos == 9 || mix_hash[25] & 1 == 1
-}
-
-
-
-
-
+pub use crate::nitro::nitro_collects_tips;
 
 
 
@@ -59,18 +66,15 @@ pub fn effective_gas_price(
     base_fee: Option<U256>,
     collects_tips: bool,
 ) -> U256 {
-    let base = base_fee.unwrap_or_default();
-    let nitro = nitro_allowed(chain_id);
+    if nitro_allowed(chain_id) {
+        return crate::nitro::effective_gas_price(tx, base_fee, collects_tips);
+    }
     match tx {
-        _ if nitro && !collects_tips => base,
         Decoded::Eth(env) => standard_price(env, base_fee),
+        Decoded::FeeCurrency(c) => fee_currency_price(c, None, base_fee),
+
+        Decoded::Table { pol: true, .. } => tx.uint("gasPrice").unwrap_or_default(),
         Decoded::Table { ty, .. } if *ty == DEPOSIT_TX_TYPE => U256::ZERO,
-        Decoded::Table { ty, .. } if nitro && (*ty == ARB_INTERNAL || *ty == ARB_DEPOSIT) => {
-            U256::ZERO
-        }
-        Decoded::Table { .. } if nitro => {
-            base_fee.unwrap_or_else(|| tx.uint("maxFeePerGas").unwrap_or_default())
-        }
         _ => U256::ZERO,
     }
 }
@@ -93,6 +97,16 @@ const MAINNET_BLOBS: [(u64, u64, u64, u64); 4] = [
     (1_746_612_311, 6, 9, 5_007_716),
     (1_765_290_071, 10, 15, 8_346_193),
     (1_767_747_671, 14, 21, 11_684_671),
+];
+
+
+
+
+const SEPOLIA_BLOBS: [(u64, u64, u64, u64); 4] = [
+    (1_706_655_072, 3, 6, 3_338_477),
+    (1_741_159_776, 6, 9, 5_007_716),
+    (1_761_017_184, 10, 15, 8_346_193),
+    (1_761_607_008, 14, 21, 11_684_671),
 ];
 
 
@@ -131,18 +145,23 @@ pub struct BlobSchedule(Arc<[BlobParams]>);
 
 impl BlobSchedule {
 
+
     pub fn builtin(chain_id: u64) -> Self {
         match chain_id {
-            1 => Self(
-                MAINNET_BLOBS
-                    .iter()
-                    .map(|&(at, target, max, update_fraction)| BlobParams {
-                        at,
-                        update_fraction,
-                        target: Some(target),
-                        max: Some(max),
-                    })
-                    .collect(),
+            1 | 11_155_111 => Self(
+                if chain_id == 1 {
+                    &MAINNET_BLOBS
+                } else {
+                    &SEPOLIA_BLOBS
+                }
+                .iter()
+                .map(|&(at, target, max, update_fraction)| BlobParams {
+                    at,
+                    update_fraction,
+                    target: Some(target),
+                    max: Some(max),
+                })
+                .collect(),
             ),
 
 

@@ -30,6 +30,16 @@ pub fn aggregate_verify_points(
     signature: &[u8; 96],
     message: &[u8; 32],
 ) -> Result<(), BlsFailure> {
+    aggregate_verify_with(keys, signature, message, DST)
+}
+
+
+pub fn aggregate_verify_with(
+    keys: &[G1Affine],
+    signature: &[u8; 96],
+    message: &[u8],
+    dst: &[u8],
+) -> Result<(), BlsFailure> {
     let agg = G1Affine::from(
         keys.iter()
             .fold(G1Projective::identity(), |a, k| a + G1Projective::from(k)),
@@ -40,7 +50,7 @@ pub fn aggregate_verify_points(
     let sig = Option::<G2Affine>::from(G2Affine::from_compressed(signature))
         .ok_or(BlsFailure::InvalidSignature)?;
     let msg = G2Affine::from(
-        <G2Projective as HashToCurve<ExpandMsgXmd<sha2::Sha256>>>::hash_to_curve(message, DST),
+        <G2Projective as HashToCurve<ExpandMsgXmd<sha2::Sha256>>>::hash_to_curve(message, dst),
     );
     let neg_g1 = G1Affine::from(-G1Projective::generator());
     let ok = multi_miller_loop(&[

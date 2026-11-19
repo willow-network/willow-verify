@@ -6,14 +6,13 @@
 
 
 
-
-
-
-
 pub mod header;
 
 pub mod spec;
 pub mod vote;
+
+mod codec;
+
 
 
 
@@ -25,13 +24,9 @@ pub use spec::{Spec, MAINNET};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-
     Malformed(String),
 
-    Field(String),
-
     BadExtra(String),
-
     BadSeal(String),
 
 
@@ -40,31 +35,30 @@ pub enum Error {
 
 
 
-
-
-    Attestation(String),
-
-
-
-
 }
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (k, m) = match self {
+impl Error {
+    fn parts(&self) -> (&'static str, &str) {
+        match self {
             Error::Malformed(m) => ("malformed", m),
-            Error::Field(m) => ("field", m),
+
             Error::BadExtra(m) => ("extraData", m),
             Error::BadSeal(m) => ("seal", m),
 
 
 
 
-            Error::Attestation(m) => ("attestation", m),
 
 
-        };
-        write!(f, "{k}: {m}")
+
+        }
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (prefix, message) = self.parts();
+        write!(f, "{prefix}: {message}")
     }
 }
 

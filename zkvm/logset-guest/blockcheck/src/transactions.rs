@@ -10,23 +10,248 @@
 
 
 
+use crate::receipts::STATE_SYNC_TX_TYPE;
+
+
+
+
+
+use anyhow::{ensure, Context, Result};
+
+
+
+pub use crate::nitro::{
+    ARB_CONTRACT, ARB_DEPOSIT, ARB_INTERNAL, ARB_RETRY, ARB_SUBMIT_RETRYABLE, ARB_UNSIGNED,
+};
 
 
 
 
 
 
-pub const ARB_DEPOSIT: u8 = 0x64;
 
-pub const ARB_UNSIGNED: u8 = 0x65;
 
-pub const ARB_CONTRACT: u8 = 0x66;
 
-pub const ARB_RETRY: u8 = 0x68;
 
-pub const ARB_SUBMIT_RETRYABLE: u8 = 0x69;
 
-pub const ARB_INTERNAL: u8 = 0x6A;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+pub type StateSyncRecord = (u64, [u8; 20], Vec<u8>, [u8; 32]);
+
+
+
+
+pub fn state_sync_records(value: &[u8]) -> Result<Vec<StateSyncRecord>> {
+    use crate::receipts::{rlp_item, rlp_list_items};
+    ensure!(
+        value.first() == Some(&STATE_SYNC_TX_TYPE),
+        "not a 0x7F transaction"
+    );
+    let (payload, total, is_list) = rlp_item(&value[1..])?;
+    ensure!(
+        is_list && total == value.len() - 1,
+        "malformed 0x7F transaction"
+    );
+    let mut out = Vec::new();
+    for (r, is_list) in rlp_list_items(payload)? {
+        ensure!(is_list, "a state-sync record is not a list");
+        let f = rlp_list_items(r)?;
+        ensure!(
+            f.len() == 4 && f.iter().all(|(_, l)| !l),
+            "a state-sync record of {} fields",
+            f.len()
+        );
+        ensure!(
+            f[0].0.len() <= 8 && f[0].0.first() != Some(&0),
+            "a state-sync id is not a canonical u64"
+        );
+        let id = f[0].0.iter().fold(0u64, |a, x| a << 8 | u64::from(*x));
+        out.push((
+            id,
+            f[1].0
+                .try_into()
+                .context("a state-sync contract is not 20 bytes")?,
+            f[2].0.to_vec(),
+            f[3].0
+                .try_into()
+                .context("a state-sync L1 hash is not 32 bytes")?,
+        ));
+    }
+    Ok(out)
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

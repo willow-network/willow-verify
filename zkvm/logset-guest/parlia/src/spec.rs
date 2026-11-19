@@ -2,33 +2,27 @@
 
 
 
+
+
 pub const BSC_MAINNET: u64 = 56;
+
 
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Spec {
     pub chain_id: u64,
-
     pub luban_block: u64,
-
     pub plato_block: u64,
-
     pub london_block: u64,
-
     pub cancun_time: u64,
-
     pub bohr_time: u64,
-
     pub prague_time: u64,
-
     pub lorentz_time: u64,
-
     pub maxwell_time: u64,
-
     pub fermi_time: u64,
-
     pub amsterdam_time: Option<u64>,
 }
+
 
 pub const MAINNET: Spec = Spec {
     chain_id: BSC_MAINNET,
@@ -47,6 +41,8 @@ pub const MAINNET: Spec = Spec {
 
 
 
+
+
 pub const MAXWELL_EPOCH: u64 = 1000;
 
 
@@ -55,7 +51,11 @@ pub const MAXWELL_EPOCH: u64 = 1000;
 
 
 
+
+
+
 impl Spec {
+
     pub fn is_luban(&self, number: u64) -> bool {
         number >= self.luban_block
     }
@@ -69,9 +69,30 @@ impl Spec {
 
 
 
+
+
+
     pub fn is_bohr(&self, time: u64) -> bool {
         time >= self.bohr_time
     }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

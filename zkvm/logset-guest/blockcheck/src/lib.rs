@@ -19,8 +19,12 @@
 
 
 
+
+
 pub mod block;
 pub mod header;
+mod nitro;
+pub mod par;
 pub mod receipts;
 pub mod transactions;
 pub mod trie;

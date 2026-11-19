@@ -1,4 +1,4 @@
-import { isNoVerifier, lightClientOf, type Backend } from './backend.js';
+import { isNoVerifier, lightClientOf, SEPOLIA, type Backend } from './backend.js';
 import { WillowUnverifiableError, WillowVerificationError } from './errors.js';
 import { isHash, toNumber, toQuantity, ZERO_HASH } from './hex.js';
 import type { Reply } from './http.js';
@@ -21,6 +21,8 @@ export interface Anchored {
   time?: number;
   /** When the anchor stops counting (ms); Infinity for final ones. */
   expires: number;
+  /** `roots`: the block's transactions and receipts roots are anchored, not its hash or parent (Polygon's checkpoints). */
+  covers?: 'roots';
 }
 
 export interface AnchorsOptions {
@@ -28,8 +30,10 @@ export interface AnchorsOptions {
   /** JSON-RPC on chain `chainId`'s route (1: the light client's). */
   rpc: (chainId: number, method: string, params: unknown[]) => Promise<Reply>;
   storage: KeyValueStorage | null;
-  /** What a light client's bootstrap is asked for: Ethereum's checkpoint root, Sepolia's, or BNB's start hash. */
+  /** What a light client's bootstrap is asked for: Ethereum's checkpoint root, Sepolia's, or BNB's or Berachain's start hash. */
   checkpointRoot: (lightClient?: LightClientName) => Promise<string>;
+  /** Berachain's start height, asked for with its hash (its API reads headers by height). */
+  startHeight?: (lightClient: LightClientName) => Promise<number | undefined>;
   minLevel: Level;
   headMaxAgeMs: (chainId: number) => number;
   /** How old the newest block may be. */
@@ -48,8 +52,10 @@ const BNB_UPDATES_PER_ASK = 64;
 const BNB_SIGNED_SECS = 600;
 /** Where each light client's kept data goes: Ethereum's at the key it always had. */
 const keyOf = (lc?: LightClientName) => (lc ? `${LIGHT_CLIENT_KEY}:${lc}` : LIGHT_CLIENT_KEY);
+/** Chains anchored on their own sync committee (anchor paths head/history), Ethereum and Sepolia: a signed head, a finalized block. */
+export const L1_CHAINS = new Set([1, SEPOLIA]);
 /** Chains whose newest block is final, not signed (BNB's `latest` is its newest finalized block). */
-const LATEST_IS_FINAL = new Set([56]);
+const LATEST_IS_FINAL = new Set([56, 80094]);
 /** Catch-up rounds per anchor, as the page's confirmOnEthereum. */
 const CATCH_UP_ROUNDS = 3;
 const WAITING_MS = 4000;
@@ -98,7 +104,14 @@ export class Anchors {
 
   private restore(): Promise<void> {
     this.restored ??= (async () => {
-      for (const lc of [undefined, 'sepolia', 'bnb'] as const) {
+      try {
+        await this.o.checkpointRoot();
+      } catch (e) {
+        // No start chosen yet (checkpoint.json or a beacon API failed): this request stops here; a later one restores.
+        this.restored = null;
+        throw e;
+      }
+      for (const lc of [undefined, 'sepolia', 'bnb', 'berachain'] as const) {
         const saved = await Promise.resolve(this.o.storage?.get(keyOf(lc))).catch(() => null);
         // Kept data is verified again from the start; a failure only means starting over.
         if (saved) await this.o.backend.anchorRestore(saved, this.nowSec(), lc).catch(() => undefined);
@@ -113,7 +126,8 @@ export class Anchors {
    */
   private async bootstrap(chainId: number, lc: LightClientName | undefined, method?: string): Promise<void> {
     const root = await this.o.checkpointRoot(lc);
-    const reply = await this.o.rpc(lc ? chainId : 1, 'willow_lightClientBootstrap', [root]);
+    const height = lc === 'berachain' ? await this.o.startHeight?.(lc) : undefined;
+    const reply = await this.o.rpc(lc ? chainId : 1, 'willow_lightClientBootstrap', height === undefined ? [root] : [root, height]);
     if (reply.value.error) throw this.refused(reply, 'willow_lightClientBootstrap', method);
     const r = await ran(this.o.backend.anchorBootstrap(reply.text, this.nowSec(), lc), method);
     if (!r.ok) throw anchorFailure(r as AnchorFailure, method);
@@ -123,8 +137,9 @@ export class Anchors {
     if (!Number.isSafeInteger(from) || !Number.isSafeInteger(count) || from < 0 || count < 1) {
       throw new WillowVerificationError('internal', `the light client asked for periods ${from} (${count})`, method);
     }
+    // Berachain's `from` is its followed height and `count` how far the block is past it: one ask.
     for (let left = count; left > 0; ) {
-      const k = Math.min(left, lc === 'bnb' ? BNB_UPDATES_PER_ASK : UPDATES_PER_ASK);
+      const k = lc === 'berachain' ? left : Math.min(left, lc === 'bnb' ? BNB_UPDATES_PER_ASK : UPDATES_PER_ASK);
       const reply = await this.o.rpc(lc ? chainId : 1, 'willow_lightClientUpdates', [from, k]);
       if (reply.value.error) throw this.refused(reply, 'willow_lightClientUpdates', method);
       const r = await ran(this.o.backend.anchorUpdates(reply.text, lc), method);
@@ -143,7 +158,7 @@ export class Anchors {
   /** `Anchor.verify` of a `willow_getBlockAnchor` response body, fetching light-client data as it asks. */
   verify(chainId: number, number: number, hash: string, body: string, method?: string): Promise<AnchorVerified> {
     const run = async (): Promise<AnchorVerified> => {
-      await this.restore();
+      await ran(this.restore(), method);
       let caughtUp = false;
       const key = keyOf(lightClientOf(chainId));
       for (let round = 0; ; round++) {
@@ -199,7 +214,7 @@ export class Anchors {
     const now = this.o.nowMs();
     if (r.level === 'final') return Infinity;
     if (r.level === 'committed') return now + this.o.headMaxAgeMs(chainId);
-    if (chainId === 1) return r.headTime !== undefined ? (r.headTime + ETHEREUM_SIGNED_SECS) * 1000 : now + this.o.headMaxAgeMs(chainId);
+    if (L1_CHAINS.has(chainId)) return r.headTime !== undefined ? (r.headTime + ETHEREUM_SIGNED_SECS) * 1000 : now + this.o.headMaxAgeMs(chainId);
     if (r.path === 'parlia') return r.anchorTime !== undefined ? (r.anchorTime + BNB_SIGNED_SECS) * 1000 : now + this.o.headMaxAgeMs(chainId);
     return r.anchorTime !== undefined ? (r.anchorTime + L2_SIGNED_SECS) * 1000 : now + this.o.headMaxAgeMs(chainId);
   }
@@ -216,7 +231,8 @@ export class Anchors {
     if (h && h.number === number && h.expires > now) return h.hash;
     const hash = this.byNumber.get(`${chainId}:${number}`);
     const a = hash ? this.cache.get(`${chainId}:${number}:${hash}`) : undefined;
-    return a && a.expires > now ? a.hash : undefined;
+    // A hash under roots alone is not anchored: a request does not go out by it.
+    return a && a.expires > now && a.covers !== 'roots' ? a.hash : undefined;
   }
 
   /** Whether block `number` has an anchor that still counts (any hash): no anchor need be fetched ahead. */
@@ -230,10 +246,10 @@ export class Anchors {
 
   /** The newest block (`latest`), or on Ethereum the finalized one, anchored at `minLevel` or above. */
   head(chainId: number, which: 'latest' | 'finalized', force = false, method?: string): Promise<Anchored> {
-    // Ethereum's newest block at "final" is its finalized one; an L2 has no tag for a newer
-    // block above "signed".
-    const tag = which === 'latest' && chainId === 1 && this.o.minLevel !== 'signed' ? 'finalized' : which;
-    if (which === 'latest' && chainId !== 1 && !LATEST_IS_FINAL.has(chainId) && this.o.minLevel !== 'signed') {
+    // Ethereum's (and Sepolia's) newest block at "final" is its finalized one; an L2 has no tag
+    // for a newer block above "signed".
+    const tag = which === 'latest' && L1_CHAINS.has(chainId) && this.o.minLevel !== 'signed' ? 'finalized' : which;
+    if (which === 'latest' && !L1_CHAINS.has(chainId) && !LATEST_IS_FINAL.has(chainId) && this.o.minLevel !== 'signed') {
       return Promise.reject(new WillowUnverifiableError('anchor-level', `chain ${chainId} has no newest block anchored at ${this.o.minLevel}; name a block`, method));
     }
     const key = `${chainId}:${which}`;
@@ -256,8 +272,9 @@ export class Anchors {
     const n = toNumber((reply.value.result as { blockNumber?: unknown } | null)?.blockNumber);
     if (n === null) throw new WillowVerificationError('anchor-malformed', `the anchor for "${tag}" names no block number`, method);
     const r = await this.verify(chainId, n, ZERO_HASH, reply.text, method);
+    if (r.covers === 'roots') throw new WillowUnverifiableError('anchor-covers', `the newest block of chain ${chainId} Willow anchored is proven by its transactions and receipts roots, not its hash`, method);
     let time: number | undefined;
-    if (chainId === 1) {
+    if (L1_CHAINS.has(chainId)) {
       // Ethereum's newest block is the signed head itself.
       if (tag === 'latest' && r.path !== 'head') throw new WillowVerificationError('anchor-head', `"latest" was anchored by path ${r.path}, not the signed head`, method);
       // "finalized" is the light client's finalized block, at level final.
@@ -267,14 +284,14 @@ export class Anchors {
       time = r.headTime;
     } else {
       // An L2's newest block is the newest its sequencer signed, aged by its own timestamp;
-      // BNB's is its newest finalized block, aged the same way.
-      time = r.path === 'sequencer' || r.path === 'parlia' ? r.anchorTime : undefined;
+      // BNB's and Berachain's are their newest finalized blocks, aged the same way.
+      time = r.path === 'sequencer' || r.path === 'parlia' || r.path === 'cometbft' ? r.anchorTime : undefined;
     }
     if (time === undefined) throw new WillowUnverifiableError('anchor-stale-head', `the anchor for "${tag}" on chain ${chainId} gives no time to bound its age`, method);
     const age = this.nowSec() - time;
     if (age > this.o.maxHeadAgeSec) throw new WillowUnverifiableError('anchor-stale-head', `the newest block Willow anchored on chain ${chainId} is ${age} s old`, method);
     if (!atLeast(r.level, this.o.minLevel)) throw new WillowUnverifiableError('anchor-level', `the newest block is ${r.level}, below ${this.o.minLevel}`, method);
-    const value: Anchored = { chainId, number: n, hash: r.hash.toLowerCase(), level: r.level, path: r.path, time, expires: this.expiry(chainId, r) };
+    const value: Anchored = { chainId, number: n, hash: String(r.hash).toLowerCase(), level: r.level, path: r.path, time, expires: this.expiry(chainId, r) };
     this.keep(value);
     this.heads.set(`${chainId}:${which}`, { value, at: this.o.nowMs(), started });
     return value;
@@ -314,17 +331,21 @@ export class Anchors {
         }
         throw e;
       }
-      if (!r.matches) throw new WillowVerificationError('anchor-mismatch', `block ${number} of chain ${chainId} is ${r.hash} on Ethereum, not ${hash}`, method);
+      const roots = r.covers === 'roots';
+      if (roots ? r.rootsMatch !== true : !r.matches) {
+        const detail = roots ? `the roots of block ${number} of chain ${chainId} on Ethereum are header ${r.headerHash}'s, not ${hash}'s` : `block ${number} of chain ${chainId} is ${r.hash} on Ethereum, not ${hash}`;
+        throw new WillowVerificationError('anchor-mismatch', detail, method);
+      }
       if (!atLeast(r.level, this.o.minLevel)) throw new WillowUnverifiableError('anchor-level', `block ${number} is ${r.level}, below ${this.o.minLevel}`, method);
-      const a: Anchored = { chainId, number, hash, level: r.level, path: r.path, time: r.anchorTime ?? r.headTime, expires: this.expiry(chainId, r) };
+      const a: Anchored = { chainId, number, hash, level: r.level, path: r.path, time: r.anchorTime ?? r.headTime, expires: this.expiry(chainId, r), ...(roots ? { covers: 'roots' as const } : {}) };
       this.keep(a);
       return a;
     }
   }
 
-  /** A verified block's parent is in the same anchored history: its hash counts at the child's level. */
+  /** A verified block's parent is in the same anchored history: its hash counts at the child's level (not under roots alone). */
   parent(child: Anchored, parentHash: string): void {
-    if (child.number === 0 || !isHash(parentHash)) return;
+    if (child.covers === 'roots' || child.number === 0 || !isHash(parentHash)) return;
     const c = this.cache.get(`${child.chainId}:${child.number - 1}:${parentHash.toLowerCase()}`);
     if (c && c.expires >= child.expires) return;
     this.keep({ ...child, number: child.number - 1, hash: parentHash.toLowerCase() });

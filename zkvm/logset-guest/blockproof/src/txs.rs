@@ -10,6 +10,8 @@
 
 
 
+
+
 use alloy::consensus::transaction::SignerRecoverable;
 use alloy::consensus::{Transaction as _, TxEnvelope};
 use alloy::eips::eip2718::Decodable2718;
@@ -17,23 +19,12 @@ use alloy::eips::Typed2718;
 use alloy::primitives::U256;
 use anyhow::{bail, ensure, Context, Result};
 use logset_blockcheck::receipts::{
-    deposits_allowed, nitro_allowed, rlp_item, rlp_list_items, DEPOSIT_TX_TYPE, NITRO_TX_TYPES,
+    deposits_allowed, fee_currency_allowed, nitro_allowed, pol_allowed, rlp_item, rlp_list_items,
+    state_sync_allowed, DEPOSIT_TX_TYPE, FEE_CURRENCY_TX_TYPE, NITRO_TX_TYPES, STATE_SYNC_TX_TYPE,
 };
 
 
-pub const ARBOS_ADDRESS: [u8; 20] = {
-    let mut a = [0u8; 20];
-    a[17] = 0x0a;
-    a[18] = 0x4b;
-    a[19] = 0x05;
-    a
-};
-
-pub const ARB_RETRYABLE_ADDRESS: [u8; 20] = {
-    let mut a = [0u8; 20];
-    a[19] = 0x6e;
-    a
-};
+pub use crate::nitro::{ARBOS_ADDRESS, ARB_RETRYABLE_ADDRESS};
 
 pub use logset_blockcheck::transactions::{
     ARB_CONTRACT, ARB_DEPOSIT, ARB_INTERNAL, ARB_RETRY, ARB_SUBMIT_RETRYABLE, ARB_UNSIGNED,
@@ -68,66 +59,38 @@ pub fn layout(ty: u8) -> Option<&'static [(&'static str, Kind)]> {
             ("isSystemTx", Bool),
             ("input", Bytes),
         ],
-        ARB_DEPOSIT => &[
-            ("chainId", Uint),
-            ("requestId", Hash),
-            ("from", Address),
-            ("to", Address),
-            ("value", Uint),
-        ],
-        ARB_UNSIGNED => &[
-            ("chainId", Uint),
-            ("from", Address),
-            ("nonce", Uint),
-            ("maxFeePerGas", Uint),
-            ("gas", Uint),
-            ("to", OptAddress),
-            ("value", Uint),
-            ("input", Bytes),
-        ],
-        ARB_CONTRACT => &[
-            ("chainId", Uint),
-            ("requestId", Hash),
-            ("from", Address),
-            ("maxFeePerGas", Uint),
-            ("gas", Uint),
-            ("to", OptAddress),
-            ("value", Uint),
-            ("input", Bytes),
-        ],
-        ARB_RETRY => &[
-            ("chainId", Uint),
-            ("nonce", Uint),
-            ("from", Address),
-            ("maxFeePerGas", Uint),
-            ("gas", Uint),
-            ("to", OptAddress),
-            ("value", Uint),
-            ("input", Bytes),
-            ("ticketId", Hash),
-            ("refundTo", Address),
-            ("maxRefund", Uint),
-            ("submissionFeeRefund", Uint),
-        ],
-        ARB_SUBMIT_RETRYABLE => &[
-            ("chainId", Uint),
-            ("requestId", Hash),
-            ("from", Address),
-            ("l1BaseFee", Uint),
-            ("depositValue", Uint),
-            ("maxFeePerGas", Uint),
-            ("gas", Uint),
-            ("retryTo", OptAddress),
-            ("retryValue", Uint),
-            ("beneficiary", Address),
-            ("maxSubmissionFee", Uint),
-            ("refundTo", Address),
-            ("retryData", Bytes),
-        ],
-        ARB_INTERNAL => &[("chainId", Uint), ("input", Bytes)],
+        _ if NITRO_TX_TYPES.contains(&ty) => return crate::nitro::layout(ty),
         _ => return None,
     })
 }
+
+
+
+pub const POL_LAYOUT: &[(&str, Kind)] = &[
+    ("chainId", Uint),
+    ("from", Address),
+    ("to", Address),
+    ("nonce", Uint),
+    ("gas", Uint),
+    ("gasPrice", Uint),
+    ("input", Bytes),
+];
+
+
+
+
+pub const MANTLE_DEPOSIT_LAYOUT: &[(&str, Kind)] = &[
+    ("sourceHash", Hash),
+    ("from", Address),
+    ("to", OptAddress),
+    ("mint", Uint),
+    ("value", Uint),
+    ("gas", Uint),
+    ("isSystemTx", Bool),
+    ("ethValue", Uint),
+    ("input", Bytes),
+    ("ethTxValue", Uint),
+];
 
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,26 +108,154 @@ pub enum Decoded {
 
     Eth(Box<TxEnvelope>),
 
-    Table { ty: u8, fields: Vec<Field> },
+
+    Table {
+        ty: u8,
+        fields: Vec<Field>,
+        pol: bool,
+    },
+
+    FeeCurrency(Box<FeeCurrencyTx>),
+}
+
+
+
+
+
+
+#[derive(Clone, Debug)]
+pub struct FeeCurrencyTx {
+
+
+
+    pub fields: TxEnvelope,
+
+    pub fee_currency: Option<[u8; 20]>,
+
+    pub signing_hash: [u8; 32],
+}
+
+impl FeeCurrencyTx {
+
+    pub fn decode(value: &[u8]) -> Result<Self> {
+        ensure!(
+            value.first() == Some(&FEE_CURRENCY_TX_TYPE),
+            "not a 0x7B transaction"
+        );
+        let (payload, total, is_list) = rlp_item(&value[1..])?;
+        ensure!(
+            is_list && total == value.len() - 1,
+            "malformed 0x7B transaction"
+        );
+        let items = raw_items(payload)?;
+        ensure!(
+            items.len() == 13,
+            "0x7B transaction has {} fields, expected 13",
+            items.len()
+        );
+        let (fee_currency, fc_list) = {
+            let (b, _, l) = rlp_item(items[9])?;
+            (b, l)
+        };
+        ensure!(!fc_list, "feeCurrency is a list");
+        let fee_currency: Option<[u8; 20]> = match fee_currency.len() {
+            0 => None,
+            20 => Some(fee_currency.try_into().expect("20 bytes")),
+            n => bail!("feeCurrency of {n} bytes"),
+        };
+
+        let eip1559: Vec<&[u8]> = items[..9].iter().chain(&items[10..]).copied().collect();
+        let mut bytes = vec![0x02];
+        bytes.extend(rlp_list(&eip1559));
+        let fields = TxEnvelope::decode_2718(&mut &bytes[..]).context("0x7B fields")?;
+        ensure!(fields.is_eip1559(), "0x7B fields decode as another type");
+        let mut signed = vec![FEE_CURRENCY_TX_TYPE];
+        signed.extend(rlp_list(&items[..10]));
+        Ok(Self {
+            fields,
+            fee_currency,
+            signing_hash: alloy::primitives::keccak256(&signed).0,
+        })
+    }
+
+
+
+    pub fn sender(&self) -> Result<[u8; 20]> {
+        let TxEnvelope::Eip1559(s) = &self.fields else {
+            bail!("0x7B fields are not EIP-1559's");
+        };
+        let from = alloy::consensus::crypto::secp256k1::recover_signer(
+            s.signature(),
+            self.signing_hash.into(),
+        )
+        .context("signature recovery")?;
+        Ok(from.0 .0)
+    }
+}
+
+
+fn raw_items(payload: &[u8]) -> Result<Vec<&[u8]>> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at < payload.len() {
+        let (_, total, _) = rlp_item(&payload[at..])?;
+        out.push(&payload[at..at + total]);
+        at += total;
+    }
+    Ok(out)
+}
+
+
+fn rlp_list(items: &[&[u8]]) -> Vec<u8> {
+    let payload: usize = items.iter().map(|i| i.len()).sum();
+    let mut out = Vec::with_capacity(payload + 9);
+    alloy_rlp::Header {
+        list: true,
+        payload_length: payload,
+    }
+    .encode(&mut out);
+    for i in items {
+        out.extend_from_slice(i);
+    }
+    out
 }
 
 impl Decoded {
+
+
+
+
+
+
+
+
+
+
     pub fn ty(&self) -> u8 {
         match self {
             Decoded::Eth(env) => env.ty(),
             Decoded::Table { ty, .. } => *ty,
+            Decoded::FeeCurrency(_) => FEE_CURRENCY_TX_TYPE,
         }
     }
 
 
     pub fn field(&self, name: &str) -> Option<&Field> {
-        let Decoded::Table { ty, fields } = self else {
+        let Decoded::Table { ty, fields, pol } = self else {
             return None;
         };
-        layout(*ty)?
+
+        let table = if *pol {
+            Some(POL_LAYOUT)
+        } else if *ty == DEPOSIT_TX_TYPE && fields.len() > 8 {
+            Some(MANTLE_DEPOSIT_LAYOUT)
+        } else {
+            layout(*ty)
+        };
+        table?
             .iter()
             .position(|(n, _)| *n == name)
-            .map(|i| &fields[i])
+            .and_then(|i| fields.get(i))
     }
 
     pub fn uint(&self, name: &str) -> Option<U256> {
@@ -185,9 +276,11 @@ impl Decoded {
     pub fn to(&self) -> Option<[u8; 20]> {
         match self {
             Decoded::Eth(env) => env.to().map(|a| a.0 .0),
+            Decoded::FeeCurrency(c) => c.fields.to().map(|a| a.0 .0),
             Decoded::Table { ty, .. } => match *ty {
-                ARB_INTERNAL => Some(ARBOS_ADDRESS),
-                ARB_SUBMIT_RETRYABLE => Some(ARB_RETRYABLE_ADDRESS),
+                t if NITRO_TX_TYPES.contains(&t) => crate::nitro::to(self),
+
+                STATE_SYNC_TX_TYPE => Some([0; 20]),
                 _ => self.address("to"),
             },
         }
@@ -197,6 +290,7 @@ impl Decoded {
     pub fn nonce(&self) -> u64 {
         match self {
             Decoded::Eth(env) => env.nonce(),
+            Decoded::FeeCurrency(c) => c.fields.nonce(),
             _ => self.uint("nonce").map_or(0, |n| n.saturating_to()),
         }
     }
@@ -204,6 +298,7 @@ impl Decoded {
     pub fn gas(&self) -> u64 {
         match self {
             Decoded::Eth(env) => env.gas_limit(),
+            Decoded::FeeCurrency(c) => c.fields.gas_limit(),
             _ => self.uint("gas").map_or(0, |n| n.saturating_to()),
         }
     }
@@ -211,7 +306,8 @@ impl Decoded {
     pub fn value(&self) -> U256 {
         match self {
             Decoded::Eth(env) => env.value(),
-            Decoded::Table { ty, .. } if *ty == ARB_SUBMIT_RETRYABLE => U256::ZERO,
+            Decoded::FeeCurrency(c) => c.fields.value(),
+            Decoded::Table { ty, .. } if NITRO_TX_TYPES.contains(ty) => crate::nitro::value(self),
             _ => self.uint("value").unwrap_or_default(),
         }
     }
@@ -221,9 +317,8 @@ impl Decoded {
     pub fn input(&self) -> Vec<u8> {
         match self {
             Decoded::Eth(env) => env.input().to_vec(),
-            Decoded::Table { ty, .. } if *ty == ARB_SUBMIT_RETRYABLE => {
-                submit_retryable_input(self)
-            }
+            Decoded::FeeCurrency(c) => c.fields.input().to_vec(),
+            Decoded::Table { ty, .. } if NITRO_TX_TYPES.contains(ty) => crate::nitro::input(self),
             _ => match self.field("input") {
                 Some(Field::Bytes(b)) => b.clone(),
                 _ => vec![],
@@ -233,52 +328,37 @@ impl Decoded {
 }
 
 
-fn submit_retryable_input(tx: &Decoded) -> Vec<u8> {
-    let word = |v: U256| v.to_be_bytes::<32>();
-    let addr = |a: Option<[u8; 20]>| {
-        let mut w = [0u8; 32];
-        w[12..].copy_from_slice(&a.unwrap_or_default());
-        w
-    };
-    let hash = match tx.field("requestId") {
-        Some(Field::Hash(h)) => *h,
-        _ => [0; 32],
-    };
-    let data = match tx.field("retryData") {
-        Some(Field::Bytes(b)) => b.clone(),
-        _ => vec![],
-    };
-    let u = |n: &str| tx.uint(n).unwrap_or_default();
-    let mut out = vec![0xc9, 0xf9, 0x5d, 0x32];
-    out.extend_from_slice(&hash);
-    for n in [
-        "l1BaseFee",
-        "depositValue",
-        "retryValue",
-        "maxFeePerGas",
-        "gas",
-        "maxSubmissionFee",
-    ] {
-        out.extend_from_slice(&word(u(n)));
-    }
-    for n in ["refundTo", "beneficiary", "retryTo"] {
-        out.extend_from_slice(&addr(tx.address(n)));
-    }
-    out.extend_from_slice(&word(U256::from(11 * 32)));
-    out.extend_from_slice(&word(U256::from(data.len())));
-    out.extend_from_slice(&data);
-    out.resize(out.len() + (32 - data.len() % 32) % 32, 0);
-    out
-}
-
-
 
 pub fn decode(value: &[u8], chain_id: u64) -> Result<Decoded> {
     let first = *value.first().context("empty transaction value")?;
-    let table = layout(first).filter(|_| {
-        (first == DEPOSIT_TX_TYPE && deposits_allowed(chain_id))
-            || (NITRO_TX_TYPES.contains(&first) && nitro_allowed(chain_id))
-    });
+    if first == FEE_CURRENCY_TX_TYPE && fee_currency_allowed(chain_id) {
+        let tx = FeeCurrencyTx::decode(value)?;
+        return Ok(Decoded::FeeCurrency(Box::new(tx)));
+    }
+
+
+    if first == STATE_SYNC_TX_TYPE && state_sync_allowed(chain_id) {
+        logset_blockcheck::transactions::state_sync_records(value)?;
+        return Ok(Decoded::Table {
+            ty: STATE_SYNC_TX_TYPE,
+            fields: vec![],
+            pol: false,
+        });
+    }
+    let pol = first == DEPOSIT_TX_TYPE && pol_allowed(chain_id);
+    let mantle = first == DEPOSIT_TX_TYPE
+        && deposits_allowed(chain_id)
+        && logset_blockcheck::header::mantle(chain_id);
+    let table = if pol {
+        Some(POL_LAYOUT)
+    } else if mantle {
+        Some(MANTLE_DEPOSIT_LAYOUT)
+    } else {
+        layout(first).filter(|_| {
+            (first == DEPOSIT_TX_TYPE && deposits_allowed(chain_id))
+                || (NITRO_TX_TYPES.contains(&first) && nitro_allowed(chain_id))
+        })
+    };
     let Some(table) = table else {
         let env = TxEnvelope::decode_2718(&mut &value[..]).context("transaction decode")?;
         return Ok(Decoded::Eth(Box::new(env)));
@@ -289,8 +369,9 @@ pub fn decode(value: &[u8], chain_id: u64) -> Result<Decoded> {
         "malformed 0x{first:02x} transaction"
     );
     let items = rlp_list_items(payload)?;
+
     ensure!(
-        items.len() == table.len(),
+        items.len() == table.len() || (mantle && items.len() + 1 == table.len()),
         "0x{first:02x} transaction has {} fields, expected {}",
         items.len(),
         table.len()
@@ -320,7 +401,11 @@ pub fn decode(value: &[u8], chain_id: u64) -> Result<Decoded> {
             })
         })
         .collect::<Result<_>>()?;
-    Ok(Decoded::Table { ty: first, fields })
+    Ok(Decoded::Table {
+        ty: first,
+        fields,
+        pol,
+    })
 }
 
 
@@ -335,7 +420,10 @@ pub fn sender(tx: &Decoded) -> Result<[u8; 20]> {
             Ok(from.0 .0)
         }
         Decoded::Eth(env) => Ok(env.recover_signer().context("signature recovery")?.0 .0),
-        Decoded::Table { ty, .. } if *ty == ARB_INTERNAL => Ok(ARBOS_ADDRESS),
+        Decoded::FeeCurrency(c) => c.sender(),
+        Decoded::Table { ty, .. } if NITRO_TX_TYPES.contains(ty) => crate::nitro::sender(tx),
+
+        Decoded::Table { ty, .. } if *ty == STATE_SYNC_TX_TYPE => Ok([0; 20]),
         _ => tx.address("from").context("no from"),
     }
 }

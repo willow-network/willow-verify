@@ -17,12 +17,15 @@
 
 
 pub mod bellatrix;
+pub mod berachain;
 mod bls;
 pub mod bnb;
 pub mod call;
 pub mod history;
 pub mod l2;
 pub mod lc;
+pub mod orbit;
+pub mod polygon;
 pub mod premerge;
 pub mod signed;
 
@@ -214,6 +217,34 @@ pub fn confirm(
     if is_premerge(number, answer) {
         return confirm_premerge(number, answer);
     }
+    confirm_signed_chain(lc, number, answer, now)
+}
+
+
+
+
+pub fn confirm_sepolia(
+    lc: &LightClient,
+    number: u64,
+    answer: &Value,
+    now: u64,
+) -> Result<Confirmed, Failure> {
+    if lc.net != lc::Network::Sepolia {
+        return Err(Failure::new(
+            Kind::Internal,
+            "Sepolia's blocks are checked with Sepolia's light client",
+        ));
+    }
+    confirm_signed_chain(lc, number, answer, now)
+}
+
+
+fn confirm_signed_chain(
+    lc: &LightClient,
+    number: u64,
+    answer: &Value,
+    now: u64,
+) -> Result<Confirmed, Failure> {
     lc.check_age(now)?;
     let asked = answer
         .get("blockNumber")
@@ -277,7 +308,31 @@ pub fn confirm(
                 },
             )
         }
-        "beacon" => {
+        "hops" if lc.net == lc::Network::Sepolia => {
+            let list = |k: &str| {
+                proof
+                    .get(k)
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| Failure::new(Kind::MalformedInput, format!("no {k} list")))
+            };
+            let h = history::hops(
+                head.state_root,
+                head.number,
+                number,
+                list("headers")?,
+                list("proofs")?,
+            )?;
+            (
+                "hops",
+                h,
+                if number <= fin.number {
+                    "final"
+                } else {
+                    "signed"
+                },
+            )
+        }
+        "beacon" if lc.net == lc::Network::Mainnet => {
             let w = proof
                 .get("witness")
                 .and_then(Value::as_str)
@@ -322,7 +377,8 @@ pub fn confirm(
         return Err(Failure::new(
             Kind::StaleHead,
             format!(
-                "Ethereum's newest signed block that Willow sent is {} minutes old",
+                "{}'s newest signed block that Willow sent is {} minutes old",
+                lc.net.name(),
                 now.saturating_sub(head.timestamp) / 60
             ),
         ));
@@ -353,6 +409,7 @@ pub struct Anchor {
     lc: Option<LightClient>,
     sepolia: LightClient,
     bnb: bnb::Bnb,
+    berachain: berachain::Berachain,
 }
 
 
@@ -360,12 +417,14 @@ pub struct Anchor {
 enum Other {
     Sepolia,
     Bnb,
+    Berachain,
 }
 
 fn other(name: &str) -> Result<Other, Failure> {
     match name {
         "sepolia" => Ok(Other::Sepolia),
         "bnb" => Ok(Other::Bnb),
+        "berachain" => Ok(Other::Berachain),
         _ => Err(Failure::new(
             Kind::Internal,
             format!("no light client {name:?} here"),
@@ -394,6 +453,7 @@ impl Anchor {
                 lc::sepolia::PINNED_SLOT,
             ),
             bnb: bnb::Bnb::default(),
+            berachain: berachain::Berachain::default(),
         }
     }
 
@@ -425,6 +485,15 @@ impl Anchor {
                     })?;
                     self.bnb = bnb::Bnb::new(s);
                 }
+                Other::Berachain => {
+                    let s = berachain::start_of(&v).ok_or_else(|| {
+                        Failure::new(
+                            Kind::Internal,
+                            "a Berachain start is {height, hash} of a CometBFT header",
+                        )
+                    })?;
+                    self.berachain = berachain::Berachain::new(s);
+                }
             }
             Ok(json!({"ok": true}))
         })())
@@ -440,6 +509,7 @@ impl Anchor {
                     self.sepolia.bootstrap(&v)?
                 }
                 Other::Bnb => self.bnb.bootstrap(&v, now as u64)?,
+                Other::Berachain => self.berachain.bootstrap(&v, now as u64)?,
             };
             Ok(json!({"ok": true, "period": p}))
         })())
@@ -453,6 +523,7 @@ impl Anchor {
             let max = match o {
                 Other::Sepolia => lc::MAX_UPDATES,
                 Other::Bnb => bnb::MAX_UPDATES,
+                Other::Berachain => berachain::MAX_UPDATES,
             };
             let list = v.as_array().filter(|l| l.len() <= max).ok_or_else(|| {
                 Failure::new(
@@ -465,6 +536,7 @@ impl Anchor {
                 newest = match o {
                     Other::Sepolia => self.sepolia.apply_update(u)?,
                     Other::Bnb => self.bnb.apply_update(u)?,
+                    Other::Berachain => self.berachain.apply_update(u)?,
                 }
                 .or(newest);
             }
@@ -487,6 +559,10 @@ impl Anchor {
                     .bnb
                     .restore(&v, now as u64)
                     .inspect_err(|_| self.bnb.reset())?,
+                Other::Berachain => self
+                    .berachain
+                    .restore(&v, now as u64)
+                    .inspect_err(|_| self.berachain.reset())?,
             };
             Ok(json!({"ok": true, "period": p}))
         })())
@@ -497,6 +573,7 @@ impl Anchor {
         match other(name) {
             Ok(Other::Sepolia) => self.sepolia.saved().to_string(),
             Ok(Other::Bnb) => self.bnb.saved().to_string(),
+            Ok(Other::Berachain) => self.berachain.saved().to_string(),
             Err(_) => "null".into(),
         }
     }
@@ -506,6 +583,7 @@ impl Anchor {
         match other(name) {
             Ok(Other::Sepolia) => self.sepolia.reset(),
             Ok(Other::Bnb) => self.bnb.reset(),
+            Ok(Other::Berachain) => self.berachain.reset(),
             Err(_) => {}
         }
     }
@@ -571,6 +649,7 @@ impl Anchor {
 
 
 
+
     pub fn verify(
         &mut self,
         chain_id: u32,
@@ -601,6 +680,76 @@ impl Anchor {
                     "anchorTime": c.time,
                     "signers": c.signers,
                     "of": c.of,
+                }));
+            }
+            if u64::from(chain_id) == berachain::CHAIN_ID {
+                let c = self.berachain.confirm(number as u64, &v, now as u64)?;
+                return Ok(json!({
+                    "ok": true,
+                    "level": c.level,
+                    "path": "cometbft",
+                    "hash": format!("{}", B256::from(c.hash)),
+                    "matches": c.hash == want,
+                    "anchorBlock": c.height,
+                    "anchorTime": c.time,
+                    "signers": c.signers,
+                    "of": c.of,
+                }));
+            }
+            if u64::from(chain_id) == polygon::CHAIN_ID {
+
+                let c = polygon::confirm_checkpoint(self.client()?, number as u64, &v, now as u64)?;
+                return Ok(json!({
+                    "ok": true,
+                    "level": c.level,
+                    "path": "checkpoint",
+                    "covers": "roots",
+                    "headerHash": format!("{}", B256::from(c.header_hash)),
+                    "rootsMatch": c.header_hash == want,
+                    "transactionsRoot": format!("{}", B256::from(c.transactions_root)),
+                    "receiptsRoot": format!("{}", B256::from(c.receipts_root)),
+                    "blockTime": c.timestamp,
+                    "checkpoint": c.checkpoint,
+                    "checkpointStart": c.start,
+                    "checkpointEnd": c.end,
+                    "l1Block": c.l1_block,
+                }));
+            }
+            if u64::from(chain_id) == lc::sepolia::CHAIN_ID {
+                let c = confirm_sepolia(&self.sepolia, number as u64, &v, now as u64)?;
+                return Ok(json!({
+                    "ok": true,
+                    "level": c.level,
+                    "path": c.path,
+                    "hash": format!("{}", B256::from(c.hash)),
+                    "matches": c.hash == want,
+                    "finalized": c.finalized,
+                    "head": c.head,
+                    "headTime": c.head_time,
+                    "signers": c.signers,
+                }));
+            }
+
+            if orbit::orbit_chain(chain_id.into()).is_some() {
+                let c = orbit::confirm_orbit(
+                    self.client()?,
+                    chain_id.into(),
+                    number as u64,
+                    &v,
+                    now as u64,
+                )?;
+                return Ok(json!({
+                    "ok": true,
+                    "level": c.level,
+                    "path": "node",
+                    "hash": format!("{}", B256::from(c.hash)),
+                    "matches": c.hash == want,
+                    "anchorBlock": c.anchor_block,
+                    "anchorTime": c.parent_time,
+                    "node": c.node,
+                    "parentBlock": c.parent_block,
+                    "parentLevel": c.parent_level,
+                    "l1Block": c.l1_block,
                 }));
             }
             if chain_id != 1 && v.get("signed").is_some() {
@@ -642,6 +791,39 @@ impl Anchor {
                     "matches": c.hash == want,
                     "anchorBlock": c.anchor_block,
                     "assertion": format!("{}", B256::from(c.assertion)),
+                    "l1Block": c.l1_block,
+                }));
+            }
+            if let Some(o) = l2::ORACLE_CHAINS
+                .iter()
+                .find(|c| c.chain_id == u64::from(chain_id))
+            {
+
+                let c = if o.l1 == bnb::CHAIN_ID {
+                    l2::confirm_oracle_on_bnb(
+                        &self.bnb,
+                        chain_id.into(),
+                        number as u64,
+                        &v,
+                        now as u64,
+                    )?
+                } else {
+                    l2::confirm_oracle(
+                        self.l1_client(chain_id.into())?,
+                        chain_id.into(),
+                        number as u64,
+                        &v,
+                        now as u64,
+                    )?
+                };
+                return Ok(json!({
+                    "ok": true,
+                    "level": c.level,
+                    "path": "output",
+                    "hash": format!("{}", B256::from(c.hash)),
+                    "matches": c.hash == want,
+                    "anchorBlock": c.anchor_block,
+                    "outputIndex": c.output_index,
                     "l1Block": c.l1_block,
                 }));
             }
@@ -711,3 +893,17 @@ impl Anchor {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+mod feed;
+mod nitro;

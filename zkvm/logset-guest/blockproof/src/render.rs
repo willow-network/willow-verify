@@ -3,8 +3,8 @@
 
 
 use super::derive::{
-    blob_count, create_address, effective_gas_price, nitro_collects_tips, tx_gas_price,
-    BlobSchedule, GAS_PER_BLOB,
+    blob_count, create_address, effective_gas_price, fee_currency_price, nitro_collects_tips,
+    tx_gas_price, BlobSchedule, GAS_PER_BLOB,
 };
 use super::opfee::{FeeFork, L1Info};
 use super::txs::{self, Decoded, Field};
@@ -13,8 +13,8 @@ use alloy::consensus::{Transaction as _, TxEnvelope};
 use alloy::primitives::{Signature, U256};
 use anyhow::{bail, ensure, Context as _, Result};
 use logset_blockcheck::receipts::{
-    deposits_allowed, logs_from_value, nitro_allowed, rlp_item, rlp_list_items, Log,
-    DEPOSIT_TX_TYPE,
+    deposits_allowed, fee_currency_allowed, logs_from_value, nitro_allowed, rlp_item,
+    rlp_list_items, Log, DEPOSIT_TX_TYPE, FEE_CURRENCY_TX_TYPE, STATE_SYNC_TX_TYPE,
 };
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -32,6 +32,9 @@ pub struct Receipt {
     pub logs: Vec<Log>,
     pub deposit_nonce: Option<u64>,
     pub deposit_receipt_version: Option<u64>,
+
+
+    pub base_fee: Option<U256>,
 }
 
 pub fn decode_receipt(value: &[u8], chain_id: u64) -> Result<Receipt> {
@@ -57,6 +60,13 @@ pub fn decode_receipt(value: &[u8], chain_id: u64) -> Result<Receipt> {
         (s, _) => bail!("receipt status of {} bytes", s.len()),
     };
     let deposit = ty == DEPOSIT_TX_TYPE && deposits_allowed(chain_id);
+    let base_fee = match f.get(4) {
+        Some((b, false)) if ty == FEE_CURRENCY_TX_TYPE && fee_currency_allowed(chain_id) => {
+            ensure!(b.len() <= 32, "a baseFee of {} bytes", b.len());
+            Some(U256::from_be_slice(b))
+        }
+        _ => None,
+    };
     Ok(Receipt {
         ty,
         status,
@@ -74,6 +84,7 @@ pub fn decode_receipt(value: &[u8], chain_id: u64) -> Result<Receipt> {
         } else {
             None
         },
+        base_fee,
     })
 }
 
@@ -130,7 +141,7 @@ impl Context {
             base_fee: h.base_fee_per_gas.map(U256::from),
             excess_blob_gas: h.excess_blob_gas,
             l1_block_number: nitro_allowed(chain_id)
-                .then(|| u64::from_be_bytes(h.mix_hash.0[8..16].try_into().expect("8 bytes"))),
+                .then(|| crate::nitro::l1_block_number(&h.mix_hash.0)),
             collects_tips: nitro_allowed(chain_id) && nitro_collects_tips(&h.mix_hash.0),
             blobs: BlobSchedule::builtin(chain_id),
         }
@@ -158,6 +169,17 @@ const BASE_TIME: [u8; 20] = [
     0x42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x30,
 ];
 const SET_MILLIS: [u8; 4] = [0x86, 0xbd, 0xf3, 0x94];
+
+
+
+pub const L1_INFO_DEPOSITOR: [u8; 20] = [
+    0xde, 0xad, 0xde, 0xad, 0xde, 0xad, 0xde, 0xad, 0xde, 0xad, 0xde, 0xad, 0xde, 0xad, 0xde, 0xad,
+    0xde, 0xad, 0x00, 0x01,
+];
+
+
+
+pub const MANTLE_L1_INFO_NONCE_BASE: u64 = 61_171_946;
 
 
 
@@ -292,6 +314,8 @@ impl<'a> View<'a> {
 
 
 
+
+
     pub fn partial(
         ctx: Context,
         txs: &'a BTreeMap<usize, Vec<u8>>,
@@ -336,7 +360,7 @@ impl<'a> View<'a> {
         } else {
             match txs.first() {
                 Some(Some(s)) if s.tx.ty() == DEPOSIT_TX_TYPE => {
-                    L1Info::parse(&s.tx.input()).map_or(L1::None, L1::Known)
+                    L1Info::parse_for(ctx.chain_id, &s.tx.input()).map_or(L1::None, L1::Known)
                 }
                 Some(Some(_)) => L1::None,
                 _ => L1::Unknown,
@@ -421,7 +445,19 @@ impl<'a> View<'a> {
             None => unproven.push("nonce".to_string()),
         }
         put(&mut o, "gas", q(tx.gas()));
-        put(&mut o, "gasPrice", qu(tx_gas_price(tx, ctx.base_fee)));
+
+        let price = match tx {
+            Decoded::FeeCurrency(c) => self
+                .receipts
+                .get(i)
+                .and_then(Option::as_ref)
+                .map(|r| fee_currency_price(c, r.base_fee, ctx.base_fee)),
+            _ => Some(tx_gas_price(tx, ctx.base_fee)),
+        };
+        match price {
+            Some(p) => put(&mut o, "gasPrice", qu(p)),
+            None => unproven.push("gasPrice".to_string()),
+        }
 
 
         if tx.to().is_some() || tx.ty() != DEPOSIT_TX_TYPE {
@@ -431,9 +467,55 @@ impl<'a> View<'a> {
         put(&mut o, "input", hx(&tx.input()));
         match tx {
             Decoded::Eth(env) => eth_fields(env, &mut o),
+            Decoded::FeeCurrency(c) => {
+                eth_fields(&c.fields, &mut o);
+
+                o.insert("feeCurrency".into(), opt_addr(c.fee_currency));
+            }
+
+            Decoded::Table { pol: true, .. } => {
+                put(
+                    &mut o,
+                    "chainId",
+                    qu(tx.uint("chainId").unwrap_or_default()),
+                );
+                put(
+                    &mut o,
+                    "maxFeePerGas",
+                    qu(tx.uint("gasPrice").unwrap_or_default()),
+                );
+                put(&mut o, "maxPriorityFeePerGas", "0x0".into());
+                for k in ["v", "r", "s"] {
+                    put(&mut o, k, "0x0".into());
+                }
+            }
+
+            Decoded::Table { ty, .. } if *ty == STATE_SYNC_TX_TYPE => {
+                for k in [
+                    "maxFeePerGas",
+                    "maxPriorityFeePerGas",
+                    "v",
+                    "r",
+                    "s",
+                    "yParity",
+                ] {
+                    put(&mut o, k, "0x0".into());
+                }
+            }
             Decoded::Table { ty, .. } if *ty == DEPOSIT_TX_TYPE => {
                 put(&mut o, "sourceHash", field_json(tx.field("sourceHash")));
                 put(&mut o, "mint", qu(tx.uint("mint").unwrap_or_default()));
+
+                if logset_blockcheck::header::mantle(ctx.chain_id) {
+                    put(
+                        &mut o,
+                        "ethValue",
+                        qu(tx.uint("ethValue").unwrap_or_default()),
+                    );
+                    if let Some(v) = tx.uint("ethTxValue") {
+                        put(&mut o, "ethTxValue", qu(v));
+                    }
+                }
                 match self.receipts.get(i).and_then(Option::as_ref) {
                     Some(r) => {
                         if let Some(v) = r.deposit_receipt_version {
@@ -449,25 +531,7 @@ impl<'a> View<'a> {
                     put(&mut o, k, "0x0".into());
                 }
             }
-            Decoded::Table { ty, .. } => {
-                put(
-                    &mut o,
-                    "chainId",
-                    qu(tx.uint("chainId").unwrap_or_default()),
-                );
-                for k in ["v", "r", "s"] {
-                    put(&mut o, k, "0x0".into());
-                }
-                for (name, _) in txs::layout(*ty).unwrap_or_default() {
-                    if NITRO_COMMON.contains(name) {
-                        continue;
-                    }
-                    match tx.field(name) {
-                        Some(Field::Address(None)) => {}
-                        f => put(&mut o, name, field_json(f)),
-                    }
-                }
-            }
+            Decoded::Table { .. } => crate::nitro::tx_fields(tx, &mut o),
         }
         Some(Rendered {
             json: Value::Object(o),
@@ -480,7 +544,9 @@ impl<'a> View<'a> {
     fn nonce(&self, i: usize) -> Option<u64> {
         let slot = self.txs.get(i)?.as_ref()?;
         match &slot.tx {
-            Decoded::Table { ty, .. } if *ty == DEPOSIT_TX_TYPE => self.deposit_nonce(i),
+            Decoded::Table { ty, pol: false, .. } if *ty == DEPOSIT_TX_TYPE => {
+                self.deposit_nonce(i)
+            }
             tx => Some(tx.nonce()),
         }
     }
@@ -489,8 +555,23 @@ impl<'a> View<'a> {
 
     fn deposit_nonce(&self, i: usize) -> Option<u64> {
         let r = self.receipts.get(i)?.as_ref()?;
+        if logset_blockcheck::header::mantle(self.ctx.chain_id) {
+            return self.mantle_deposit_nonce(i);
+        }
         r.deposit_nonce
             .or_else(|| self.extras.and_then(|x| x[i].deposit_nonce))
+    }
+
+
+
+
+
+
+    fn mantle_deposit_nonce(&self, i: usize) -> Option<u64> {
+        let slot = self.txs.get(i)?.as_ref()?;
+        (i == 0 && slot.sender == L1_INFO_DEPOSITOR)
+            .then(|| self.ctx.number.checked_sub(MANTLE_L1_INFO_NONCE_BASE))
+            .flatten()
     }
 
 
@@ -546,16 +627,11 @@ impl<'a> View<'a> {
                         o.insert("contractAddress".into(), Value::Null);
                     }
                 }
-                put(
-                    &mut o,
-                    "effectiveGasPrice",
-                    qu(effective_gas_price(
-                        ctx.chain_id,
-                        &s.tx,
-                        ctx.base_fee,
-                        ctx.collects_tips,
-                    )),
-                );
+                let price = match &s.tx {
+                    Decoded::FeeCurrency(c) => fee_currency_price(c, r.base_fee, ctx.base_fee),
+                    tx => effective_gas_price(ctx.chain_id, tx, ctx.base_fee, ctx.collects_tips),
+                };
+                put(&mut o, "effectiveGasPrice", qu(price));
                 if let Decoded::Eth(env) = &s.tx {
                     if let (Some(n), Some(price)) = (
                         blob_count(env),
@@ -578,13 +654,28 @@ impl<'a> View<'a> {
         }
         match (&self.l1, slot) {
             (L1::None, _) => {}
+
+            (L1::Known(_), Some(_))
+                if r.ty == DEPOSIT_TX_TYPE
+                    && (logset_blockcheck::header::opbnb(ctx.chain_id)
+                        || logset_blockcheck::header::mantle(ctx.chain_id)) => {}
             (L1::Known(l1), Some(s)) => {
                 let deposit = r.ty == DEPOSIT_TX_TYPE;
                 let fork = FeeFork::at(ctx.chain_id, ctx.timestamp);
-                let (gas, fee, da) = l1.cost(fork, s.value, deposit);
+                let (gas, mut fee, da) = l1.cost(fork, s.value, deposit);
+
+                if logset_blockcheck::header::opbnb(ctx.chain_id)
+                    && tx_gas_price(&s.tx, ctx.base_fee).is_zero()
+                {
+                    fee = U256::ZERO;
+                }
                 put(&mut o, "l1GasPrice", qu(l1.l1_base_fee));
                 put(&mut o, "l1GasUsed", q(gas));
-                put(&mut o, "l1Fee", qu(fee));
+
+
+                if !logset_blockcheck::header::mantle(ctx.chain_id) {
+                    put(&mut o, "l1Fee", qu(fee));
+                }
                 if fork == FeeFork::Bedrock {
                     put(&mut o, "l1FeeScalar", l1.fee_scalar_decimal());
                 }
@@ -615,23 +706,11 @@ impl<'a> View<'a> {
         if let Some(v) = r.deposit_receipt_version {
             put(&mut o, "depositReceiptVersion", q(v));
         }
+        if let Some(fee) = r.base_fee {
+            put(&mut o, "baseFee", qu(fee));
+        }
         if let Some(l1) = ctx.l1_block_number {
-            match self.extras {
-                Some(extras) => {
-                    let x = extras[i];
-                    if let Some(g) = x.gas_used_for_l1 {
-                        put(&mut o, "gasUsedForL1", q(g));
-                    }
-                    put(&mut o, "l1BlockNumber", q(l1));
-                    if let Some(t) = x.timeboosted {
-                        o.insert("timeboosted".into(), Value::Bool(t));
-                    }
-                }
-                None => {
-                    put(&mut o, "l1BlockNumber", q(l1));
-                    missing(&["gasUsedForL1", "timeboosted"]);
-                }
-            }
+            crate::nitro::receipt_fields(l1, self.extras.map(|x| x[i]), &mut o, &mut missing);
         }
         unproven.sort();
         unproven.dedup();
@@ -795,9 +874,6 @@ fn log_json(
     Value::Object(o)
 }
 
-
-const NITRO_COMMON: [&str; 7] = ["chainId", "from", "to", "value", "gas", "nonce", "input"];
-
 fn eth_fields(env: &TxEnvelope, o: &mut Map<String, Value>) {
     let (sig, legacy_chain): (&Signature, Option<u64>) = match env {
         TxEnvelope::Legacy(s) => (s.signature(), s.tx().chain_id),
@@ -896,17 +972,51 @@ fn opt_addr(a: Option<[u8; 20]>) -> Value {
     a.map_or(Value::Null, |a| Value::String(hx(&a)))
 }
 
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+
 pub fn hx(b: &[u8]) -> String {
-    format!("0x{}", hex::encode(b))
+    let mut out = Vec::with_capacity(2 + 2 * b.len());
+    out.extend_from_slice(b"0x");
+    for &x in b {
+        out.push(HEX_DIGITS[usize::from(x >> 4)]);
+        out.push(HEX_DIGITS[usize::from(x & 0x0f)]);
+    }
+    String::from_utf8(out).expect("hex digits are ASCII")
 }
 
+
 pub fn q(n: u64) -> String {
-    format!("0x{n:x}")
+    let mut buf = [0u8; 18];
+    let mut at = buf.len();
+    let mut v = n;
+    loop {
+        at -= 1;
+        buf[at] = HEX_DIGITS[(v & 0x0f) as usize];
+        v >>= 4;
+        if v == 0 {
+            break;
+        }
+    }
+    at -= 2;
+    buf[at..at + 2].copy_from_slice(b"0x");
+    String::from_utf8(buf[at..].to_vec()).expect("hex digits are ASCII")
 }
 
 pub fn qu(n: U256) -> String {
     format!("{n:#x}")
 }
+
+
+
+
+
+
+
+
+
+
+
 
 
 

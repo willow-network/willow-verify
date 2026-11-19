@@ -359,6 +359,19 @@ impl Database for ProvenDb<'_> {
 
 
 pub fn call(state: &State, block: &Execution, to: Address, data: Bytes) -> Result<Bytes, Failure> {
+    call_on(state, block, 1, to, data)
+}
+
+
+
+
+pub fn call_on(
+    state: &State,
+    block: &Execution,
+    chain_id: u64,
+    to: Address,
+    data: Bytes,
+) -> Result<Bytes, Failure> {
     if block.timestamp < PRAGUE_TIME {
         return Err(rejected("calls are run only at blocks from Prague on"));
     }
@@ -369,7 +382,7 @@ pub fn call(state: &State, block: &Execution, to: Address, data: Bytes) -> Resul
     };
     let mut cfg = CfgEnv::default();
     cfg.spec = spec;
-    cfg.chain_id = 1;
+    cfg.chain_id = chain_id;
     cfg.disable_nonce_check = true;
     cfg.disable_balance_check = true;
     cfg.disable_base_fee = true;
@@ -395,6 +408,7 @@ pub fn call(state: &State, block: &Execution, to: Address, data: Bytes) -> Resul
         gas_price: 0,
         kind: TxKind::Call(to),
         data,
+        chain_id: Some(chain_id),
         ..Default::default()
     };
     let mut evm = Context::mainnet()

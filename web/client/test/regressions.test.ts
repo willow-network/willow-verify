@@ -1,9 +1,11 @@
 // Regression tests for faults found in self-review, and the checkpoint choice.
 import { afterEach, describe, expect, it } from 'vitest';
-import { chooseCheckpoint, SHIPPED_CHECKPOINT, slotTime } from '../src/checkpoint.js';
+import { BEACON_APIS, chooseCheckpoint, SHIPPED_CHECKPOINT, slotTime } from '../src/checkpoint.js';
+import { createVerifier } from '../src/client.js';
 import { toQuantity } from '../src/hex.js';
 import type { KeyValueStorage } from '../src/storage.js';
-import { blockOf, harness, headAt, type Harness } from './support/setup.js';
+import { mockModules } from './support/mock-verifiers.js';
+import { blockOf, fullWorld, harness, headAt, type Harness } from './support/setup.js';
 import { chain, register } from './support/synth.js';
 import { World } from './support/world.js';
 
@@ -93,6 +95,118 @@ describe('the checkpoint', () => {
     const older = fetchOf({ 'checkpoint.json': SHIPPED_CHECKPOINT });
     await expect(chooseCheckpoint({ fetch: older, nowSec: () => stale, beaconApis: false })).rejects.toMatchObject({ code: -32099 });
   });
+
+  // Node's default beacon APIs as they respond to a checkpoint.json slot: publicnode serves the
+  // header; lodestar keeps headers for about ten hours and responds to an older slot as below (11/17).
+  const day29 = slotTime(SHIPPED_CHECKPOINT.slot) + 29 * 24 * 3600 + 60;
+  const lodestar404 = (slot: number) => new Response(JSON.stringify({ code: 404, message: `Block not found for id '${slot}'` }), { status: 404, headers: { 'content-type': 'application/json' } });
+  const beacons =
+    (c: { root: string; slot: number }, publicnode: () => Response = () => new Response(JSON.stringify({ execution_optimistic: false, finalized: true, data: { root: c.root, canonical: true } }))) =>
+    async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.includes('checkpoint.json')) return new Response(JSON.stringify(c));
+      if (u.startsWith(`${BEACON_APIS[0]}/eth/v1/beacon/headers/${c.slot}`)) return publicnode();
+      if (u.startsWith(`${BEACON_APIS[1]}/eth/v1/beacon/headers/${c.slot}`)) return lodestar404(c.slot);
+      throw new Error(`unreachable ${u}`);
+    };
+
+  it('past the 29-day point, a beacon API that responds with an HTTP error (lodestar: 404 for a past slot) is skipped, not a disagreement', async () => {
+    expect(BEACON_APIS[1]).toBe('https://lodestar-mainnet.chainsafe.io');
+    expect(await chooseCheckpoint({ fetch: beacons(newer) as typeof fetch, nowSec: () => day29 })).toEqual(newer);
+    // A response without `data` is skipped too; one that names another root still refuses.
+    const noData = beacons(newer, () => new Response(JSON.stringify({ code: 200, message: 'ok' })));
+    await expect(chooseCheckpoint({ fetch: noData as typeof fetch, nowSec: () => day29 })).rejects.toMatchObject({ code: -32099, data: { kind: 'anchor-stale-checkpoint', detail: 'no beacon API could confirm the fetched checkpoint' } });
+    const other = beacons(newer, () => new Response(JSON.stringify({ data: { root: `0x${'cd'.repeat(32)}`, canonical: true } })));
+    await expect(chooseCheckpoint({ fetch: other as typeof fetch, nowSec: () => day29 })).rejects.toMatchObject({ code: -32099, data: { kind: 'anchor-stale-checkpoint' } });
+    const notCanonical = beacons(newer, () => new Response(JSON.stringify({ data: { root: newer.root, canonical: false } })));
+    await expect(chooseCheckpoint({ fetch: notCanonical as typeof fetch, nowSec: () => day29 })).rejects.toMatchObject({ code: -32099 });
+    const down = beacons(newer, () => new Response('bad gateway', { status: 502 }));
+    await expect(chooseCheckpoint({ fetch: down as typeof fetch, nowSec: () => day29 })).rejects.toMatchObject({ code: -32099, data: { detail: 'no beacon API could confirm the fetched checkpoint' } });
+  });
+
+  it('a client started past the 29-day point verifies with the default beacon APIs, lodestar responding 404', async () => {
+    const w = fullWorld();
+    w.nowSec = day29;
+    const head = blockOf('ethereum-26391511.json');
+    headAt(w, 1, head);
+    const fake = beacons(newer);
+    const fetchVia = (async (url: string | URL | Request, init?: RequestInit) => (/checkpoint\.json|beacon|lodestar/.test(String(url)) ? fake(url) : fetch(url, init))) as typeof fetch;
+    h = await harness({ chainId: 1, world: w, options: { checkpoint: undefined, fetch: fetchVia } });
+    expect(await h.client.request({ method: 'eth_blockNumber' })).toBe(toQuantity(head.number));
+    expect(h.events.at(-1)).toMatchObject({ status: 'verified', block: head });
+  });
+
+  it('a checkpoint choice that failed (the confirming beacon API down) is tried again on the next request', async () => {
+    const w = fullWorld();
+    w.nowSec = day29;
+    const head = blockOf('ethereum-26391511.json');
+    headAt(w, 1, head);
+    let down = true;
+    const fake = beacons(newer, () => (down ? new Response('unavailable', { status: 503 }) : new Response(JSON.stringify({ data: { root: newer.root, canonical: true } }))));
+    const fetchVia = (async (url: string | URL | Request, init?: RequestInit) => (/checkpoint\.json|beacon|lodestar/.test(String(url)) ? fake(url) : fetch(url, init))) as typeof fetch;
+    h = await harness({ chainId: 1, world: w, options: { checkpoint: undefined, fetch: fetchVia } });
+    await expect(h.client.request({ method: 'eth_blockNumber' })).rejects.toMatchObject({ code: -32099, data: { kind: 'anchor-stale-checkpoint' } });
+    down = false;
+    w.nowSec += 10;
+    expect(await h.client.request({ method: 'eth_blockNumber' })).toBe(toQuantity(head.number));
+  });
+
+  it('with a saved light client, a failing request makes one attempt at the start, which stands for 10 s; once one is chosen the saved light client is restored', async () => {
+    const w = fullWorld();
+    w.nowSec = day29;
+    const head = blockOf('ethereum-26391511.json');
+    headAt(w, 1, head);
+    let down = true;
+    let asked = 0;
+    const fake = beacons(newer, () => (asked++, down ? new Response('unavailable', { status: 503 }) : new Response(JSON.stringify({ data: { root: newer.root, canonical: true } }))));
+    const fetchVia = (async (url: string | URL | Request, init?: RequestInit) => (/checkpoint\.json|beacon|lodestar/.test(String(url)) ? fake(url) : fetch(url, init))) as typeof fetch;
+    const kept = new Map([['willow-rpc:light-client', '{"kept":true}']]);
+    const storage: KeyValueStorage = { get: (k) => kept.get(k) ?? null, set: (k, v) => void kept.set(k, v) };
+    const mods = mockModules(w);
+    let restores = 0;
+    const anchor = async () => {
+      const x: any = await mods.anchor();
+      return { ...x, Anchor: class extends x.Anchor { restore(...a: unknown[]) { restores++; return super.restore(...a); } } };
+    };
+    h = await harness({ chainId: 1, world: w, verifiers: { ...mods, anchor }, options: { checkpoint: undefined, fetch: fetchVia, storage } });
+    const unverifiable = { code: -32099, data: { kind: 'anchor-stale-checkpoint' } };
+    await expect(h.client.request({ method: 'eth_blockNumber' })).rejects.toMatchObject(unverifiable);
+    expect([asked, restores]).toEqual([1, 0]);
+    w.nowSec += 9;
+    await expect(h.client.request({ method: 'eth_blockNumber' })).rejects.toMatchObject(unverifiable);
+    expect(asked).toBe(1);
+    down = false;
+    w.nowSec += 1;
+    expect(await h.client.request({ method: 'eth_blockNumber' })).toBe(toQuantity(head.number));
+    expect([asked, restores]).toEqual([2, 1]);
+  });
+
+  it('a request with no start stops before the anchor module, so a slow first load of it makes no second attempt; a clock that goes back ends the wait', async () => {
+    const w = fullWorld();
+    w.nowSec = day29;
+    const head = blockOf('ethereum-26391511.json');
+    headAt(w, 1, head);
+    let down = true;
+    let asked = 0;
+    const fake = beacons(newer, () => (asked++, down ? new Response('unavailable', { status: 503 }) : new Response(JSON.stringify({ data: { root: newer.root, canonical: true } }))));
+    const fetchVia = (async (url: string | URL | Request, init?: RequestInit) => (/checkpoint\.json|beacon|lodestar/.test(String(url)) ? fake(url) : fetch(url, init))) as typeof fetch;
+    const mods = mockModules(w);
+    let loads = 0;
+    // The anchor module's first load takes past the 10 s a failed start stands.
+    const anchor = async () => {
+      if (loads++ === 0) w.nowSec += 11;
+      return mods.anchor();
+    };
+    h = await harness({ chainId: 1, world: w, verifiers: { ...mods, anchor }, options: { checkpoint: undefined, fetch: fetchVia, storage: false } });
+    await expect(h.client.request({ method: 'eth_blockNumber' })).rejects.toMatchObject({ code: -32099, data: { kind: 'anchor-stale-checkpoint' } });
+    expect([asked, loads]).toEqual([1, 0]);
+    // The clock goes back: the failure no longer stands.
+    w.nowSec -= 60;
+    headAt(w, 1, head);
+    down = false;
+    expect(await h.client.request({ method: 'eth_blockNumber' })).toBe(toQuantity(head.number));
+    expect(asked).toBe(2);
+  });
 });
 
 describe('self-review regressions, round 2', () => {
@@ -117,5 +231,23 @@ describe('self-review regressions, round 2', () => {
       ch.port1.close();
       ch.port2.close();
     }
+  });
+});
+
+describe('self-review regressions, round 3', () => {
+  const codeOf = (f: () => unknown): unknown => {
+    try {
+      f();
+    } catch (e) {
+      return (e as { code?: unknown }).code;
+    }
+    return 'no error';
+  };
+
+  it('a chain id the verifiers cannot take (over 32 bits) is refused (-32602), not truncated to another chain', () => {
+    const make = (chainId: number) => () => createVerifier({ chainId, verifiers: mockModules(new World()), storage: false }).close();
+    // The verifiers take a u32: 2^32 + 1 would be verified and anchored as chain 1, 2^32 + 8453 as Base.
+    for (const chainId of [2 ** 32 + 1, 2 ** 32, 2 ** 32 + 8453, Number.MAX_SAFE_INTEGER]) expect(codeOf(make(chainId))).toBe(-32602);
+    expect(codeOf(make(2 ** 32 - 1))).toBe('no error');
   });
 });

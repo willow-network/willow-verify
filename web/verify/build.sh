@@ -7,14 +7,16 @@
 # proofs), the state, call, estimate and trace verifier (zkvm/logset-guest/state-wasm, account
 # proofs, the EVMs and the tracers: Ethereum's, Unichain's from crates/op-exec, Robinhood Chain's
 # from crates/arb-exec) and the block confirmation (zkvm/logset-guest/anchor-wasm, Ethereum's light
-# client), each its own wasm module. @willow-network/rpc (web/client) ships the same modules.
+# client), each its own wasm module; and Stellar's (crates/stellar-verify-wasm, over
+# crates/stellar-rpc-verify: SCP signatures of the pinned Tier-1 quorum set, the header chain, the
+# result sets, Soroban events). @willow-network/rpc (web/client) ships the same modules.
 # Needs: the repo toolchain with the wasm32-unknown-unknown target, wasm-bindgen-cli 0.2.129
 # (cargo install wasm-bindgen-cli --version 0.2.129), and a C compiler and archiver for wasm32
 # (OpenVM's verifier links zstd's C code): WASM_CC / WASM_AR, by default clang and llvm-ar (Apple's
 # clang has no wasm32 target; Homebrew's llvm does). wasm-opt is used when it is on PATH. Every
 # file but index.html gets a content hash in its name, so they can be cached forever;
 # SHA256SUMS.txt lists them all. Target directories: LOGS_TARGET_DIR / OPENVM_TARGET_DIR /
-# ITEMS_TARGET_DIR / STATE_TARGET_DIR / ANCHOR_TARGET_DIR, else CARGO_TARGET_DIR, else each
+# ITEMS_TARGET_DIR / STATE_TARGET_DIR / ANCHOR_TARGET_DIR / STELLAR_TARGET_DIR, else CARGO_TARGET_DIR, else each
 # crate's own target/.
 #
 # The bytes are the same from any checkout. Cargo hashes a local dependency's absolute path into
@@ -41,10 +43,11 @@ test_build=
 
 [ "$(wasm-bindgen --version)" = "wasm-bindgen 0.2.129" ] || { echo "need wasm-bindgen-cli 0.2.129" >&2; exit 1; }
 repo="$(cd "$here/../.." && pwd)"
-# What the five crates build from, relative to the repo. The OpenVM pins are the program
+# What the six crates build from, relative to the repo. The OpenVM pins are the program
 # keys (program-keys.txt: their key tables), the verifying
 # keys (vk/) and the ELF hashes the trust module reads.
-SOURCES=(rust-toolchain.toml crates/arb-exec crates/network/src/beacon crates/op-exec crates/receipts-trie zkvm/anchor-guest/core
+SOURCES=(rust-toolchain.toml crates/arb-exec crates/network/src/beacon crates/op-exec crates/receipts-trie
+  crates/stellar-rpc-verify crates/stellar-verify-wasm zkvm/stellar/core zkvm/anchor-guest/core
   zkvm/beacon-cl-guest/core zkvm/window-anchor-guest/core zkvm/logset-guest/agg-core
   zkvm/logset-guest/anchor-verify zkvm/logset-guest/anchor-wasm zkvm/logset-guest/blockcheck
   zkvm/logset-guest/blockproof zkvm/logset-guest/chains zkvm/logset-guest/core
@@ -123,6 +126,7 @@ openvm=zkvm/logset-guest-openvm/verify-wasm
 items=zkvm/logset-guest/items-wasm
 state=zkvm/logset-guest/state-wasm
 anchor=zkvm/logset-guest/anchor-wasm
+stellar=crates/stellar-verify-wasm
 wasm $logs willow_logs_verify_wasm verifier "${LOGS_TARGET_DIR:-${CARGO_TARGET_DIR:-$repo/$logs/target}}" \
   "${test_build:+test-cutover}"
 # The test cutover is in the test build's log verifier and in no other build's.
@@ -138,6 +142,7 @@ wasm $openvm willow_logs_verify_openvm_wasm openvm "${OPENVM_TARGET_DIR:-${CARGO
 wasm $items willow_items_verify_wasm items "${ITEMS_TARGET_DIR:-${CARGO_TARGET_DIR:-$repo/$items/target}}" ""
 wasm $state willow_state_verify_wasm state "${STATE_TARGET_DIR:-${CARGO_TARGET_DIR:-$repo/$state/target}}" ""
 wasm $anchor willow_anchor_verify_wasm anchor "${ANCHOR_TARGET_DIR:-${CARGO_TARGET_DIR:-$repo/$anchor/target}}" ""
+wasm $stellar willow_stellar_verify_wasm stellar "${STELLAR_TARGET_DIR:-${CARGO_TARGET_DIR:-$repo/$stellar/target}}" ""
 
 h() { shasum -a 256 "$1" | cut -c1-12; }
 # hashed <src> <stem> <ext> [placeholder=value ...]: substitute, then name by content.
@@ -163,6 +168,9 @@ swasm=$(hashed "$tmp/state_bg.wasm" state wasm)
 sglue=$(hashed "$tmp/state.js" state js)
 awasm=$(hashed "$tmp/anchor_bg.wasm" anchor wasm)
 aglue=$(hashed "$tmp/anchor.js" anchor js)
+# Stellar's module is served beside the page for @willow-network/rpc/stellar; the page does not load it yet.
+stwasm=$(hashed "$tmp/stellar_bg.wasm" stellar wasm)
+stglue=$(hashed "$tmp/stellar.js" stellar js)
 worker=$(hashed "$here/worker.js" worker js "__ITEMS_GLUE__=$iglue" "__ITEMS_WASM__=$iwasm" "__STATE_GLUE__=$sglue" "__STATE_WASM__=$swasm" "__ANCHOR_GLUE__=$aglue" "__ANCHOR_WASM__=$awasm" "__OPENVM_GLUE__=$oglue" "__OPENVM_WASM__=$owasm" "__GLUE__=$glue" "__WASM__=$wasm")
 case "${CHECKPOINT:-}" in
   "") checkpoint="$(python3 "$here/checkpoint.py")" ;;
@@ -191,5 +199,5 @@ for kv in "__APP__=$app" "__STYLE__=$style" "__ICON__=$icon" "${subs[@]}"; do
   sed "s|${kv%%=*}|${kv#*=}|g" "$tmp/index.html" > "$tmp/y" && mv "$tmp/y" "$tmp/index.html"
 done
 mv "$tmp/index.html" "$out/index.html"
-(cd "$out" && shasum -a 256 index.html checkpoint.json "$wasm" "$glue" "$owasm" "$oglue" "$iwasm" "$iglue" "$swasm" "$sglue" "$awasm" "$aglue" "$worker" "$app" "$style" "$icon" "${fonts[@]}" > SHA256SUMS.txt)
+(cd "$out" && shasum -a 256 index.html checkpoint.json "$wasm" "$glue" "$owasm" "$oglue" "$iwasm" "$iglue" "$swasm" "$sglue" "$awasm" "$aglue" "$stwasm" "$stglue" "$worker" "$app" "$style" "$icon" "${fonts[@]}" > SHA256SUMS.txt)
 ls -l "$out"
