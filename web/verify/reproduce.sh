@@ -46,7 +46,8 @@ else
 fi
 
 # checkpoint.json is the build's {root, slot}; the server adds the other light clients' starts to it every day
-# (sepolia: a Sepolia beacon block, bnb: a BNB Smart Chain epoch block), which no build makes.
+# (sepolia: a Sepolia beacon block, bnb: a BNB Smart Chain epoch block, berachain: a Berachain CometBFT header, which
+# it writes every 6 hours), which no build makes.
 # same_checkpoint <served file> <built file>: the served one is the built one, with only those starts added.
 same_checkpoint() {
   local served built rest
@@ -55,7 +56,7 @@ same_checkpoint() {
   [ "$served" = "$built" ] && return 0
   rest="${served#"${built%\}},"}"
   [ "$rest" != "$served" ] || return 1
-  [[ $rest =~ ^\"sepolia\":\{\"root\":\"0x[0-9a-f]{64}\",\"slot\":[0-9]+\},\"bnb\":\{\"number\":[0-9]+,\"hash\":\"0x[0-9a-f]{64}\",\"time\":[0-9]+\}\}$ ]]
+  [[ $rest =~ ^\"sepolia\":\{\"root\":\"0x[0-9a-f]{64}\",\"slot\":[0-9]+\},\"bnb\":\{\"number\":[0-9]+,\"hash\":\"0x[0-9a-f]{64}\",\"time\":[0-9]+\}(,\"berachain\":\{\"height\":[0-9]+,\"hash\":\"0x[0-9a-f]{64}\",\"time\":[0-9]+\})?\}$ ]]
 }
 
 # Every file the build makes, fetched as served and hashed here.

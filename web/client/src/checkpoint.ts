@@ -105,14 +105,14 @@ export interface Starts {
  * The package's starts besides Ethereum's, from Willow's checkpoint.json of 2026-11-17: Sepolia's
  * slot 11,595,392 (after Gloas; a bootstrap Willow serves, the same root at
  * two Sepolia beacon APIs) and BNB's epoch block 134,042,000 (the same hash at three operators);
- * Berachain's height 28,982,466 (2026-11-18 05:27Z: a header the light client verified from the 11/17 start through
- * Willow's 80094 route, its block id the same at rpc.berachain.com, its payload's block hash the same at three EVM RPCs;
- * re-pinned at each build: the verifier takes a Berachain start for a day).
+ * Berachain's height 29,040,739 (2026-11-19 13:49Z: its block id and header hashes the same at Berachain's BeaconKit API
+ * and publicnode's CometBFT RPC, its beacon block under its data_hash, the block's payload hash the same at three EVM
+ * RPCs; re-pinned at each build: the verifier takes a start for a day, then checkpoint.json's, written every 6 hours).
  */
 export const SHIPPED_STARTS: Starts = {
   sepolia: { root: '0x9f8fea00eaa8dfa2562cf8f82cf80c03917665835a4523871d1d0bc2e7ba360a', slot: 11595392 },
   bnb: { number: 134042000, hash: '0x9541e3308418107982280b3c462a22286ed90f067a6cdd3d5a62dc4f508c9da9', time: 1794883596 },
-  berachain: { height: 28982466, hash: '0x1e9af731d45c8a4f19e4142e0fddf2077ec3d8a59e951724dd54d1108cb4f724', time: 1794979649 },
+  berachain: { height: 29040739, hash: '0xb806cf6291a47595638eb8d49b9c4b79ba32fcc739b79711f07b6080709e233f', time: 1795096195 },
 };
 
 const SEPOLIA_GENESIS_TIME = 1_655_733_600;
@@ -146,6 +146,10 @@ export interface StartsOptions {
   bnb?: BnbStart;
   berachain?: BeraStart;
   checkpointUrl?: string;
+  /** CometBFT APIs that must confirm checkpoint.json's Berachain start (its header hash at its height); none: not asked. */
+  cometApis?: string[] | false;
+  /** The starts in use: checkpoint.json's are taken only when newer than these too (a running client's refresh). */
+  after?: Partial<Starts>;
   fetch: typeof fetch;
   nowSec: () => number;
 }
@@ -153,8 +157,35 @@ export interface StartsOptions {
 /**
  * The other light clients' starts: the ones passed in; else the shipped ones; else, once one is
  * older than its verifier accepts (a day's margin), `checkpoint.json`'s `sepolia`, `bnb` or `berachain` when it
- * holds a newer one. A start that stays too old only fails the chains it anchors.
+ * holds a newer one (Berachain's confirmed by `cometApis` when given). A start that stays too old only fails the chains it anchors.
  */
+/** Berachain's consensus APIs: publicnode's CometBFT RPC and Berachain's BeaconKit node API (two operators). */
+export const BERA_COMET_APIS = ['https://berachain-beacon-rpc.publicnode.com', 'https://rpc.berachain.com'];
+
+/**
+ * Whether at least one of `apis` has `b.hash` as the header hash at `b.height` and none another; one that fails or
+ * has no header there is skipped. Asks CometBFT's RPC (`/commit`), then BeaconKit's node API (`/cometbft/v1/signed_header`).
+ */
+export async function confirmBeraStart(b: BeraStart, apis: string[], f: typeof fetch): Promise<boolean> {
+  // All APIs at once, under one deadline.
+  const signal = AbortSignal.timeout(15_000);
+  const get = async (url: string): Promise<any> => {
+    const r = await f(url, { headers: { accept: 'application/json' }, signal });
+    if (r.ok !== false) return r.json();
+    await r.body?.cancel().catch(() => undefined);
+    return null;
+  };
+  const idAt = async (api: string): Promise<unknown> => {
+    const base = api.replace(/\/+$/, '');
+    const id = (await get(`${base}/commit?height=${b.height}`).catch(() => null))?.result?.signed_header?.commit?.block_id?.hash;
+    return typeof id === 'string' ? id : (await get(`${base}/cometbft/v1/signed_header/${b.height}`))?.data?.commit?.block_id?.hash;
+  };
+  const ids = (await Promise.all(apis.map((api) => idAt(api).catch(() => undefined)))).filter(
+    (id): id is string => typeof id === 'string' && /^(0x)?[0-9a-fA-F]{64}$/.test(id),
+  );
+  return ids.length > 0 && ids.every((id) => `0x${id.replace(/^0x/, '').toLowerCase()}` === b.hash.toLowerCase());
+}
+
 export async function chooseStarts(o: StartsOptions): Promise<Starts> {
   const now = o.nowSec();
   const sepoliaOld = (c: Checkpoint) => now - (SEPOLIA_GENESIS_TIME + 12 * c.slot) >= MAX_START_AGE_SECS - 24 * 3600;
@@ -176,7 +207,14 @@ export async function chooseStarts(o: StartsOptions): Promise<Starts> {
     }
     if (!o.sepolia && isCheckpoint(c?.sepolia) && c.sepolia.slot > sepolia.slot) sepolia = { root: c.sepolia.root, slot: c.sepolia.slot };
     if (!o.bnb && isBnbStart(c?.bnb) && c.bnb.number > bnb.number) bnb = { number: c.bnb.number, hash: c.bnb.hash, time: c.bnb.time };
-    if (!o.berachain && isBeraStart(c?.berachain) && c.berachain.height > berachain.height) {
+    const comet = o.cometApis || [];
+    const after = o.after ?? {};
+    if (
+      !o.berachain &&
+      isBeraStart(c?.berachain) &&
+      c.berachain.height > Math.max(berachain.height, after.berachain?.height ?? 0) &&
+      (!comet.length || (await confirmBeraStart(c.berachain, comet, o.fetch)))
+    ) {
       berachain = { height: c.berachain.height, hash: c.berachain.hash, time: c.berachain.time };
     }
   }

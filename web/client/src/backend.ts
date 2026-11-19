@@ -55,6 +55,8 @@ export interface Backend {
   anchorRestore(saved: string, now: number, lightClient?: LightClientName): Promise<{ ok: boolean; kind?: string; message?: string }>;
   anchorBootstrap(response: string, now: number, lightClient?: LightClientName): Promise<{ ok: boolean; kind?: string; message?: string; period?: number }>;
   anchorUpdates(response: string, lightClient?: LightClientName): Promise<{ ok: boolean; kind?: string; message?: string; period?: number | null }>;
+  /** `Anchor.start`: light client `lightClient` starts over from `start` (JSON, as `lightClient()` passes it); it bootstraps again. */
+  anchorStart(lightClient: LightClientName, start: string): Promise<{ ok: boolean; kind?: string; message?: string }>;
   /**
    * `Anchor.verify`, and after a pass (with `wantSaved`) what to keep of the light client that
    * anchors the chain. A `need-bootstrap` resets the light client it names.
@@ -179,6 +181,12 @@ export class InlineBackend implements Backend {
   async anchorBootstrap(response: string, now: number, lightClient?: LightClientName) {
     const a = await this.lightClient();
     return parse<{ ok: boolean }>(lightClient ? InlineBackend.other(a, lightClient).bootstrapFor(lightClient, response, now) : a.bootstrap(response, now));
+  }
+
+  async anchorStart(lightClient: LightClientName, start: string) {
+    const a = await this.lightClient();
+    if (!a.start) return { ok: false, message: `this build has no ${lightClient} light client` };
+    return parse<{ ok: boolean; kind?: string; message?: string }>(a.start(lightClient, start));
   }
 
   async anchorUpdates(response: string, lightClient?: LightClientName) {

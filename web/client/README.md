@@ -49,6 +49,7 @@ to 0, so a failed verification is never asked again. `new WillowProvider(options
 | `checkpoint` | the shipped one | the light client's start `{root, slot}` |
 | `checkpointUrl`, `beaconApis` | Willow's `checkpoint.json`; two beacon APIs in Node | a newer start once the shipped one is 29 days old: at least one beacon API confirms it and none disagrees (one that fails or has no header for that slot is skipped) |
 | `sepoliaCheckpoint` | the shipped one | Sepolia's light client's start `{root, slot}` (Sepolia and the testnets); `checkpoint.json`'s `sepolia` once the shipped one is 29 days old |
+| `berachainStart`, `cometApis` | the shipped one; two CometBFT APIs on Berachain (browsers too: a Content-Security-Policy must allow `berachain-beacon-rpc.publicnode.com` and `rpc.berachain.com`) | Berachain's light client's start `{height, hash, time}`, a CometBFT header; `checkpoint.json`'s `berachain` once the shipped one is 6 hours old (the verifier refuses a day), when at least one CometBFT API has that header hash and none another. A client running past its start's life takes `checkpoint.json`'s newer one |
 | `bnbStart` | the shipped one | BNB's light client's start `{number, hash, time}`, an epoch block; `checkpoint.json`'s `bnb` once the shipped one is a day old (the verifier refuses 7; a cold client walks every epoch since its start) |
 | `storage` | localStorage, or `~/.cache/willow-rpc/` in Node | where the light client's committees are kept (verified again when read); `false` for none |
 | `worker` | browsers true, Node false | verify in a Web Worker |

@@ -199,5 +199,15 @@ for kv in "__APP__=$app" "__STYLE__=$style" "__ICON__=$icon" "${subs[@]}"; do
   sed "s|${kv%%=*}|${kv#*=}|g" "$tmp/index.html" > "$tmp/y" && mv "$tmp/y" "$tmp/index.html"
 done
 mv "$tmp/index.html" "$out/index.html"
-(cd "$out" && shasum -a 256 index.html checkpoint.json "$wasm" "$glue" "$owasm" "$oglue" "$iwasm" "$iglue" "$swasm" "$sglue" "$awasm" "$aglue" "$stwasm" "$stglue" "$worker" "$app" "$style" "$icon" "${fonts[@]}" > SHA256SUMS.txt)
+# The licenses of the third-party code in the page: what the wasm modules link (web/client ships the same file),
+# then the fonts' (SIL Open Font License).
+{
+  cat "$repo/web/client/THIRD-PARTY-LICENSES.md"
+  printf '# Third-party licenses of the fonts\n\nThe page'"'"'s fonts are served beside it under the SIL Open Font License 1.1.\n'
+  for f in "schibsted-grotesk:Schibsted Grotesk (sans, sansmedium, sansbold)" "newsreader:Newsreader (serif, serifitalic)" "jetbrains-mono:JetBrains Mono (mono)"; do
+    printf '\n## %s\n\n' "${f#*:}"
+    cat "$here/fonts/LICENSE-${f%%:*}.txt"
+  done
+} > "$out/THIRD-PARTY-LICENSES.txt"
+(cd "$out" && shasum -a 256 index.html checkpoint.json THIRD-PARTY-LICENSES.txt "$wasm" "$glue" "$owasm" "$oglue" "$iwasm" "$iglue" "$swasm" "$sglue" "$awasm" "$aglue" "$stwasm" "$stglue" "$worker" "$app" "$style" "$icon" "${fonts[@]}" > SHA256SUMS.txt)
 ls -l "$out"

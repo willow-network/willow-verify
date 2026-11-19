@@ -1,6 +1,6 @@
 import { Anchors, atLeast, L1_CHAINS, type Anchored, type Level } from './anchor.js';
-import { InlineBackend, isNoVerifier, type AnchorStart, type Backend } from './backend.js';
-import { BEACON_APIS, chooseCheckpoint, chooseStarts, type BeraStart, type BnbStart, type Checkpoint } from './checkpoint.js';
+import { InlineBackend, isNoVerifier, lightClientOf, type AnchorStart, type Backend } from './backend.js';
+import { BEACON_APIS, BERA_COMET_APIS, chooseCheckpoint, chooseStarts, type BeraStart, type BnbStart, type Checkpoint } from './checkpoint.js';
 import { WillowRpcError, WillowUnverifiableError, WillowVerificationError } from './errors.js';
 import { hexToBytes, isAddress, isHash, keccakHex, sameHex, slotKey, toNumber, toQuantity } from './hex.js';
 import { Batcher, MAX_BATCH, type Reply } from './http.js';
@@ -14,6 +14,7 @@ import type {
   FeesProven,
   ItemKind,
   ItemVerified,
+  LightClientName,
   LogsVerified,
   Requested,
   StateKind,
@@ -65,6 +66,8 @@ export interface WillowOptions {
   bnbStart?: BnbStart;
   /** Berachain's light client's starting point, a CometBFT header, in place of the shipped one. */
   berachainStart?: BeraStart;
+  /** CometBFT APIs that must confirm checkpoint.json's Berachain start; default two on Berachain (80094), in browsers too; false: none. */
+  cometApis?: string[] | false;
   /** Beacon APIs that must confirm a fetched checkpoint; default two in Node, none in browsers. */
   beaconApis?: string[] | false;
   /** Where the light client's committees are kept; default localStorage, or ~/.cache/willow-rpc in Node; false: nowhere. */
@@ -120,7 +123,7 @@ export interface WillowVerifier {
   close(): void;
 }
 
-export const VERSION = '0.3.0';
+export const VERSION = '0.3.1';
 const ORIGIN = 'https://api.willow.tech';
 const RPC_PATH = /^(.*\/rpc\/)(\d+)(\/.*)?$/;
 /** eth_getLogs over at most this many blocks goes by block-receipts proofs. */
@@ -133,6 +136,8 @@ const NOT_FOUND_TX = 'not found in this store: transaction ';
 const FILTER_IDLE_MS = 5 * 60 * 1000;
 /** How long a failed choice of the light clients' starts stands before a request tries again. */
 const START_RETRY_MS = 10_000;
+/** How often a light client whose start aged out asks for a newer one (checkpoint.json). */
+const REFRESH_RETRY_MS = 60_000;
 /** The most blocks one `eth_getFilterChanges` on a block filter returns, oldest first; the next poll goes on from there. */
 export const BLOCK_FILTER_MAX = 2000;
 /** The filter methods served here, from the verified methods; the server knows none of their ids. */
@@ -345,6 +350,9 @@ class Client implements WillowVerifier {
   private readonly now: () => number;
   private checkpoint: Promise<AnchorStart> | null = null;
   private checkpointFailedAt: number | null = null;
+  /** Starts taken after the first choice, when a light client's start aged out (refreshStart). */
+  private newerStarts: Pick<AnchorStart, 'sepolia' | 'bnb' | 'berachain'> = {};
+  private startRefreshedAt = new Map<LightClientName, number>();
   private chainCheck: Promise<void> | null = null;
   private memo = new Map<string, Promise<unknown>>();
   private results = new Lru<unknown>(1024, 16 << 20);
@@ -371,6 +379,9 @@ class Client implements WillowVerifier {
     const fetchImpl = o.fetch ?? globalThis.fetch.bind(globalThis);
     this.batcher = new Batcher({ fetch: fetchImpl, windowMs: o.batchWindowMs ?? 5, maxBatch: MAX_BATCH });
     const nowSec = () => Math.floor(this.now() / 1000);
+    // Only a Berachain client uses Berachain's start: no other asks the CometBFT APIs. Browsers ask them too (both send
+    // CORS headers): Berachain's start lasts a day, so checkpoint.json's is the one nearly every client starts from.
+    const cometApis = lightClientOf(o.chainId) !== 'berachain' ? false : (o.cometApis ?? BERA_COMET_APIS);
     // The starts, chosen once; a failure stands for START_RETRY_MS (or until the clock goes back), then the next ask tries again.
     const checkpoint = () => {
       const since = this.checkpointFailedAt === null ? null : this.now() - this.checkpointFailedAt;
@@ -384,7 +395,7 @@ class Client implements WillowVerifier {
             fetch: fetchImpl,
             nowSec,
           }),
-          chooseStarts({ sepolia: o.sepoliaCheckpoint, bnb: o.bnbStart, berachain: o.berachainStart, checkpointUrl: o.checkpointUrl, fetch: fetchImpl, nowSec }),
+          chooseStarts({ sepolia: o.sepoliaCheckpoint, bnb: o.bnbStart, berachain: o.berachainStart, checkpointUrl: o.checkpointUrl, cometApis, fetch: fetchImpl, nowSec }),
         ]).then(([c, starts]) => ({ ...c, ...starts }));
         this.checkpoint = p;
         this.checkpointFailedAt = null;
@@ -394,19 +405,41 @@ class Client implements WillowVerifier {
       }
       return this.checkpoint;
     };
+    // The starts in use: the first choice, with any newer one a light client took since.
+    const current = async (): Promise<AnchorStart> => ({ ...(await checkpoint()), ...this.newerStarts });
+    // A light client whose start aged out (Berachain's verifier takes one for a day) takes checkpoint.json's newer
+    // one, asked at most once per REFRESH_RETRY_MS; Ethereum's checkpoint is not changed here.
+    const refreshStart = async (lc: LightClientName): Promise<boolean> => {
+      const t = this.now();
+      const last = this.startRefreshedAt.get(lc);
+      if (last !== undefined && t - last >= 0 && t - last < REFRESH_RETRY_MS) return false;
+      this.startRefreshedAt.set(lc, t);
+      const cur = await current();
+      const fresh = await chooseStarts({ sepolia: o.sepoliaCheckpoint, bnb: o.bnbStart, berachain: o.berachainStart, checkpointUrl: o.checkpointUrl, cometApis, after: cur, fetch: fetchImpl, nowSec });
+      let start: unknown;
+      if (lc === 'sepolia' && fresh.sepolia.slot > (cur.sepolia?.slot ?? -1)) start = fresh.sepolia;
+      else if (lc === 'bnb' && fresh.bnb.number > (cur.bnb?.number ?? -1)) start = { number: fresh.bnb.number, hash: fresh.bnb.hash };
+      else if (lc === 'berachain' && fresh.berachain.height > (cur.berachain?.height ?? -1)) start = { height: fresh.berachain.height, hash: fresh.berachain.hash };
+      else return false;
+      const r = await this.backend.anchorStart(lc, JSON.stringify(start));
+      if (!r.ok) return false;
+      this.newerStarts = { ...this.newerStarts, [lc]: fresh[lc] };
+      return true;
+    };
     const worker = o.worker ?? (!isNode() && typeof Worker !== 'undefined' && !o.verifiers);
     if (worker && o.verifiers) throw new Error('verifiers are injected into this thread: pass worker: false');
-    this.backend = worker ? new WorkerBackend(spawnWorker() as any, checkpoint) : new InlineBackend(o.verifiers ?? packageModules(), checkpoint);
+    this.backend = worker ? new WorkerBackend(spawnWorker() as any, current) : new InlineBackend(o.verifiers ?? packageModules(), current);
     const storage = o.storage === false ? null : (o.storage ?? defaultStorage());
     this.anchors = new Anchors({
       backend: this.backend,
       rpc: (chainId, method, params) => this.batcher.call(chainId === 1 ? this.lcUrl : chainId === this.chainId ? this.url : withChain(this.url, chainId)!, method, params),
       storage,
       checkpointRoot: async (lc) => {
-        const c = await checkpoint();
+        const c = await current();
         return lc === 'sepolia' ? c.sepolia!.root : lc === 'bnb' ? c.bnb!.hash : lc === 'berachain' ? c.berachain!.hash : c.root;
       },
-      startHeight: async (lc) => (lc === 'berachain' ? (await checkpoint()).berachain?.height : undefined),
+      startHeight: async (lc) => (lc === 'berachain' ? (await current()).berachain?.height : undefined),
+      refreshStart,
       minLevel: o.minLevel ?? 'signed',
       headMaxAgeMs: (c) => o.headMaxAgeMs ?? (L1_CHAINS.has(c) ? 12_000 : 2_000),
       maxHeadAgeSec: o.maxHeadAgeSec ?? 600,

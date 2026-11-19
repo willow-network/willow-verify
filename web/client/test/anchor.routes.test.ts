@@ -24,6 +24,7 @@ function scripted(steps: Step[], saved = '{"kept":1}') {
     anchorRestore: async (_s, _n, lc?: LightClientName) => (calls.push(`restore:${lc ?? 'ethereum'}`), { ok: true }),
     anchorBootstrap: async (_r, _n, lc?: LightClientName) => (calls.push(`bootstrap:${lc ?? 'ethereum'}`), { ok: true, period: 1 }),
     anchorUpdates: async (_r, lc?: LightClientName) => (calls.push(`updates:${lc ?? 'ethereum'}`), { ok: true, period: 2 }),
+    anchorStart: async (lc) => (calls.push(`start:${lc}`), { ok: true }),
     anchorVerify: async () => {
       const r = steps.shift()!;
       return { result: r, saved: r.ok ? saved : null };
@@ -52,8 +53,15 @@ const ok = (extra: Partial<AnchorVerified> = {}): AnchorVerified => ({ ok: true,
 const need = (kind: 'need-bootstrap' | 'need-updates', lightClient?: LightClientName, from = 0, count = 0): AnchorFailure =>
   ({ ok: false, kind, message: '', ...(lightClient ? { lightClient } : {}), ...(kind === 'need-updates' ? { from, count } : {}) }) as AnchorFailure;
 
-function anchors(backend: Backend, rpc: ReturnType<typeof willow>['rpc'], storage: KeyValueStorage | null, minLevel: 'signed' | 'final' = 'signed') {
+function anchors(
+  backend: Backend,
+  rpc: ReturnType<typeof willow>['rpc'],
+  storage: KeyValueStorage | null,
+  minLevel: 'signed' | 'final' = 'signed',
+  refreshStart?: (lc: LightClientName) => Promise<boolean>,
+) {
   return new Anchors({
+    refreshStart,
     backend,
     rpc,
     storage,
@@ -217,8 +225,93 @@ describe("Berachain's start", () => {
     expect(junk.berachain).toEqual(SHIPPED_STARTS.berachain);
   });
 
+  it("is checkpoint.json's only when a CometBFT API has its header hash and none another", async () => {
+    const later = () => SHIPPED_STARTS.berachain.time + 7 * 3600;
+    const apis = (ids: Record<string, string | null>) =>
+      (async (u: string) => {
+        const url = String(u);
+        if (url.endsWith('/checkpoint.json')) return { ok: true, json: async () => ({ berachain: newer }) };
+        const api = Object.keys(ids).find((k) => url.startsWith(k));
+        const id = api ? ids[api] : null;
+        if (id === null || !url.includes(`height=${newer.height}`)) return { ok: false, json: async () => ({}) };
+        return { ok: true, json: async () => ({ result: { signed_header: { commit: { block_id: { hash: id.slice(2).toUpperCase() } } } } }) };
+      }) as unknown as typeof fetch;
+    const cp = 'https://w.test/checkpoint.json';
+    const pick = (ids: Record<string, string | null>) => chooseStarts({ fetch: apis(ids), checkpointUrl: cp, cometApis: Object.keys(ids), nowSec: later, ...pinned() });
+    expect((await pick({ 'https://a.test': newer.hash, 'https://b.test': null })).berachain).toEqual(newer);
+    expect((await pick({ 'https://a.test': newer.hash, 'https://b.test': `0x${'ef'.repeat(32)}` })).berachain).toEqual(SHIPPED_STARTS.berachain);
+    expect((await pick({ 'https://a.test': null, 'https://b.test': null })).berachain).toEqual(SHIPPED_STARTS.berachain);
+  });
+
+  it("is not asked of the CometBFT APIs unless it is newer than the start in use (after)", async () => {
+    const asked: string[] = [];
+    const f = (async (u: string) => {
+      asked.push(String(u));
+      return String(u).endsWith('/checkpoint.json') ? { ok: true, json: async () => ({ berachain: newer }) } : { ok: false, body: null, json: async () => ({}) };
+    }) as unknown as typeof fetch;
+    const got = await chooseStarts({ fetch: f, checkpointUrl: 'https://w.test/checkpoint.json', cometApis: ['https://a.test'], after: { berachain: newer }, nowSec: () => SHIPPED_STARTS.berachain.time + 7 * 3600, ...pinned() });
+    expect(got.berachain).toEqual(SHIPPED_STARTS.berachain);
+    expect(asked).toEqual(['https://w.test/checkpoint.json']);
+  });
+
   /** The other starts passed in, so only Berachain's is chosen. */
   function pinned() {
     return { sepolia: SHIPPED_STARTS.sepolia, bnb: SHIPPED_STARTS.bnb };
   }
+});
+
+describe('a light client whose start aged out', () => {
+  const stale = (): AnchorFailure => ({ ok: false, kind: 'stale-checkpoint', message: "this page's starting point on Berachain is more than a day old" }) as AnchorFailure;
+
+  it('takes a newer start once and bootstraps from it (a long-running client keeps Berachain)', async () => {
+    const { backend, calls } = scripted([stale(), need('need-bootstrap', 'berachain'), ok({ path: 'cometbft', anchorTime: 999_999_990 })]);
+    const refreshed: LightClientName[] = [];
+    const a = anchors(backend, willow().rpc, null, 'signed', async (lc) => (refreshed.push(lc), true));
+    await expect(a.verify(80094, 16, `0x${'11'.repeat(32)}`, '{}')).resolves.toMatchObject({ ok: true });
+    expect(refreshed).toEqual(['berachain']);
+    expect(calls).toEqual(['bootstrap:berachain']);
+  });
+
+  it('refuses as before when there is no newer start, or the newer one is stale too', async () => {
+    const none = scripted([stale()]);
+    await expect(anchors(none.backend, willow().rpc, null, 'signed', async () => false).verify(80094, 16, `0x${'11'.repeat(32)}`, '{}')).rejects.toMatchObject({
+      code: -32099,
+      data: { kind: 'anchor-stale-checkpoint' },
+    });
+    const twice = scripted([stale(), stale()]);
+    const refreshed: LightClientName[] = [];
+    await expect(
+      anchors(twice.backend, willow().rpc, null, 'signed', async (lc) => (refreshed.push(lc), true)).verify(80094, 16, `0x${'11'.repeat(32)}`, '{}'),
+    ).rejects.toMatchObject({ code: -32099, data: { kind: 'anchor-stale-checkpoint' } });
+    expect(refreshed).toEqual(['berachain']);
+  });
+
+  it('takes a newer start when the bootstrap itself refuses the old one (never bootstrapped, as the wasm checks)', async () => {
+    const { backend, calls } = scripted([need('need-bootstrap', 'berachain'), need('need-bootstrap', 'berachain'), ok({ path: 'cometbft', anchorTime: 999_999_990 })]);
+    let boots = 0;
+    backend.anchorBootstrap = async (_r, _n, lc) => {
+      calls.push(`bootstrap:${lc}`);
+      return ++boots === 1 ? { ok: false, kind: 'stale-checkpoint', message: "this page's starting point on Berachain is more than a day old" } : { ok: true, period: 1 };
+    };
+    const refreshed: LightClientName[] = [];
+    const a = anchors(backend, willow().rpc, null, 'signed', async (lc) => (refreshed.push(lc), true));
+    await expect(a.verify(80094, 16, `0x${'11'.repeat(32)}`, '{}')).resolves.toMatchObject({ ok: true });
+    expect(refreshed).toEqual(['berachain']);
+    expect(calls).toEqual(['bootstrap:berachain', 'bootstrap:berachain']);
+  });
+
+  it('a refresh does not use up a catch-up round (a bootstrap and two updates still fit)', async () => {
+    const steps = [stale(), need('need-bootstrap', 'berachain'), need('need-updates', 'berachain', 1, 1), need('need-updates', 'berachain', 2, 1), ok({ path: 'cometbft', anchorTime: 999_999_990 })];
+    const { backend } = scripted(steps);
+    await expect(anchors(backend, willow().rpc, null, 'signed', async () => true).verify(80094, 16, `0x${'11'.repeat(32)}`, '{}')).resolves.toMatchObject({ ok: true });
+  });
+
+  it("leaves Ethereum's checkpoint alone (its staleness is chosen at start, not here)", async () => {
+    const { backend } = scripted([{ ...stale(), message: 'the checkpoint is more than 30 days old' } as AnchorFailure]);
+    const refreshed: LightClientName[] = [];
+    await expect(anchors(backend, willow().rpc, null, 'signed', async (lc) => (refreshed.push(lc), true)).verify(1, 16, `0x${'11'.repeat(32)}`, '{}')).rejects.toMatchObject({
+      data: { kind: 'anchor-stale-checkpoint' },
+    });
+    expect(refreshed).toEqual([]);
+  });
 });

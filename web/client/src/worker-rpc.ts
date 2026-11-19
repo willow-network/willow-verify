@@ -121,6 +121,9 @@ export class WorkerBackend implements Backend {
   anchorUpdates(...a: Parameters<Backend['anchorUpdates']>) {
     return this.call('anchorUpdates', a);
   }
+  anchorStart(...a: Parameters<Backend['anchorStart']>) {
+    return this.call('anchorStart', a);
+  }
   anchorVerify(...a: Parameters<Backend['anchorVerify']>) {
     return this.call('anchorVerify', a);
   }

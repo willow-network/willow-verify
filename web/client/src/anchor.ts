@@ -34,6 +34,12 @@ export interface AnchorsOptions {
   checkpointRoot: (lightClient?: LightClientName) => Promise<string>;
   /** Berachain's start height, asked for with its hash (its API reads headers by height). */
   startHeight?: (lightClient: LightClientName) => Promise<number | undefined>;
+  /**
+   * A light client other than Ethereum's whose start aged out (`stale-checkpoint`): give it a newer
+   * start if there is one (checkpoint.json's), and say whether it got one. Berachain's verifier takes
+   * a start for a day, so a client running longer needs this to keep anchoring.
+   */
+  refreshStart?: (lightClient: LightClientName) => Promise<boolean>;
   minLevel: Level;
   headMaxAgeMs: (chainId: number) => number;
   /** How old the newest block may be. */
@@ -65,10 +71,15 @@ const L2_SIGNED_SECS = 3 * 3600;
 
 /** The anchor's failure as the client's error: a verdict, or why the block can't be anchored. */
 export function anchorFailure(r: AnchorFailure, method?: string): Error {
-  if (r.kind === 'rejected') return new WillowVerificationError('anchor-rejected', r.message, method);
-  if (r.kind === 'malformed-input') return new WillowVerificationError('anchor-malformed', r.message, method);
-  if (r.kind === 'internal') return new WillowVerificationError('internal', r.message, method);
-  return new WillowUnverifiableError(`anchor-${r.kind}`, r.message, method);
+  // The anchor module is the verify page's: its texts speak of "this page" (its starting point, checkpoint, what it knows).
+  const message = String(r.message ?? '')
+    .replace(/\bthis page's\b/g, "the light client's")
+    .replace(/\bthis page follows\b/g, 'the light client follows')
+    .replace(/\bthis page\b/g, 'this verifier');
+  if (r.kind === 'rejected') return new WillowVerificationError('anchor-rejected', message, method);
+  if (r.kind === 'malformed-input') return new WillowVerificationError('anchor-malformed', message, method);
+  if (r.kind === 'internal') return new WillowVerificationError('internal', message, method);
+  return new WillowUnverifiableError(`anchor-${r.kind}`, message, method);
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -124,13 +135,16 @@ export class Anchors {
    * The light client's bootstrap: Ethereum's on chain 1's route, another's on the verified chain's
    * own route (where Willow serves that light client's data).
    */
-  private async bootstrap(chainId: number, lc: LightClientName | undefined, method?: string): Promise<void> {
+  private async bootstrap(chainId: number, lc: LightClientName | undefined, method?: string): Promise<AnchorFailure | null> {
     const root = await this.o.checkpointRoot(lc);
     const height = lc === 'berachain' ? await this.o.startHeight?.(lc) : undefined;
     const reply = await this.o.rpc(lc ? chainId : 1, 'willow_lightClientBootstrap', height === undefined ? [root] : [root, height]);
     if (reply.value.error) throw this.refused(reply, 'willow_lightClientBootstrap', method);
     const r = await ran(this.o.backend.anchorBootstrap(reply.text, this.nowSec(), lc), method);
+    // Another light client's start too old to bootstrap from: returned, so verify can take a newer one.
+    if (!r.ok && r.kind === 'stale-checkpoint' && lc) return r as AnchorFailure;
     if (!r.ok) throw anchorFailure(r as AnchorFailure, method);
+    return null;
   }
 
   private async updates(chainId: number, lc: LightClientName | undefined, from: number, count: number, method?: string): Promise<void> {
@@ -160,7 +174,16 @@ export class Anchors {
     const run = async (): Promise<AnchorVerified> => {
       await ran(this.restore(), method);
       let caughtUp = false;
+      let refreshed = false;
       const key = keyOf(lightClientOf(chainId));
+      // Once per request: a light client other than Ethereum's whose start aged out takes a newer one, then bootstraps from it.
+      const refresh = async (lc: LightClientName | undefined): Promise<boolean> => {
+        if (refreshed || !lc || !this.o.refreshStart) return false;
+        refreshed = true;
+        if (!(await this.o.refreshStart(lc).catch(() => false))) return false;
+        this.kept.delete(key);
+        return true;
+      };
       for (let round = 0; ; round++) {
         const wantSaved = !!this.o.storage && (caughtUp || !this.kept.has(key));
         const { result: r, saved } = await ran(this.o.backend.anchorVerify(chainId, number, hash, body, this.nowSec(), wantSaved), method);
@@ -171,13 +194,24 @@ export class Anchors {
           }
           return r;
         }
+        // A refresh is not a catch-up round.
+        if (r.kind === 'stale-checkpoint' && (await refresh(r.lightClient ?? lightClientOf(chainId)))) {
+          round--;
+          continue;
+        }
         if (r.kind !== 'need-bootstrap' && r.kind !== 'need-updates') throw anchorFailure(r, method);
         if (round >= CATCH_UP_ROUNDS) {
           throw new WillowUnverifiableError('anchor-unreachable', "Willow's light-client data did not reach the validators who signed this block", method);
         }
         const lc = r.lightClient;
-        if (r.kind === 'need-bootstrap') await this.bootstrap(chainId, lc, method);
-        else await this.updates(chainId, lc, r.from as number, r.count as number, method);
+        if (r.kind === 'need-bootstrap') {
+          const stale = await this.bootstrap(chainId, lc, method);
+          if (stale) {
+            if (!(await refresh(lc))) throw anchorFailure(stale, method);
+            round--;
+            continue;
+          }
+        } else await this.updates(chainId, lc, r.from as number, r.count as number, method);
         caughtUp = true;
       }
     };

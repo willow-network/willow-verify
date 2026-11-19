@@ -251,3 +251,151 @@ describe('self-review regressions, round 3', () => {
     expect(codeOf(make(2 ** 32 - 1))).toBe('no error');
   });
 });
+
+describe('anchor failure texts', () => {
+  it("speak of the light client and this verifier, not the page, in the package", async () => {
+    const { anchorFailure } = await import('../src/anchor.js');
+    const cases: [string, string][] = [
+      ["this page's starting point on Berachain is more than a day old", "the light client's starting point on Berachain is more than a day old"],
+      ["this page's starting point on BNB is more than 7 days old", "the light client's starting point on BNB is more than 7 days old"],
+      ['the bootstrap is not this page\'s starting header on Berachain', "the bootstrap is not the light client's starting header on Berachain"],
+      ["BNB block 100 is before this page's starting point", "BNB block 100 is before the light client's starting point"],
+      ['the bootstrap is not for this page\'s checkpoint', "the bootstrap is not for the light client's checkpoint"],
+      ['height 5 is not signed by two thirds of the validators this page follows alone', 'height 5 is not signed by two thirds of the validators the light client follows alone'],
+      ['CometBFT block protocol 12 is not one this page knows', 'CometBFT block protocol 12 is not one this verifier knows'],
+      ["Berachain's light client data is from an upgrade newer than this page", "Berachain's light client data is from an upgrade newer than this verifier"],
+    ];
+    for (const [wasm, want] of cases) {
+      const e = anchorFailure({ ok: false, kind: 'stale-checkpoint', message: wasm } as never, 'eth_blockNumber');
+      expect(e.message).toContain(want);
+      expect(e.message).not.toContain("this page's");
+    }
+  });
+});
+
+describe("a long-running client's Berachain start", () => {
+  it("is replaced by checkpoint.json's newer one once it ages out, and the light client bootstraps from it", async () => {
+    const { MockAnchor } = await import('./support/mock-verifiers.js');
+    const { SHIPPED_STARTS } = await import('../src/checkpoint.js');
+    const shipped = SHIPPED_STARTS.berachain;
+    const newer = { height: shipped.height + 20_000, hash: `0x${'cd'.repeat(32)}`, time: shipped.time + 20 * 3600 };
+    const world = new World();
+    world.nowSec = shipped.time + 3600;
+    world.head(80094, { number: 100, hash: `0x${'01'.repeat(32)}` });
+    world.lightClient.bootstrap = { header: {} };
+    const asked: unknown[][] = [];
+    world.intercept = (_c, m, p) => void (m === 'willow_lightClientBootstrap' && asked.push(p));
+    const started: string[] = [];
+    let start = { height: 0, hash: '' };
+    let booted = false;
+    class Bera extends MockAnchor {
+      start(lc: string, s: string) {
+        started.push(`${lc} ${JSON.parse(s).height ?? ''}`);
+        if (lc === 'berachain') [start, booted] = [JSON.parse(s), false];
+        return '{"ok":true}';
+      }
+      bootstrapFor() {
+        booted = true;
+        return '{"ok":true,"period":0}';
+      }
+      updatesFor() {
+        return '{"ok":true,"period":1}';
+      }
+      restoreFor() {
+        return '{"ok":false}';
+      }
+      savedFor() {
+        return 'null';
+      }
+      resetFor() {}
+      verify(chainId: number, number: number, hash: string, response: string, now: number) {
+        if (chainId === 80094) {
+          const t = start.height === shipped.height ? shipped.time : newer.time;
+          if (now - t > 24 * 3600) return JSON.stringify({ ok: false, kind: 'stale-checkpoint', message: "this page's starting point on Berachain is more than a day old" });
+          if (!booted) return JSON.stringify({ ok: false, kind: 'need-bootstrap', message: '', lightClient: 'berachain' });
+        }
+        return super.verify(chainId, number, hash, response, now);
+      }
+    }
+    let served: unknown = {};
+    const cpUrl = 'https://checkpoint.test/checkpoint.json';
+    const h = await harness({
+      chainId: 80094,
+      world,
+      verifiers: mockModules(world, { anchor: async () => ({ Anchor: Bera as never }) }),
+      options: {
+        checkpointUrl: cpUrl,
+        cometApis: ['https://comet.test'],
+        fetch: ((u: RequestInfo | URL, i?: RequestInit) => {
+          const url = String(u);
+          if (url === cpUrl) return Promise.resolve(new Response(JSON.stringify(served)));
+          if (url === `https://comet.test/commit?height=${newer.height}`) {
+            return Promise.resolve(new Response(JSON.stringify({ result: { signed_header: { commit: { block_id: { hash: newer.hash.slice(2) } } } } })));
+          }
+          return fetch(u, i);
+        }) as typeof fetch,
+      },
+    });
+    try {
+      await expect(h.client.request({ method: 'eth_blockNumber' })).resolves.toBe(toQuantity(100));
+      // A day on: the shipped start is too old; checkpoint.json now has a newer one.
+      world.nowSec = shipped.time + 25 * 3600;
+      world.head(80094, { number: 200, hash: `0x${'02'.repeat(32)}` });
+      served = { berachain: newer };
+      await expect(h.client.request({ method: 'eth_blockNumber' })).resolves.toBe(toQuantity(200));
+      expect(started.filter((s) => s.startsWith('berachain'))).toEqual([`berachain ${shipped.height}`, `berachain ${newer.height}`]);
+      expect(asked).toEqual([
+        [shipped.hash, shipped.height],
+        [newer.hash, newer.height],
+      ]);
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+describe("Berachain's CometBFT APIs", () => {
+  it('are asked by a Berachain client in Node by default, and by no other client', async () => {
+    const { SHIPPED_STARTS, BERA_COMET_APIS } = await import('../src/checkpoint.js');
+    const shipped = SHIPPED_STARTS.berachain;
+    const newer = { height: shipped.height + 20_000, hash: `0x${'cd'.repeat(32)}`, time: shipped.time + 5 * 3600 };
+    const cpUrl = 'https://checkpoint.test/checkpoint.json';
+    const run = async (chainId: number) => {
+      const asked: string[] = [];
+      const world = new World();
+      world.nowSec = shipped.time + 7 * 3600;
+      world.head(chainId, { number: 100, hash: `0x${'01'.repeat(32)}` });
+      const h = await harness({
+        chainId,
+        world,
+        options: {
+          checkpointUrl: cpUrl,
+          fetch: ((u: RequestInfo | URL, i?: RequestInit) => {
+            const url = String(u);
+            if (url === cpUrl) return Promise.resolve(new Response(JSON.stringify({ berachain: newer })));
+            if (BERA_COMET_APIS.some((a) => url.startsWith(a))) {
+              asked.push(url);
+              return Promise.resolve(new Response('{}', { status: 404 }));
+            }
+            return fetch(u, i);
+          }) as typeof fetch,
+        },
+      });
+      try {
+        await h.client.request({ method: 'eth_blockNumber' }).catch(() => undefined);
+      } finally {
+        await h.close();
+      }
+      return asked;
+    };
+    expect(await run(8453)).toEqual([]);
+    const bera = await run(80094);
+    for (const api of BERA_COMET_APIS) expect(bera.some((u) => u.startsWith(api))).toBe(true);
+  });
+
+  it("an injected verifier's failure without a message is still a Willow error", async () => {
+    const { anchorFailure } = await import('../src/anchor.js');
+    const e = anchorFailure({ ok: false, kind: 'rejected' } as never, 'eth_blockNumber');
+    expect(e).toMatchObject({ code: -32098 });
+  });
+});

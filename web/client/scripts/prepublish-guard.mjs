@@ -15,13 +15,15 @@
 //     publish.sh is not exported.
 // (d) The license: package.json says "MIT", LICENSE is the export's MIT license, THIRD-PARTY-NOTICES.md is
 //     packed as the export's root has it, and the export has no LICENSES/.
+// (e) Every packed source map names its sources inside the package (relative): never a path of the machine
+//     that built it.
 //
 // In Willow's repository package.json is private, so npm refuses to publish the repository's copy in any
 // form, a tarball included. `npm pack` there (for local tests) passes while it is private.
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -171,6 +173,29 @@ function license(pkg, files, paths) {
   return problems;
 }
 
+/** (e) */
+function mapSources(paths) {
+  const problems = [];
+  const outside = (s) => /^[a-z][a-z0-9+.-]*:/i.test(s) || posix.isAbsolute(s);
+  for (const p of paths.filter((x) => x.endsWith('.map'))) {
+    let m;
+    try {
+      m = JSON.parse(readFileSync(join(PKG, p), 'utf8'));
+    } catch {
+      problems.push(`${p} is not a source map`);
+      continue;
+    }
+    const root = typeof m.sourceRoot === 'string' ? m.sourceRoot : '';
+    for (const s of Array.isArray(m.sources) ? m.sources.map(String) : []) {
+      if (outside(root) || outside(s) || posix.normalize(posix.join(posix.dirname(p), root, s)).startsWith('..')) {
+        problems.push(`${p} names a source outside the package: ${posix.join(root, s)}`);
+        break;
+      }
+    }
+  }
+  return problems;
+}
+
 const hook = process.env.npm_lifecycle_event ?? '';
 const pkg = JSON.parse(readFileSync(join(PKG, 'package.json'), 'utf8'));
 const { problems, files } = exported(pkg);
@@ -188,5 +213,6 @@ const allowed = allowlist(files);
 const out = paths.filter((p) => !allowed.has(p)).map((p) => `${p} is not on the allowlist`);
 out.push(...denyHits(paths, rx).map((h) => `DENY: ${h}`));
 out.push(...license(pkg, files, paths));
+out.push(...mapSources(paths));
 if (out.length) fail(out);
-console.error(`prepublish-guard: ${paths.length} files from publish.sh's export, dist/ built from it: allowlist, DENY and license checked.`);
+console.error(`prepublish-guard: ${paths.length} files from publish.sh's export, dist/ built from it: allowlist, DENY, license and source maps checked.`);

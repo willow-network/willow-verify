@@ -35,6 +35,8 @@ try {
         paths: { '*': [join(root, 'node_modules/*')] },
         declaration: false,
         sourceMap: true,
+        // The maps name ../../src/<file>, as dist/esm's do, not the temporary copy's path.
+        sourceRoot: '../../src/',
         rootDir: 'src',
         outDir: join(root, 'dist/cjs'),
       },
